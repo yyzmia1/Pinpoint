@@ -39,3 +39,8 @@
 ./gradlew :app:assembleDebug
 ./gradlew :app:assembleRelease
 ```
+
+## CI 与测试版发布
+
+* 每次向 `main` 分支提交代码都会自动触发 [ci-build-release.yml](.github/workflows/ci-build-release.yml) 运行全量单元测试并构建 Debug/Release 测试安装包，结果会更新至 GitHub `nightly` 预发布（Pre-release，不影响设置内的稳定版更新检查）与 Actions Artifacts。
+* 如需让 CI 使用正式发布签名而非调试证书签发测试包，可在仓库 Secrets 中配置：`RELEASE_KEYSTORE_BASE64`、`POCKET_KEYSTORE_PASS`、`POCKET_KEY_ALIAS`、`POCKET_KEY_PASS`。

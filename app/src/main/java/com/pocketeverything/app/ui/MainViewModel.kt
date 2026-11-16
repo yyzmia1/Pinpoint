@@ -109,10 +109,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         refreshModeStatuses()
     }
 
+    private val shizukuBinderDeadListener = Shizuku.OnBinderDeadListener {
+        refreshModeStatuses()
+    }
+
     init {
         runCatching {
             Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
             Shizuku.addBinderReceivedListenerSticky(shizukuBinderListener)
+            Shizuku.addBinderDeadListener(shizukuBinderDeadListener)
         }
 
         refreshModeStatuses()
@@ -169,11 +174,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             _modeStatuses.value = map
 
-            val installed = runCatching {
+            val running = runCatching { Shizuku.pingBinder() && !Shizuku.isPreV11() }.getOrDefault(false)
+            val installed = running || runCatching {
                 app.packageManager.getPackageInfo(SHIZUKU_PACKAGE, 0)
                 true
             }.getOrDefault(false)
-            val running = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
             val granted = running && runCatching {
                 Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
             }.getOrDefault(false)
@@ -214,9 +219,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _messages.tryEmit("Shizuku 服务未运行，请先启动 Shizuku")
                 return
             }
+            if (Shizuku.isPreV11()) {
+                _messages.tryEmit("Shizuku 版本过低（需 v11+），请更新后再试")
+                return
+            }
             if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
                 refreshModeStatuses()
                 indexManager.startFullScan(clearExisting = false)
+            } else if (Shizuku.shouldShowRequestPermissionRationale()) {
+                _messages.tryEmit("请在 Shizuku 应用的授权管理中手动允许 PocketEverything")
+                openShizukuOrDownload()
             } else {
                 Shizuku.requestPermission(SHIZUKU_REQ_CODE)
             }
@@ -403,6 +415,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         runCatching {
             Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener)
             Shizuku.removeBinderReceivedListener(shizukuBinderListener)
+            Shizuku.removeBinderDeadListener(shizukuBinderDeadListener)
         }
         container.shizukuProvider.unbind()
         container.rootProvider.unbind()

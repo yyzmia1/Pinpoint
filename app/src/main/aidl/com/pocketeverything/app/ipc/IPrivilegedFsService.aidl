@@ -13,26 +13,27 @@ interface IPrivilegedFsService {
         in String[] excludedDirNames,
         boolean deduplicateMounts,
         in ParcelFileDescriptor outputFd
-    );
+    ) = 0;
 
     /**
      * Stats directories in batch; returns parallel long[] mtimes (-1 if missing/inaccessible).
      */
-    long[] statDirectories(in String[] dirPaths);
+    long[] statDirectories(in String[] dirPaths) = 1;
 
     /**
      * Copies a protected file into outputFd so the main process can parse or bridge-open it
      * without hitting Binder transaction size limits. Returns bytes written, or negative error code.
      */
-    long copyFileToFd(String path, in ParcelFileDescriptor outputFd, long maxBytes);
+    long copyFileToFd(String path, in ParcelFileDescriptor outputFd, long maxBytes) = 2;
 
     /**
      * Checks whether a path exists and is readable in the privileged context.
      */
-    boolean exists(String path);
+    boolean exists(String path) = 3;
 
     /**
      * Gracefully terminates a Shizuku UserService when requested.
+     * Transaction code 16777115 == FIRST_CALL_TRANSACTION + 16777114 per Shizuku-API spec.
      */
-    void destroy();
+    void destroy() = 16777114;
 }

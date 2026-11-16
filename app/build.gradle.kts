@@ -19,7 +19,7 @@ fun readGitOutput(vararg args: String): String? = try {
 }
 
 val gitCommitCount = readGitOutput("rev-list", "--count", "HEAD")?.toIntOrNull()?.coerceAtLeast(1) ?: 1
-val gitDescribe = readGitOutput("describe", "--tags", "--always")?.removePrefix("v") ?: "1.0.0"
+val gitDescribe = readGitOutput("describe", "--tags", "--match", "v*", "--always")?.removePrefix("v") ?: "1.0.0"
 val gitShortHash = readGitOutput("rev-parse", "--short", "HEAD") ?: "local"
 val buildDateStr = LocalDate.now().toString()
 

@@ -216,6 +216,10 @@ class PrivilegedFileProvider(
                 if (!alive) {
                     return ModeAvailability.Unavailable("Shizuku 服务未运行，请先启动 Shizuku")
                 }
+                val preV11 = runCatching { Shizuku.isPreV11() }.getOrDefault(false)
+                if (preV11) {
+                    return ModeAvailability.Unavailable("Shizuku 版本过低（需 v11 及以上）")
+                }
                 val granted = runCatching {
                     Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
                 }.getOrDefault(false)
