@@ -867,25 +867,7 @@ private fun ModeSheet(
                             )
                         }
                         Spacer(Modifier.width(8.dp))
-                        Box(
-                            Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(availabilityColor(status))
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = when (status) {
-                                is ModeAvailability.Ready -> "可用"
-                                is ModeAvailability.NeedsPermission -> "待授权"
-                                is ModeAvailability.Unavailable -> "未就绪"
-                                null -> "检测中"
-                            },
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                         if (mode == AccessMode.SHIZUKU) {
-                            Spacer(Modifier.width(8.dp))
                             Surface(
                                 onClick = onOpenShizukuGuide,
                                 shape = CircleShape,
@@ -912,7 +894,25 @@ private fun ModeSheet(
                                     )
                                 }
                             }
+                            Spacer(Modifier.width(8.dp))
                         }
+                        Box(
+                            Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(availabilityColor(status))
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = when (status) {
+                                is ModeAvailability.Ready -> "可用"
+                                is ModeAvailability.NeedsPermission -> "待授权"
+                                is ModeAvailability.Unavailable -> "未就绪"
+                                null -> "检测中"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }

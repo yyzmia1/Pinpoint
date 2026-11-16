@@ -264,7 +264,6 @@ fun SettingsScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    ModeDotBadge(status)
                                     Surface(
                                         onClick = onOpenShizukuGuide,
                                         shape = CircleShape,
@@ -283,6 +282,7 @@ fun SettingsScreen(
                                             )
                                         }
                                     }
+                                    ModeDotBadge(status)
                                 }
                             }
                             else -> ModeDotBadge(status)
