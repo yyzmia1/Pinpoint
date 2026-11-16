@@ -81,6 +81,7 @@ class MainActivity : ComponentActivity() {
                 val indexProgress by viewModel.indexProgress.collectAsState()
                 val updateState by viewModel.updateState.collectAsState()
                 val previewPayload by viewModel.previewPayload.collectAsState()
+                val previewLoadingItem by viewModel.previewLoadingItem.collectAsState()
                 val detailItem by viewModel.detailItem.collectAsState()
 
                 var currentPage by remember { mutableStateOf(AppPage.SEARCH) }
@@ -124,6 +125,7 @@ class MainActivity : ComponentActivity() {
                                 onItemLongPress = { viewModel.showDetail(it) },
                                 onSelectMode = { viewModel.switchMode(it) },
                                 onQuickSync = { viewModel.triggerQuickSync() },
+                                onFullScan = { viewModel.triggerFullRebuild(clearFirst = false) },
                                 onOpenSettings = { currentPage = AppPage.SETTINGS },
                                 onOpenShizukuGuide = {
                                     previousPage = AppPage.SEARCH
@@ -201,12 +203,16 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
-                previewPayload?.let { payload ->
+                if (previewPayload != null || previewLoadingItem != null) {
                     ReaderPreviewSheet(
-                        payload = payload,
+                        payload = previewPayload,
+                        loadingItem = previewLoadingItem,
                         onDismiss = { viewModel.closePreview() },
-                        onOpenExternal = { viewModel.openExternally(payload.item) },
-                        onCopyPath = { viewModel.copyText("文件路径", payload.item.path) }
+                        onNavigateBack = { viewModel.navigatePreviewBack() },
+                        onOpenChild = { child -> viewModel.openPreview(child, pushCurrentToBackStack = true) },
+                        onRefreshFolder = { folder -> viewModel.refreshDirectory(folder.path) },
+                        onOpenExternal = { target -> viewModel.openExternally(target) },
+                        onCopyPath = { target -> viewModel.copyText("文件路径", target.path) }
                     )
                 }
 

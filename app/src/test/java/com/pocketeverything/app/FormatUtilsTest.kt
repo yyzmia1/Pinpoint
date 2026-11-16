@@ -34,5 +34,8 @@ class FormatUtilsTest {
         assertTrue(FormatUtils.formatSmartDate(todayMorning, now).startsWith("今天"))
         assertTrue(FormatUtils.formatSmartDate(yesterdayEvening, now).startsWith("昨天"))
         assertEquals("2025-03-01", FormatUtils.formatSmartDate(lastYear, now))
+        assertEquals("--:--", FormatUtils.formatDuration(0L))
+        assertEquals("03:25", FormatUtils.formatDuration(205_000L))
+        assertEquals("1:01:05", FormatUtils.formatDuration(3_665_000L))
     }
 }

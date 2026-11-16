@@ -40,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -73,13 +74,16 @@ fun ShizukuGuideScreen(
     }
 
     val allReady = status.isInstalled && status.isServiceRunning && status.isPermissionGranted
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val backdrop = if (isDark) MaterialTheme.colorScheme.background else MaterialTheme.colorScheme.surfaceContainerLow
+    val cardColor = if (isDark) MaterialTheme.colorScheme.surfaceContainer else MaterialTheme.colorScheme.surface
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = backdrop,
         topBar = {
             TopAppBar(
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background
+                    containerColor = backdrop
                 ),
                 title = { Text("Shizuku 使用向导", style = MaterialTheme.typography.titleLarge) },
                 navigationIcon = {
@@ -109,6 +113,7 @@ fun ShizukuGuideScreen(
                 title = "安装 Shizuku",
                 completed = status.isInstalled,
                 active = !status.isInstalled,
+                cardColor = cardColor,
                 body = if (status.isInstalled) {
                     "已检测到本机安装 Shizuku。"
                 } else {
@@ -134,6 +139,7 @@ fun ShizukuGuideScreen(
                 title = "启动 Shizuku 服务",
                 completed = status.isServiceRunning,
                 active = status.isInstalled && !status.isServiceRunning,
+                cardColor = cardColor,
                 body = if (status.isServiceRunning) {
                     "Shizuku 后台服务正在运行。"
                 } else {
@@ -157,6 +163,7 @@ fun ShizukuGuideScreen(
                 title = "授予本应用权限",
                 completed = status.isPermissionGranted,
                 active = status.isServiceRunning && !status.isPermissionGranted,
+                cardColor = cardColor,
                 body = if (status.isPermissionGranted) {
                     "已获得 Shizuku 授权，可切换至 Shizuku 模式并开始扫描。"
                 } else {
@@ -189,18 +196,19 @@ private fun WizardStepCard(
     title: String,
     completed: Boolean,
     active: Boolean,
+    cardColor: Color,
     body: String,
     action: @Composable () -> Unit
 ) {
     val border = when {
-        completed -> BorderStroke(1.dp, Emerald400.copy(alpha = 0.5f))
-        active -> BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.6f))
-        else -> BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
+        completed -> BorderStroke(1.dp, Emerald400.copy(alpha = 0.45f))
+        active -> BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.55f))
+        else -> null
     }
 
     Surface(
         shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        color = cardColor,
         border = border,
         modifier = Modifier.fillMaxWidth()
     ) {

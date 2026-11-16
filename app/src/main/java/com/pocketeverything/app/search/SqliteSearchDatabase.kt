@@ -513,6 +513,41 @@ class SqliteSearchDatabase(
         }
     }
 
+    /**
+     * Lists indexed direct children of [parentPath], folders first, sorted case-insensitively by name.
+     */
+    fun listChildren(parentPath: String, limit: Int = 250): List<SearchResultItem> {
+        val safeLimit = limit.coerceIn(1, 1000)
+        return readLock.withLock {
+            val out = ArrayList<SearchResultItem>()
+            val sql = """
+                SELECT id, path, parent_path, name, ext, size, mtime, is_dir, access_mode, tier2_status, tier2_error
+                FROM files_meta
+                WHERE parent_path = ?
+                ORDER BY is_dir DESC, name COLLATE NOCASE ASC
+                LIMIT ?
+            """.trimIndent()
+            readConn.prepare(sql).use { stmt ->
+                stmt.bindText(1, parentPath)
+                stmt.bindLong(2, safeLimit.toLong())
+                while (stmt.step()) {
+                    val row = readMetaRow(stmt)
+                    out.add(
+                        toSearchResultItem(
+                            row = row,
+                            highlightRules = emptyList(),
+                            rawBody = null,
+                            tier1NameHit = false,
+                            tier1PathHit = false,
+                            tier2Hit = false
+                        )
+                    )
+                }
+            }
+            out
+        }
+    }
+
     fun getDirSnapshots(paths: List<String>): Map<String, Long> {
         if (paths.isEmpty()) return emptyMap()
         return readLock.withLock {

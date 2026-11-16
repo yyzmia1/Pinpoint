@@ -79,18 +79,16 @@ fun FileDetailDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    if (!item.isDir) {
-                        Button(
-                            onClick = {
-                                onDismiss()
-                                onPreview()
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("内置预览")
-                        }
+                    Button(
+                        onClick = {
+                            onDismiss()
+                            onPreview()
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (item.isDir) "浏览子项" else "内置预览")
                     }
                     Button(
                         onClick = {

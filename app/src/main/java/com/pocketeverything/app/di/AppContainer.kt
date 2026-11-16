@@ -10,6 +10,7 @@ import com.pocketeverything.app.indexer.TwoTierIndexManager
 import com.pocketeverything.app.parser.ExtractorDispatcher
 import com.pocketeverything.app.search.AccessMode
 import com.pocketeverything.app.search.SqliteSearchDatabase
+import com.pocketeverything.app.ui.preview.FilePreviewLoader
 import java.io.File
 
 class AppContainer(context: Context) {
@@ -53,6 +54,15 @@ class AppContainer(context: Context) {
     val fileOpener: FileOpener by lazy {
         FileOpener(
             context = appContext,
+            providerResolver = ::providerFor
+        )
+    }
+
+    val previewLoader: FilePreviewLoader by lazy {
+        FilePreviewLoader(
+            context = appContext,
+            db = database,
+            extractorDispatcher = extractorDispatcher,
             providerResolver = ::providerFor
         )
     }

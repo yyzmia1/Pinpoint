@@ -23,6 +23,19 @@ object FormatUtils {
         return String.format(Locale.US, "%.2f GB", gb)
     }
 
+    fun formatDuration(durationMs: Long): String {
+        if (durationMs <= 0L) return "--:--"
+        val totalSec = durationMs / 1000L
+        val h = totalSec / 3600L
+        val m = (totalSec % 3600L) / 60L
+        val s = totalSec % 60L
+        return if (h > 0L) {
+            String.format(Locale.US, "%d:%02d:%02d", h, m, s)
+        } else {
+            String.format(Locale.US, "%02d:%02d", m, s)
+        }
+    }
+
     fun formatDateTime(epochMillis: Long): String {
         if (epochMillis <= 0L) return "--"
         return runCatching {

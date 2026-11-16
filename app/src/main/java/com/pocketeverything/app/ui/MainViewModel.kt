@@ -15,17 +15,16 @@ import com.pocketeverything.app.filter.FilterConfig
 import com.pocketeverything.app.fs.ModeAvailability
 import com.pocketeverything.app.indexer.IndexProgressState
 import com.pocketeverything.app.indexer.RealtimeMonitorService
-import com.pocketeverything.app.parser.ExtractionResult
 import com.pocketeverything.app.search.AccessMode
 import com.pocketeverything.app.search.QuerySyntaxParser
 import com.pocketeverything.app.search.QuickScope
 import com.pocketeverything.app.search.SearchResponse
 import com.pocketeverything.app.search.SearchResultItem
-import com.pocketeverything.app.search.SnippetHighlighter
 import com.pocketeverything.app.search.SortOrder
-import com.pocketeverything.app.search.Tier2Status
+import com.pocketeverything.app.ui.preview.PreviewPayload
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -38,13 +37,6 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
-
-data class PreviewPayload(
-    val item: SearchResultItem,
-    val fullText: String,
-    val matchRanges: List<IntRange>,
-    val statusNote: String? = null
-)
 
 data class ShizukuLiveStatus(
     val isInstalled: Boolean = false,
@@ -86,6 +78,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _previewPayload = MutableStateFlow<PreviewPayload?>(null)
     val previewPayload: StateFlow<PreviewPayload?> = _previewPayload.asStateFlow()
+
+    private val _previewLoadingItem = MutableStateFlow<SearchResultItem?>(null)
+    val previewLoadingItem: StateFlow<SearchResultItem?> = _previewLoadingItem.asStateFlow()
+
+    private val previewHistory = ArrayDeque<SearchResultItem>()
+    private var previewLoadJob: Job? = null
 
     private val _detailItem = MutableStateFlow<SearchResultItem?>(null)
     val detailItem: StateFlow<SearchResultItem?> = _detailItem.asStateFlow()
@@ -316,68 +314,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onItemClicked(item: SearchResultItem) {
         if (item.isDir) {
-            _detailItem.value = item
+            openPreview(item)
             return
         }
-        val preferPreview = settings.value.openContentHitsInPreview
-        val isDocExt = item.ext in setOf("txt", "md", "markdown", "docx", "pdf", "doc")
-        if (preferPreview && (item.snippets.isNotEmpty() || (isDocExt && item.tier2Status == Tier2Status.INDEXED))) {
+        if (settings.value.openContentHitsInPreview || item.snippets.isNotEmpty()) {
             openPreview(item)
         } else {
             openExternally(item)
         }
     }
 
-    fun openPreview(item: SearchResultItem) {
-        viewModelScope.launch {
+    fun openPreview(item: SearchResultItem, pushCurrentToBackStack: Boolean = false) {
+        if (!pushCurrentToBackStack) {
+            previewHistory.clear()
+        } else {
+            _previewPayload.value?.item?.let { current ->
+                if (current.path != item.path) {
+                    previewHistory.addLast(current)
+                }
+            }
+        }
+        launchPreviewLoad(item)
+    }
+
+    fun navigatePreviewBack() {
+        val prev = previewHistory.removeLastOrNull() ?: return
+        launchPreviewLoad(prev)
+    }
+
+    private fun launchPreviewLoad(item: SearchResultItem) {
+        previewLoadJob?.cancel()
+        _previewLoadingItem.value = item
+        previewLoadJob = viewModelScope.launch {
             val rules = QuerySyntaxParser.parse(_query.value).positiveHighlightRules
-            if (item.ext == "doc") {
-                _previewPayload.value = PreviewPayload(
-                    item = item,
-                    fullText = "旧版二进制 .doc 暂不支持内置正文预览，建议转换为 .docx 或 PDF，或点击下方“用其他应用打开”。",
-                    matchRanges = emptyList(),
-                    statusNote = "旧版 .doc 暂不支持正文索引"
-                )
-                return@launch
-            }
-
-            val cachedText = withContext(Dispatchers.IO) { db.getRawDocumentText(item.id) }
-            if (cachedText != null) {
-                val ranges = SnippetHighlighter.findMatchRangesForRules(cachedText, rules, maxMatches = 500)
-                _previewPayload.value = PreviewPayload(item, cachedText, ranges)
-                return@launch
-            }
-
-            val liveResult = withContext(Dispatchers.IO) {
-                val provider = container.providerFor(item.accessMode)
-                val maxBytes = settings.value.filterConfig.maxBytesForExtensionOrDefault(item.ext)
-                runCatching {
-                    provider.openFileStream(item.path, maxBytes) { input ->
-                        container.extractorDispatcher.extractByExtension(item.ext, input, maxBytes)
-                    }
-                }.getOrElse {
-                    ExtractionResult.Failed(Tier2Status.ERROR, it.message)
-                }
-            }
-
-            when (liveResult) {
-                is ExtractionResult.Success -> {
-                    val ranges = SnippetHighlighter.findMatchRangesForRules(liveResult.text, rules, maxMatches = 500)
-                    _previewPayload.value = PreviewPayload(item, liveResult.text, ranges)
-                }
-                is ExtractionResult.Failed -> {
-                    _previewPayload.value = PreviewPayload(
-                        item = item,
-                        fullText = "无法内置预览文本（${liveResult.status.label} ${liveResult.message.orEmpty()}）。\n\n可点击下方“用其他应用打开”。",
-                        matchRanges = emptyList(),
-                        statusNote = liveResult.status.label
-                    )
-                }
-            }
+            val payload = container.previewLoader.load(
+                item = item,
+                rules = rules,
+                filterConfig = settings.value.filterConfig,
+                canNavigateBack = previewHistory.isNotEmpty()
+            )
+            _previewPayload.value = payload
+            _previewLoadingItem.value = null
         }
     }
 
     fun closePreview() {
+        previewLoadJob?.cancel()
+        previewHistory.clear()
+        _previewLoadingItem.value = null
         _previewPayload.value = null
     }
 
@@ -413,15 +397,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun copyText(label: String, text: String) {
         container.fileOpener.copyToClipboard(label, text)
         _messages.tryEmit("已复制：$text")
-    }
-
-    private fun FilterConfig.maxBytesForExtensionOrDefault(ext: String): Long {
-        return when (ext.lowercase()) {
-            "txt", "md", "markdown" -> maxTxtMdBytes
-            "docx" -> maxDocxBytes
-            "pdf" -> maxPdfBytes
-            else -> 10L * 1024L * 1024L
-        }
     }
 
     override fun onCleared() {

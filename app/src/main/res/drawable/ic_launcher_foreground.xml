@@ -1,16 +1,95 @@
 <?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+
+    <!-- Soft drop shadow under document sheet -->
+    <path
+        android:fillAlpha="0.24"
+        android:fillColor="#020617"
+        android:pathData="M37,32 L59,32 L68,41 L68,72 A5,5 0 0,1 63,77 L37,77 A5,5 0 0,1 32,72 L32,37 A5,5 0 0,1 37,32 Z" />
+
+    <!-- Folded-corner document sheet -->
+    <path android:pathData="M36,29 L58.5,29 L68,38.5 L68,69 A5,5 0 0,1 63,74 L36,74 A5,5 0 0,1 31,69 L31,34 A5,5 0 0,1 36,29 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="66"
+                android:endY="74"
+                android:startX="32"
+                android:startY="29"
+                android:type="linear">
+                <item
+                    android:color="#FFFFFFFF"
+                    android:offset="0" />
+                <item
+                    android:color="#FFE2E8F0"
+                    android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Document dog-ear fold -->
+    <path
+        android:fillColor="#CBD5E1"
+        android:pathData="M58.5,29 L68,38.5 L60.5,38.5 A2,2 0 0,1 58.5,36.5 Z" />
+
+    <!-- Abstract text lines inside document -->
+    <path
+        android:fillColor="#94A3B8"
+        android:pathData="M39,41 H53 A1.5,1.5 0 0,1 53,44 H39 A1.5,1.5 0 0,1 39,41 Z" />
     <path
         android:fillColor="#38BDF8"
-        android:pathData="M48,30a18,18 0 1,0 0,36a18,18 0 1,0 0,-36zM48,37a11,11 0 1,1 0,22a11,11 0 1,1 0,-22z" />
+        android:pathData="M39,48 H50 A1.5,1.5 0 0,1 50,51 H39 A1.5,1.5 0 0,1 39,48 Z" />
     <path
-        android:fillColor="#F8FAFC"
-        android:pathData="M61.5,58.5l14,14l-5,5l-14,-14z" />
+        android:fillColor="#CBD5E1"
+        android:pathData="M39,55 H45 A1.5,1.5 0 0,1 45,58 H39 A1.5,1.5 0 0,1 39,55 Z" />
+
+    <!-- Subtle optical halo separating magnifier from document -->
     <path
-        android:fillColor="#F59E0B"
-        android:pathData="M46,41l6,0l-3,7l5,0l-8,10l2,-7l-5,0z" />
+        android:fillAlpha="0.32"
+        android:fillColor="#0B1221"
+        android:pathData="M61,44.5 A17,17 0 1,0 61,78.5 A17,17 0 1,0 61,44.5 Z" />
+
+    <!-- Magnifier capsule handle -->
+    <path
+        android:pathData="M69.5,68.5 L77.5,76.5"
+        android:strokeColor="#38BDF8"
+        android:strokeLineCap="round"
+        android:strokeWidth="6.2" />
+
+    <!-- Glass lens body -->
+    <path android:pathData="M60,46.5 A12.5,12.5 0 1,0 60,71.5 A12.5,12.5 0 1,0 60,46.5 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="69"
+                android:endY="70"
+                android:startX="50"
+                android:startY="48"
+                android:type="linear">
+                <item
+                    android:color="#E60C4A6E"
+                    android:offset="0" />
+                <item
+                    android:color="#F0082F49"
+                    android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Crisp sky-blue optical rim -->
+    <path
+        android:pathData="M60,46.5 A12.5,12.5 0 1,0 60,71.5 A12.5,12.5 0 1,0 60,46.5 Z"
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="4.2" />
+
+    <!-- Specular lens glint -->
+    <path
+        android:pathData="M53,56.5 A8,8 0 0,1 59.5,51"
+        android:strokeAlpha="0.88"
+        android:strokeColor="#E0F2FE"
+        android:strokeLineCap="round"
+        android:strokeWidth="2.2" />
 </vector>

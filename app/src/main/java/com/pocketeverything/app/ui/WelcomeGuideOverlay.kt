@@ -1,6 +1,7 @@
 package com.pocketeverything.app.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,6 +15,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -27,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -76,8 +82,8 @@ fun WelcomeGuideOverlay(
             target = targets.modePill
         ),
         GuideStep(
-            title = "范围筛选与排序",
-            body = "横向标签可快速限定文件夹、文件、文档正文或具体格式；点击列表项可预览或打开，长按查看详情。",
+            title = "范围筛选与即时预览",
+            body = "横向标签可筛选文件夹、文件或文档格式；点击任意文件或文件夹即可应用内快速预览，长按查看详细属性。",
             target = targets.scopePills
         ),
         GuideStep(
@@ -132,13 +138,15 @@ fun WelcomeGuideOverlay(
         }
 
         val target = current.target
+        val minTopPx = with(density) { 96.dp.toPx() }.roundToInt()
+        val maxBottomTopPx = (maxHeightPx - with(density) { 260.dp.toPx() }).roundToInt().coerceAtLeast(minTopPx)
         val placeBelow = target == null || target.bottom < maxHeightPx * 0.55f
         val topOffsetPx = if (target == null) {
-            (maxHeightPx * 0.34f).roundToInt()
+            (maxHeightPx * 0.34f).roundToInt().coerceIn(minTopPx, maxBottomTopPx)
         } else if (placeBelow) {
-            (target.bottom + with(density) { 18.dp.toPx() }).roundToInt()
+            (target.bottom + with(density) { 16.dp.toPx() }).roundToInt().coerceIn(minTopPx, maxBottomTopPx)
         } else {
-            (target.top - with(density) { 210.dp.toPx() }).roundToInt().coerceAtLeast(40)
+            (target.top - with(density) { 220.dp.toPx() }).roundToInt().coerceIn(minTopPx, maxBottomTopPx)
         }
 
         Surface(
@@ -148,9 +156,10 @@ fun WelcomeGuideOverlay(
             shadowElevation = 8.dp,
             modifier = Modifier
                 .fillMaxWidth()
+                .statusBarsPadding()
+                .navigationBarsPadding()
                 .padding(horizontal = 20.dp)
                 .offset { IntOffset(0, topOffsetPx) }
-                .navigationBarsPadding()
         ) {
             Column(modifier = Modifier.padding(18.dp)) {
                 Row(
@@ -160,13 +169,24 @@ fun WelcomeGuideOverlay(
                 ) {
                     Text(
                         text = current.title,
-                        style = MaterialTheme.typography.titleLarge
+                        style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.weight(1f)
                     )
-                    Text(
-                        text = "${stepIndex + 1}/${steps.size}",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    Spacer(Modifier.width(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+                        steps.indices.forEach { idx ->
+                            val activeDot = idx == stepIndex
+                            Box(
+                                modifier = Modifier
+                                    .size(width = if (activeDot) 14.dp else 6.dp, height = 6.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (activeDot) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.outlineVariant
+                                    )
+                            )
+                        }
+                    }
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(

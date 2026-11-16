@@ -283,4 +283,22 @@ class SqliteSearchDatabaseAndBenchmarkTest {
             assertTrue("Body query latency should be fast (<150ms), was ${q4.elapsedMs}ms", q4.elapsedMs < 150)
         }
     }
+
+    @Test
+    fun `listChildren returns direct children folders first sorted case-insensitively`() {
+        val now = System.currentTimeMillis()
+        SqliteSearchDatabase(":memory:").use { db ->
+            db.upsertFileBatch(
+                listOf(
+                    FileUpsertEntry("/storage/emulated/0/Download/zeta.json", "/storage/emulated/0/Download", "zeta.json", "json", 128L, now, false, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/Download/subB", "/storage/emulated/0/Download", "subB", "", 0L, now, true, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/Download/alpha.png", "/storage/emulated/0/Download", "alpha.png", "png", 4096L, now, false, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/Download/subA", "/storage/emulated/0/Download", "subA", "", 0L, now, true, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/Download/subA/nested.txt", "/storage/emulated/0/Download/subA", "nested.txt", "txt", 16L, now, false, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE)
+                )
+            )
+            val children = db.listChildren("/storage/emulated/0/Download")
+            assertEquals(listOf("subA", "subB", "alpha.png", "zeta.json"), children.map { it.name })
+        }
+    }
 }

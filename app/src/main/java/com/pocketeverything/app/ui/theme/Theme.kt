@@ -40,20 +40,20 @@ private val DarkColors = darkColorScheme(
     surfaceVariant = Slate800,
     onSurfaceVariant = Color(0xFF94A3B8),
     surfaceTint = Slate950,
-    surfaceContainerLowest = Color(0xFF05080F),
-    surfaceContainerLow = Slate900,
+    surfaceContainerLowest = Color(0xFF060911),
+    surfaceContainerLow = Color(0xFF0B111E),
     surfaceContainer = Color(0xFF131C2E),
-    surfaceContainerHigh = Slate800,
+    surfaceContainerHigh = Color(0xFF1B263B),
     surfaceContainerHighest = Slate700,
     outline = Slate700,
-    outlineVariant = Color(0xFF1A2335)
+    outlineVariant = Color(0xFF1D283E)
 )
 
 private val LightColors = lightColorScheme(
     primary = Sky600,
     onPrimary = Color.White,
     primaryContainer = Color(0xFFE0F2FE),
-    onPrimaryContainer = Color(0xFF0C4A6E),
+    onPrimaryContainer = Color(0xFF0369A1),
     secondary = Color(0xFFD97706),
     onSecondary = Color.White,
     secondaryContainer = Color(0xFFFEF3C7),
@@ -67,12 +67,12 @@ private val LightColors = lightColorScheme(
     onSurfaceVariant = Color(0xFF64748B),
     surfaceTint = Color.White,
     surfaceContainerLowest = Color.White,
-    surfaceContainerLow = Color(0xFFF8FAFC),
-    surfaceContainer = Color(0xFFF1F5F9),
-    surfaceContainerHigh = Color(0xFFF1F5F9),
+    surfaceContainerLow = Color(0xFFF6F8FB),
+    surfaceContainer = Color(0xFFF1F4F9),
+    surfaceContainerHigh = Color(0xFFE9EEF5),
     surfaceContainerHighest = Color(0xFFE2E8F0),
     outline = Color(0xFFCBD5E1),
-    outlineVariant = Color(0xFFEEF2F6)
+    outlineVariant = Color(0xFFE8EDF4)
 )
 
 private val AppTypography = Typography(
