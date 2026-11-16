@@ -36,11 +36,13 @@ class FileOpener(
 
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, mime)
+            clipData = ClipData.newRawUri("", uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         withContext(Dispatchers.Main) {
             context.startActivity(Intent.createChooser(intent, "选择打开方式").apply {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             })
         }
@@ -53,11 +55,13 @@ class FileOpener(
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = mime
             putExtra(Intent.EXTRA_STREAM, uri)
+            clipData = ClipData.newRawUri("", uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         withContext(Dispatchers.Main) {
             context.startActivity(Intent.createChooser(intent, "分享文件").apply {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             })
         }
@@ -66,7 +70,9 @@ class FileOpener(
     private suspend fun resolveShareableUri(item: SearchResultItem): Uri {
         val rawFile = File(item.path)
         if (rawFile.canRead()) {
-            return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", rawFile)
+            runCatching {
+                FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", rawFile)
+            }.getOrNull()?.let { return it }
         }
         if (item.isDir) {
             error("系统文件管理器不支持直接打开受限目录，已为您准备路径复制")

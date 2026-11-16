@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -594,7 +595,23 @@ fun SettingsScreen(
             onDismissRequest = onDismissUpdateDialog,
             title = { Text("发现新版本 ${info.tagName}") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                val headingColor = MaterialTheme.colorScheme.onSurface
+                val codeBg = MaterialTheme.colorScheme.surfaceContainerHigh
+                val codeFg = MaterialTheme.colorScheme.primary
+                val renderedNotes = remember(info.releaseNotes, headingColor, codeBg, codeFg) {
+                    FormatUtils.renderMarkdown(
+                        markdown = info.releaseNotes.ifBlank { "包含性能改进与问题修复。" },
+                        headingColor = headingColor,
+                        codeBg = codeBg,
+                        codeFg = codeFg
+                    )
+                }
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     if (info.apkSizeBytes > 0L) {
                         Text(
                             "安装包大小：${FormatUtils.formatBytes(info.apkSizeBytes)}",
@@ -603,7 +620,7 @@ fun SettingsScreen(
                         )
                     }
                     Text(
-                        text = info.releaseNotes.ifBlank { "包含性能改进与问题修复。" },
+                        text = renderedNotes,
                         style = MaterialTheme.typography.bodySmall
                     )
                 }

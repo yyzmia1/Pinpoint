@@ -29,9 +29,10 @@ object UpdateChecker {
         currentVersion: String,
         timeoutMs: Int = 8000
     ): UpdateCheckState {
+        var conn: HttpURLConnection? = null
         return try {
             val apiUrl = "https://api.github.com/repos/$repoSlug/releases/latest"
-            val conn = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
+            conn = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = timeoutMs
                 readTimeout = timeoutMs
@@ -46,7 +47,6 @@ object UpdateChecker {
                 return UpdateCheckState.Error("GitHub 返回状态码 $code")
             }
             val body = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            conn.disconnect()
 
             val info = parseReleaseJson(body)
                 ?: return UpdateCheckState.Error("无法解析版本信息")
@@ -58,6 +58,8 @@ object UpdateChecker {
             }
         } catch (t: Throwable) {
             UpdateCheckState.Error(t.message ?: "网络连接失败")
+        } finally {
+            conn?.disconnect()
         }
     }
 

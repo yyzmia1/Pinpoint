@@ -66,11 +66,11 @@ object BinaryTreeStreamCodec {
         }
     }
 
-    fun readStream(
+    suspend fun readStream(
         rawIn: InputStream,
         accessMode: AccessMode,
         batchSize: Int = 1500,
-        onBatch: (List<ScannedFileRecord>) -> Unit
+        onBatch: suspend (List<ScannedFileRecord>) -> Unit
     ): Int {
         val inp = DataInputStream(BufferedInputStream(rawIn, 65536))
         var totalCount = 0

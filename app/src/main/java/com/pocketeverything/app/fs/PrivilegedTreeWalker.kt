@@ -44,9 +44,8 @@ object PrivilegedTreeWalker {
                 if (!visitedInodes.add(key)) continue
             }
 
-            val children = runCatching { File(currentPath).listFiles() }.getOrNull() ?: continue
-            for (child in children) {
-                val childName = child.name
+            val children = runCatching { File(currentPath).list() }.getOrNull() ?: continue
+            for (childName in children) {
                 if (childName == "." || childName == "..") continue
                 val childPath = if (currentPath == "/") "/$childName" else "$currentPath/$childName"
 

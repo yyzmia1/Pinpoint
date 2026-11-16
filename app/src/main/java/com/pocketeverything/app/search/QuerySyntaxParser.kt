@@ -506,7 +506,7 @@ object QuerySyntaxParser {
 
         private fun parseDateModifiedFilter(expr: String): QueryNode.DateModifiedFilter? {
             val s = expr.trim().lowercase()
-            val today = LocalDate.ofInstant(java.time.Instant.ofEpochMilli(nowMillis), zoneId)
+            val today = java.time.Instant.ofEpochMilli(nowMillis).atZone(zoneId).toLocalDate()
             val startOfToday = today.atStartOfDay(zoneId).toInstant().toEpochMilli()
             val endOfToday = today.plusDays(1).atStartOfDay(zoneId).toInstant().toEpochMilli() - 1
 

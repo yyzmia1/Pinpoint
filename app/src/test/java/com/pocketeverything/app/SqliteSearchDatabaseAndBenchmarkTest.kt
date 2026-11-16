@@ -333,4 +333,30 @@ class SqliteSearchDatabaseAndBenchmarkTest {
             assertEquals(0, db.search("content:预算").items.size)
         }
     }
+
+    @Test
+    fun `pruneDirectorySubtree preserves folder record isolates underscores and handles corrupt zlib safely`() {
+        val now = System.currentTimeMillis()
+        val qqDir = "/storage/emulated/0/Tencent/QQfile_recv"
+        val qqSibling = "/storage/emulated/0/Tencent/QQfileArecv/keep.txt"
+        val qqChild = "/storage/emulated/0/Tencent/QQfile_recv/deleted.txt"
+        SqliteSearchDatabase(":memory:").use { db ->
+            db.upsertFileBatch(
+                listOf(
+                    FileUpsertEntry(qqDir, "/storage/emulated/0/Tencent", "QQfile_recv", "", 0L, now, true, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry(qqChild, qqDir, "deleted.txt", "txt", 10L, now, false, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry(qqSibling, "/storage/emulated/0/Tencent/QQfileArecv", "keep.txt", "txt", 10L, now, false, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE)
+                )
+            )
+            // seenUnderDir does NOT contain qqDir or qqSibling; only qqChild should be pruned
+            val pruned = db.pruneDirectorySubtree(qqDir, emptySet())
+            assertEquals(1, pruned)
+            assertEquals(1, db.search("name:QQfile_recv type:folder").items.size)
+            assertEquals(1, db.search("name:keep.txt").items.size)
+            assertEquals(0, db.search("name:deleted.txt").items.size)
+
+            // Corrupt zlib blob must return empty string safely without looping or throwing
+            assertEquals("", SqliteSearchDatabase.decompressUtf8(byteArrayOf(1, 2, 3, 4, 5)))
+        }
+    }
 }

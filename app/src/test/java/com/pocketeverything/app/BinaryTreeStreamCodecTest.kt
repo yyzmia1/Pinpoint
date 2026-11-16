@@ -3,6 +3,7 @@ package com.pocketeverything.app
 import com.pocketeverything.app.fs.BinaryTreeStreamCodec
 import com.pocketeverything.app.fs.ScannedFileRecord
 import com.pocketeverything.app.search.AccessMode
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.io.PipedInputStream
@@ -33,8 +34,10 @@ class BinaryTreeStreamCodecTest {
         }
 
         val collected = ArrayList<ScannedFileRecord>(5000)
-        val count = BinaryTreeStreamCodec.readStream(pipedIn, AccessMode.ROOT, batchSize = 700) { batch ->
-            collected.addAll(batch)
+        val count = runBlocking {
+            BinaryTreeStreamCodec.readStream(pipedIn, AccessMode.ROOT, batchSize = 700) { batch ->
+                collected.addAll(batch)
+            }
         }
         writerThread.join()
 

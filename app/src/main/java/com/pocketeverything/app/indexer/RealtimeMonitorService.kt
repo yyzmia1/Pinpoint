@@ -59,6 +59,10 @@ class RealtimeMonitorService : Service() {
         return START_NOT_STICKY
     }
 
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        runCatching { stopSelf() }
+    }
+
     override fun onDestroy() {
         observers.forEach { runCatching { it.stopWatching() } }
         observers.clear()

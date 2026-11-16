@@ -103,9 +103,9 @@ class TwoTierIndexManager(
         }
     }
 
-    fun startQuickHotDirsRefresh() {
+    fun startQuickHotDirsRefresh(): Job {
         tier1Job?.cancel()
-        tier1Job = scope.launch {
+        val job = scope.launch {
             tier1Mutex.withLock {
                 try {
                     val settings = settingsRepo.settings.value
@@ -136,6 +136,7 @@ class TwoTierIndexManager(
                         for (dir in dirtyDirs) {
                             if (!isActive) break
                             val seenInDir = HashSet<String>(512)
+                            seenInDir.add(dir)
                             scannedTotal += provider.scanDirectories(listOf(dir), filter) { batch ->
                                 for (r in batch) seenInDir.add(r.path)
                                 val entries = batch.map { it.toUpsertEntry(filter) }
@@ -169,6 +170,8 @@ class TwoTierIndexManager(
                 }
             }
         }
+        tier1Job = job
+        return job
     }
 
     fun startFullScan(clearExisting: Boolean = false) {
@@ -266,6 +269,7 @@ class TwoTierIndexManager(
                     if (provider.checkAvailability() !is ModeAvailability.Ready) return@withLock
                     val filter = FilterEngine(settings.filterConfig)
                     val seen = HashSet<String>(256)
+                    seen.add(dirPath)
                     provider.scanDirectories(listOf(dirPath), filter) { batch ->
                         for (r in batch) seen.add(r.path)
                         db.upsertFileBatch(batch.map { it.toUpsertEntry(filter) })

@@ -4,14 +4,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.sp
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 object FormatUtils {
-    private val dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.getDefault())
+    private val dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.ROOT)
 
     fun formatBytes(bytes: Long): String {
         if (bytes < 1024L) return "$bytes B"
@@ -108,6 +111,94 @@ object FormatUtils {
                     )
                 }
             }
+        }
+    }
+
+    /**
+     * Lightweight Markdown-to-AnnotatedString renderer for GitHub release notes:
+     * supports #/##/### headings, bullet/numbered lists, **bold**, `inline code`, and [label](url).
+     */
+    fun renderMarkdown(
+        markdown: String,
+        headingColor: Color = Color.Unspecified,
+        codeBg: Color = Color(0x22888888),
+        codeFg: Color = Color.Unspecified
+    ): AnnotatedString {
+        if (markdown.isBlank()) return AnnotatedString("")
+        val lines = markdown.replace("\r\n", "\n").trim().split('\n')
+        return buildAnnotatedString {
+            lines.forEachIndexed { idx, rawLine ->
+                if (idx > 0) append('\n')
+                val trimmed = rawLine.trimStart()
+                val indentLevel = ((rawLine.length - trimmed.length) / 2).coerceIn(0, 3)
+                when {
+                    trimmed.startsWith("### ") || trimmed.startsWith("## ") || trimmed.startsWith("# ") -> {
+                        val content = trimmed.dropWhile { it == '#' }.trimStart()
+                        withStyle(
+                            SpanStyle(
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = if (trimmed.startsWith("### ")) 14.sp else 15.sp,
+                                color = headingColor
+                            )
+                        ) {
+                            appendMarkdownInline(content, codeBg, codeFg)
+                        }
+                    }
+                    trimmed.startsWith("* ") || trimmed.startsWith("- ") || trimmed.startsWith("+ ") -> {
+                        append("  ".repeat(indentLevel))
+                        append("• ")
+                        appendMarkdownInline(trimmed.substring(2).trimStart(), codeBg, codeFg)
+                    }
+                    else -> {
+                        append("  ".repeat(indentLevel))
+                        appendMarkdownInline(trimmed, codeBg, codeFg)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun AnnotatedString.Builder.appendMarkdownInline(
+        text: String,
+        codeBg: Color,
+        codeFg: Color
+    ) {
+        var i = 0
+        val n = text.length
+        while (i < n) {
+            if (text[i] == '`') {
+                val end = text.indexOf('`', i + 1)
+                if (end > i) {
+                    withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = codeBg, color = codeFg)) {
+                        append(text, i + 1, end)
+                    }
+                    i = end + 1
+                    continue
+                }
+            }
+            if (i + 1 < n && text[i] == '*' && text[i + 1] == '*') {
+                val end = text.indexOf("**", i + 2)
+                if (end > i + 1) {
+                    withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) {
+                        appendMarkdownInline(text.substring(i + 2, end), codeBg, codeFg)
+                    }
+                    i = end + 2
+                    continue
+                }
+            }
+            if (text[i] == '[') {
+                val closeBracket = text.indexOf(']', i + 1)
+                if (closeBracket > i + 1 && closeBracket + 1 < n && text[closeBracket + 1] == '(') {
+                    val closeParen = text.indexOf(')', closeBracket + 2)
+                    if (closeParen > closeBracket + 1) {
+                        appendMarkdownInline(text.substring(i + 1, closeBracket), codeBg, codeFg)
+                        i = closeParen + 1
+                        continue
+                    }
+                }
+            }
+            append(text[i])
+            i++
         }
     }
 }

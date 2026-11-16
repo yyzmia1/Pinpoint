@@ -144,16 +144,10 @@ class NormalFileProvider(
                 }
             }
             var total = 0
-            val pendingBatches = ArrayList<List<ScannedFileRecord>>()
             ParcelFileDescriptor.AutoCloseInputStream(readEnd).use { rawIn ->
-                total = BinaryTreeStreamCodec.readStream(rawIn, AccessMode.NORMAL) { batch ->
-                    pendingBatches.add(batch)
-                }
+                total = BinaryTreeStreamCodec.readStream(rawIn, AccessMode.NORMAL, onBatch = onBatch)
             }
             writeJob.await()
-            for (batch in pendingBatches) {
-                onBatch(batch)
-            }
             total
         }
     }
@@ -355,19 +349,13 @@ class PrivilegedFileProvider(
                 }
             }
 
-            val collected = ArrayList<ScannedFileRecord>(1500)
             var total = 0
             withContext(Dispatchers.IO) {
                 ParcelFileDescriptor.AutoCloseInputStream(readEnd).use { rawIn ->
-                    total = BinaryTreeStreamCodec.readStream(rawIn, mode, batchSize = 1500) { batch ->
-                        collected.addAll(batch)
-                    }
+                    total = BinaryTreeStreamCodec.readStream(rawIn, mode, batchSize = 1500, onBatch = onBatch)
                 }
             }
             remoteJob.await()
-            for (chunk in collected.chunked(1500)) {
-                onBatch(chunk)
-            }
             total
         } catch (t: Throwable) {
             abortIpc(t, readEnd, writeEnd)

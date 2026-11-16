@@ -38,4 +38,22 @@ class FormatUtilsTest {
         assertEquals("03:25", FormatUtils.formatDuration(205_000L))
         assertEquals("1:01:05", FormatUtils.formatDuration(3_665_000L))
     }
+
+    @Test
+    fun `renders release note markdown headings bullets bold and inline code`() {
+        val md = """
+            ### Pinpoint v1.2.6 更新说明
+            * **修复同步崩溃**：优化 `TwoTierIndexManager` 与 [说明](https://example.com)
+            - 支持 **Markdown** 渲染
+        """.trimIndent()
+        val rendered = FormatUtils.renderMarkdown(md)
+        val plain = rendered.text
+        assertTrue(plain.contains("Pinpoint v1.2.6 更新说明"))
+        assertTrue(!plain.contains("###"))
+        assertTrue(!plain.contains("**"))
+        assertTrue(!plain.contains("`"))
+        assertTrue(plain.contains("• 修复同步崩溃：优化 TwoTierIndexManager 与 说明"))
+        assertTrue(plain.contains("• 支持 Markdown 渲染"))
+        assertTrue(rendered.spanStyles.isNotEmpty())
+    }
 }

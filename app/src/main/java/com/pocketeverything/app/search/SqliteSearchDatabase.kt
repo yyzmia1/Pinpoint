@@ -342,11 +342,17 @@ class SqliteSearchDatabase(
 
     fun pruneDirectorySubtree(dirPrefix: String, seenUnderDir: Set<String>): Int {
         val normalizedPrefix = if (dirPrefix == "/") "/" else dirPrefix.trimEnd('/') + "/"
+        val upperBound = normalizedPrefix.dropLast(1) + '0'
+        val sql = if (dirPrefix == "/") {
+            "SELECT id, path FROM files_meta WHERE path > ? AND path < ?"
+        } else {
+            "SELECT id, path FROM files_meta WHERE path >= ? AND path < ?"
+        }
         return writeLock.withLock {
             val staleIds = ArrayList<Long>()
-            writeConn.prepare("SELECT id, path FROM files_meta WHERE path = ? OR path LIKE ?").use { stmt ->
-                stmt.bindText(1, dirPrefix)
-                stmt.bindText(2, "$normalizedPrefix%")
+            writeConn.prepare(sql).use { stmt ->
+                stmt.bindText(1, normalizedPrefix)
+                stmt.bindText(2, upperBound)
                 while (stmt.step()) {
                     val id = stmt.getLong(0)
                     val p = stmt.getText(1)
@@ -1657,30 +1663,39 @@ class SqliteSearchDatabase(
         fun compressUtf8(text: String): ByteArray {
             val raw = text.toByteArray(Charsets.UTF_8)
             val deflater = Deflater(Deflater.DEFAULT_COMPRESSION)
-            deflater.setInput(raw)
-            deflater.finish()
-            val out = ByteArrayOutputStream(raw.size / 2 + 64)
-            val buf = ByteArray(4096)
-            while (!deflater.finished()) {
-                val n = deflater.deflate(buf)
-                out.write(buf, 0, n)
+            try {
+                deflater.setInput(raw)
+                deflater.finish()
+                val out = ByteArrayOutputStream(raw.size / 2 + 64)
+                val buf = ByteArray(4096)
+                while (!deflater.finished()) {
+                    val n = deflater.deflate(buf)
+                    if (n <= 0) break
+                    out.write(buf, 0, n)
+                }
+                return out.toByteArray()
+            } finally {
+                deflater.end()
             }
-            deflater.end()
-            return out.toByteArray()
         }
 
         fun decompressUtf8(blob: ByteArray): String {
             val inflater = Inflater()
-            inflater.setInput(blob)
-            val out = ByteArrayOutputStream(blob.size * 2)
-            val buf = ByteArray(4096)
-            while (!inflater.finished()) {
-                val n = inflater.inflate(buf)
-                if (n == 0 && inflater.needsInput()) break
-                out.write(buf, 0, n)
+            return try {
+                inflater.setInput(blob)
+                val out = ByteArrayOutputStream(blob.size * 2)
+                val buf = ByteArray(4096)
+                while (!inflater.finished()) {
+                    val n = inflater.inflate(buf)
+                    if (n <= 0) break
+                    out.write(buf, 0, n)
+                }
+                out.toString(Charsets.UTF_8.name())
+            } catch (_: Throwable) {
+                ""
+            } finally {
+                inflater.end()
             }
-            inflater.end()
-            return out.toString(Charsets.UTF_8.name())
         }
     }
 }

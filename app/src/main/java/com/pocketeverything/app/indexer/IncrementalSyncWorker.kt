@@ -17,7 +17,7 @@ class IncrementalSyncWorker(
 
     override suspend fun doWork(): Result {
         val app = applicationContext as? PocketEverythingApp ?: return Result.success()
-        app.container.indexManager.startQuickHotDirsRefresh()
+        app.container.indexManager.startQuickHotDirsRefresh().join()
         return Result.success()
     }
 
