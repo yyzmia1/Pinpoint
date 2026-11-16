@@ -73,7 +73,7 @@ fun SyntaxGuideSheet(
             // 1. Formal complete syntax specification
             Surface(
                 shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                color = MaterialTheme.colorScheme.surfaceContainer,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
@@ -116,7 +116,7 @@ fun SyntaxGuideSheet(
                             onDismiss()
                         },
                         shape = RoundedCornerShape(10.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainer
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh
                     ) {
                         Text(
                             text = key,
@@ -143,7 +143,7 @@ fun SyntaxGuideSheet(
                             onDismiss()
                         },
                         shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
+                        color = MaterialTheme.colorScheme.primaryContainer
                     ) {
                         Text(
                             text = sample,

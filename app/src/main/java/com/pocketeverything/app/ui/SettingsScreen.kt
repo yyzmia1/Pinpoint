@@ -5,6 +5,7 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -64,13 +65,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pocketeverything.app.BuildConfig
 import com.pocketeverything.app.data.AppSettings
+import com.pocketeverything.app.data.ThemeMode
 import com.pocketeverything.app.data.UpdateCheckState
 import com.pocketeverything.app.filter.FilterConfig
 import com.pocketeverything.app.fs.ModeAvailability
@@ -80,6 +81,8 @@ import com.pocketeverything.app.ui.components.BrandMarkIcon
 import com.pocketeverything.app.ui.theme.Amber400
 import com.pocketeverything.app.ui.theme.Emerald400
 import com.pocketeverything.app.ui.theme.Rose400
+import com.pocketeverything.app.ui.theme.groupedBackdrop
+import com.pocketeverything.app.ui.theme.groupedCard
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -91,6 +94,7 @@ fun SettingsScreen(
     updateState: UpdateCheckState,
     onBack: () -> Unit,
     onSelectMode: (AccessMode) -> Unit,
+    onSelectThemeMode: (ThemeMode) -> Unit,
     onRequestStoragePermission: () -> Unit,
     onOpenShizukuGuide: () -> Unit,
     onRefreshModes: () -> Unit,
@@ -122,9 +126,8 @@ fun SettingsScreen(
         if (granted) onSetRealtimeMonitor(true)
     }
 
-    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    val pageBackdrop = if (isDark) MaterialTheme.colorScheme.background else MaterialTheme.colorScheme.surfaceContainerLow
-    val cardColor = if (isDark) MaterialTheme.colorScheme.surfaceContainer else MaterialTheme.colorScheme.surface
+    val pageBackdrop = MaterialTheme.colorScheme.groupedBackdrop
+    val cardColor = MaterialTheme.colorScheme.groupedCard
 
     Scaffold(
         containerColor = pageBackdrop,
@@ -168,12 +171,12 @@ fun SettingsScreen(
                     Spacer(Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "口袋快搜",
+                            text = "Pinpoint",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            text = "PocketEverything · v${BuildConfig.VERSION_NAME} (#${BuildConfig.VERSION_CODE})",
+                            text = "v${BuildConfig.VERSION_NAME} · #${BuildConfig.VERSION_CODE}",
                             style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -340,8 +343,49 @@ fun SettingsScreen(
                 )
             }
 
-            // 4. Search & Preview Behavior
-            SettingsSection(title = "搜索与预览", cardColor = cardColor) {
+            // 4. Appearance, Search & Preview Behavior
+            SettingsSection(title = "外观与搜索", cardColor = cardColor) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("主题模式", style = MaterialTheme.typography.bodyMedium)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        ThemeMode.entries.forEach { mode ->
+                            val selected = settings.themeMode == mode
+                            Surface(
+                                onClick = { onSelectThemeMode(mode) },
+                                shape = CircleShape,
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceContainerHigh
+                                },
+                                contentColor = if (selected) {
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                border = if (selected) {
+                                    BorderStroke(0.8.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                                } else {
+                                    null
+                                }
+                            ) {
+                                Text(
+                                    text = mode.label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+                SettingsDivider()
                 ToggleRow(
                     title = "点击优先使用内置预览",
                     checked = settings.openContentHitsInPreview,

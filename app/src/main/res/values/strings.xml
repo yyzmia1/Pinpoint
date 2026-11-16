@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">口袋快搜</string>
+    <string name="app_name">Pinpoint</string>
     <string name="monitor_channel_name">文件实时监控服务</string>
     <string name="monitor_channel_desc">开启常驻监听开关时，用于实时同步新文件变更</string>
 </resources>

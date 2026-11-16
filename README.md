@@ -1,4 +1,4 @@
-# PocketEverything
+# Pinpoint (PocketEverything)
 
 面向 Android 的离线极速全盘文件与文档正文检索引擎（对标桌面端 **Everything**），支持任意中文片段毫秒级命中、通配符与严格正则表达式。
 
@@ -42,5 +42,5 @@
 
 ## CI 与测试版发布
 
-* 每次向 `main` 分支提交代码都会自动触发 [ci-build-release.yml](.github/workflows/ci-build-release.yml) 运行全量单元测试并构建 Debug/Release 测试安装包，结果会更新至 GitHub `nightly` 预发布（Pre-release，不影响设置内的稳定版更新检查）与 Actions Artifacts。
+* [ci-build-release.yml](.github/workflows/ci-build-release.yml) 设为手动按需触发（`workflow_dispatch`），避免平时提交占用构建队列；在 GitHub Actions 点击 **Run workflow** 即可运行单元测试并更新 `nightly` 测试版预发布。
 * 如需让 CI 使用正式发布签名而非调试证书签发测试包，可在仓库 Secrets 中配置：`RELEASE_KEYSTORE_BASE64`、`POCKET_KEYSTORE_PASS`、`POCKET_KEY_ALIAS`、`POCKET_KEY_PASS`。

@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.pocketeverything.app.BuildConfig
 import com.pocketeverything.app.PocketEverythingApp
 import com.pocketeverything.app.data.AppSettings
+import com.pocketeverything.app.data.ThemeMode
 import com.pocketeverything.app.data.UpdateCheckState
 import com.pocketeverything.app.data.UpdateChecker
 import com.pocketeverything.app.filter.FilterConfig
@@ -34,6 +35,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
@@ -124,15 +127,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         indexManager.triggerStartupSync()
 
         viewModelScope.launch {
+            val indexMutationTick = indexManager.progress
+                .map { it.stats.totalEntries to it.stats.indexedDocs }
+                .distinctUntilChanged()
+                .debounce(250)
+
             combine(
                 _query.debounce(65),
                 _quickScope,
                 _sortOrder,
-                settingsRepo.settings,
-                indexManager.progress
-            ) { q, scope, sort, st, _ ->
-                SearchTriggerParams(q, scope, sort, st.showRecentOnEmptyQuery)
-            }.collectLatest { params ->
+                settingsRepo.settings.map { it.showRecentOnEmptyQuery }.distinctUntilChanged(),
+                indexMutationTick
+            ) { q, scope, sort, showRecent, _ ->
+                SearchTriggerParams(q, scope, sort, showRecent)
+            }.distinctUntilChanged().collectLatest { params ->
                 val resp = withContext(Dispatchers.IO) {
                     db.search(
                         rawQuery = params.query,
@@ -311,6 +319,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setShowRecentOnEmptyQuery(enabled: Boolean) {
         settingsRepo.setShowRecentOnEmptyQuery(enabled)
+    }
+
+    fun setThemeMode(mode: ThemeMode) {
+        settingsRepo.setThemeMode(mode)
+    }
+
+    fun toggleDayNight(currentlyDark: Boolean) {
+        settingsRepo.setThemeMode(if (currentlyDark) ThemeMode.LIGHT else ThemeMode.DARK)
     }
 
     fun setRealtimeMonitorEnabled(enabled: Boolean) {

@@ -453,10 +453,10 @@ class FilePreviewLoader(
     ): ByteArray? = runCatching {
         val local = File(item.path)
         if (local.isFile && local.canRead()) {
-            local.inputStream().use { input -> readExactUpTo(input, maxBytes) }
+            local.inputStream().use { input -> TxtMdExtractor.readBounded(input, maxBytes) }
         } else {
             provider.openFileStream(item.path, maxBytes) { input ->
-                readExactUpTo(input, maxBytes)
+                TxtMdExtractor.readBounded(input, maxBytes)
             }
         }
     }.getOrNull()
@@ -632,21 +632,6 @@ class FilePreviewLoader(
                 if (offset < bytes.size) sb.append('\n')
             }
             return sb.toString()
-        }
-
-        private fun readExactUpTo(input: java.io.InputStream, maxBytes: Long): ByteArray {
-            val cap = maxBytes.coerceAtMost(32L * 1024L * 1024L).toInt()
-            val out = ByteArrayOutputStream(minOf(cap, 16 * 1024))
-            val buf = ByteArray(16 * 1024)
-            var total = 0
-            while (total < cap) {
-                val toRead = minOf(buf.size, cap - total)
-                val n = input.read(buf, 0, toRead)
-                if (n <= 0) break
-                out.write(buf, 0, n)
-                total += n
-            }
-            return out.toByteArray()
         }
 
         private fun computeInSampleSize(width: Int, height: Int, maxDim: Int): Int {

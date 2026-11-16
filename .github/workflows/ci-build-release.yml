@@ -1,9 +1,7 @@
 name: Android CI & Nightly Pre-release
 
+# Manual trigger only so normal git pushes return immediately without slow cloud queues
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       build_release:

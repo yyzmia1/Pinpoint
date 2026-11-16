@@ -8,6 +8,16 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+enum class ThemeMode(val code: Int, val label: String) {
+    SYSTEM(0, "跟随系统"),
+    LIGHT(1, "白天"),
+    DARK(2, "黑夜");
+
+    companion object {
+        fun fromCode(code: Int): ThemeMode = entries.firstOrNull { it.code == code } ?: SYSTEM
+    }
+}
+
 data class AppSettings(
     val accessMode: AccessMode = AccessMode.NORMAL,
     val filterConfig: FilterConfig = FilterConfig(),
@@ -15,6 +25,7 @@ data class AppSettings(
     val openContentHitsInPreview: Boolean = true,
     val showRecentOnEmptyQuery: Boolean = true,
     val hasSeenOnboarding: Boolean = false,
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val lastFullScanAtMillis: Long = 0L
 )
 
@@ -57,6 +68,7 @@ class SettingsRepository(context: Context) {
             openContentHitsInPreview = prefs.getBoolean(KEY_PREVIEW_ON_CONTENT, true),
             showRecentOnEmptyQuery = prefs.getBoolean(KEY_SHOW_RECENT_ON_EMPTY, true),
             hasSeenOnboarding = prefs.getBoolean(KEY_HAS_SEEN_ONBOARDING, false),
+            themeMode = ThemeMode.fromCode(prefs.getInt(KEY_THEME_MODE, ThemeMode.SYSTEM.code)),
             lastFullScanAtMillis = prefs.getLong(KEY_LAST_FULL_SCAN, 0L)
         )
     }
@@ -100,6 +112,11 @@ class SettingsRepository(context: Context) {
         _settings.value = _settings.value.copy(hasSeenOnboarding = seen)
     }
 
+    fun setThemeMode(mode: ThemeMode) {
+        prefs.edit().putInt(KEY_THEME_MODE, mode.code).apply()
+        _settings.value = _settings.value.copy(themeMode = mode)
+    }
+
     fun markFullScanCompleted(timestampMillis: Long = System.currentTimeMillis()) {
         prefs.edit().putLong(KEY_LAST_FULL_SCAN, timestampMillis).apply()
         _settings.value = _settings.value.copy(lastFullScanAtMillis = timestampMillis)
@@ -119,6 +136,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_PREVIEW_ON_CONTENT = "preview_on_content"
         private const val KEY_SHOW_RECENT_ON_EMPTY = "show_recent_on_empty"
         private const val KEY_HAS_SEEN_ONBOARDING = "has_seen_onboarding"
+        private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_LAST_FULL_SCAN = "last_full_scan"
     }
 }

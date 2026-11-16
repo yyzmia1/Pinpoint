@@ -40,13 +40,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.pocketeverything.app.ui.theme.Amber400
 import com.pocketeverything.app.ui.theme.Emerald400
+import com.pocketeverything.app.ui.theme.groupedBackdrop
+import com.pocketeverything.app.ui.theme.groupedCard
 
 /**
  * Interactive step-by-step Shizuku setup wizard that probes live installation,
@@ -74,9 +75,8 @@ fun ShizukuGuideScreen(
     }
 
     val allReady = status.isInstalled && status.isServiceRunning && status.isPermissionGranted
-    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    val backdrop = if (isDark) MaterialTheme.colorScheme.background else MaterialTheme.colorScheme.surfaceContainerLow
-    val cardColor = if (isDark) MaterialTheme.colorScheme.surfaceContainer else MaterialTheme.colorScheme.surface
+    val backdrop = MaterialTheme.colorScheme.groupedBackdrop
+    val cardColor = MaterialTheme.colorScheme.groupedCard
 
     Scaffold(
         containerColor = backdrop,
@@ -220,7 +220,8 @@ private fun WizardStepCard(
                     else -> MaterialTheme.colorScheme.surfaceContainerHigh
                 }
                 val badgeFg = when {
-                    completed || active -> Color.White
+                    completed -> Color(0xFF052E16)
+                    active -> MaterialTheme.colorScheme.onPrimary
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 }
                 Box(

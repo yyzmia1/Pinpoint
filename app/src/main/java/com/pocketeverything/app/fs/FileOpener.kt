@@ -27,28 +27,7 @@ class FileOpener(
         get() = File(context.cacheDir, "preview_bridge").apply { mkdirs() }
 
     suspend fun openWithSystemApp(item: SearchResultItem): Result<Unit> = runCatching {
-        val rawFile = File(item.path)
-        val uri: Uri = if (!item.isDir && rawFile.canRead()) {
-            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", rawFile)
-        } else if (!item.isDir) {
-            val safeName = item.name.replace(Regex("[/\\\\:*?\"<>|]"), "_")
-            val staged = File(bridgeDir, "${System.currentTimeMillis()}_$safeName")
-            cleanOldBridgeFiles()
-            val provider = providerResolver(item.accessMode)
-            val copied = provider.copyFileTo(item.path, staged, maxBytes = 200L * 1024L * 1024L)
-            if (!copied) {
-                error("无法读取受保护文件：${item.path}")
-            }
-            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", staged)
-        } else {
-            val dirUri = if (rawFile.canRead()) {
-                FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", rawFile)
-            } else {
-                error("系统文件管理器不支持直接打开受限目录，已为您准备路径复制")
-            }
-            dirUri
-        }
-
+        val uri = resolveShareableUri(item)
         val mime = if (item.isDir) {
             "resource/folder"
         } else {
@@ -69,17 +48,7 @@ class FileOpener(
 
     suspend fun shareFile(item: SearchResultItem): Result<Unit> = runCatching {
         if (item.isDir) error("暂不支持直接分享文件夹")
-        val rawFile = File(item.path)
-        val uri: Uri = if (rawFile.canRead()) {
-            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", rawFile)
-        } else {
-            val safeName = item.name.replace(Regex("[/\\\\:*?\"<>|]"), "_")
-            val staged = File(bridgeDir, "${System.currentTimeMillis()}_$safeName")
-            cleanOldBridgeFiles()
-            val ok = providerResolver(item.accessMode).copyFileTo(item.path, staged, 200L * 1024L * 1024L)
-            if (!ok) error("无法中转受保护文件")
-            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", staged)
-        }
+        val uri = resolveShareableUri(item)
         val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(item.ext.lowercase()) ?: "*/*"
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = mime
@@ -92,6 +61,22 @@ class FileOpener(
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             })
         }
+    }
+
+    private suspend fun resolveShareableUri(item: SearchResultItem): Uri {
+        val rawFile = File(item.path)
+        if (rawFile.canRead()) {
+            return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", rawFile)
+        }
+        if (item.isDir) {
+            error("系统文件管理器不支持直接打开受限目录，已为您准备路径复制")
+        }
+        val safeName = item.name.replace(Regex("[/\\\\:*?\"<>|]"), "_")
+        val staged = File(bridgeDir, "${System.currentTimeMillis()}_$safeName")
+        cleanOldBridgeFiles()
+        val copied = providerResolver(item.accessMode).copyFileTo(item.path, staged, maxBytes = 200L * 1024L * 1024L)
+        if (!copied) error("无法读取受保护文件：${item.path}")
+        return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", staged)
     }
 
     fun copyToClipboard(label: String, text: String) {

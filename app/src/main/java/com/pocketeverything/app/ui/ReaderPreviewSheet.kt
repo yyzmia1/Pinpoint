@@ -326,12 +326,12 @@ private fun TextPreviewBody(content: PreviewContent.Text) {
                 Surface(
                     onClick = { useMonospace = !useMonospace },
                     shape = RoundedCornerShape(10.dp),
-                    color = if (useMonospace) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer
+                    color = if (useMonospace) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh
                 ) {
                     Icon(
                         Icons.Default.Code,
                         contentDescription = "切换等宽字体",
-                        tint = if (useMonospace) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = if (useMonospace) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.padding(8.dp).size(18.dp)
                     )
                 }
@@ -405,9 +405,6 @@ private fun PdfPreviewBody(content: PreviewContent.Pdf) {
             var pageIndex by remember(content) { mutableIntStateOf(0) }
             var pageBitmap by remember(content, pageIndex) { mutableStateOf<Bitmap?>(null) }
             var rendering by remember(content, pageIndex) { mutableStateOf(true) }
-            var scale by remember(content, pageIndex) { mutableFloatStateOf(1f) }
-            var offsetX by remember(content, pageIndex) { mutableFloatStateOf(0f) }
-            var offsetY by remember(content, pageIndex) { mutableFloatStateOf(0f) }
 
             LaunchedEffect(content.pdfFile, pageIndex) {
                 rendering = true
@@ -417,61 +414,19 @@ private fun PdfPreviewBody(content: PreviewContent.Pdf) {
                 rendering = false
             }
 
-            Box(
+            ZoomableBitmapBox(
+                bitmap = pageBitmap,
+                contentDescription = "第 ${pageIndex + 1} 页",
+                isLoading = rendering || pageBitmap == null,
+                backdrop = MaterialTheme.colorScheme.surfaceContainerLow,
+                maxScale = 4f,
+                resetKey = pageIndex,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(vertical = 8.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                    .clipToBounds()
-                    .pointerInput(pageIndex) {
-                        detectTapGestures(
-                            onDoubleTap = {
-                                if (scale > 1.1f) {
-                                    scale = 1f
-                                    offsetX = 0f
-                                    offsetY = 0f
-                                } else {
-                                    scale = 2.2f
-                                }
-                            }
-                        )
-                    }
-                    .pointerInput(pageIndex) {
-                        detectTransformGestures { _, pan, zoom, _ ->
-                            val nextScale = (scale * zoom).coerceIn(1f, 4f)
-                            scale = nextScale
-                            if (nextScale > 1f) {
-                                offsetX += pan.x
-                                offsetY += pan.y
-                            } else {
-                                offsetX = 0f
-                                offsetY = 0f
-                            }
-                        }
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                if (rendering || pageBitmap == null) {
-                    CircularProgressIndicator(modifier = Modifier.size(26.dp), strokeWidth = 2.5.dp)
-                } else {
-                    Image(
-                        bitmap = pageBitmap!!.asImageBitmap(),
-                        contentDescription = "第 ${pageIndex + 1} 页",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(8.dp)
-                            .graphicsLayer(
-                                scaleX = scale,
-                                scaleY = scale,
-                                translationX = offsetX,
-                                translationY = offsetY
-                            )
-                    )
-                }
-            }
+                    .padding(vertical = 8.dp),
+                imagePaddingDp = 8
+            )
 
             // Page navigator
             Row(
@@ -483,7 +438,7 @@ private fun PdfPreviewBody(content: PreviewContent.Pdf) {
             ) {
                 Surface(
                     shape = CircleShape,
-                    color = MaterialTheme.colorScheme.surfaceContainer
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(
@@ -517,8 +472,8 @@ private fun ModeSwitchPill(label: String, selected: Boolean, onClick: () -> Unit
     Surface(
         onClick = onClick,
         shape = CircleShape,
-        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer,
-        contentColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+        contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
     ) {
         Text(
             text = label,
@@ -531,9 +486,6 @@ private fun ModeSwitchPill(label: String, selected: Boolean, onClick: () -> Unit
 
 @Composable
 private fun ImagePreviewBody(content: PreviewContent.Image) {
-    var scale by remember(content) { mutableFloatStateOf(1f) }
-    var offsetX by remember(content) { mutableFloatStateOf(0f) }
-    var offsetY by remember(content) { mutableFloatStateOf(0f) }
     var darkCanvas by remember { mutableStateOf(true) }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -552,7 +504,7 @@ private fun ImagePreviewBody(content: PreviewContent.Image) {
             Surface(
                 onClick = { darkCanvas = !darkCanvas },
                 shape = CircleShape,
-                color = MaterialTheme.colorScheme.surfaceContainer
+                color = MaterialTheme.colorScheme.surfaceContainerHigh
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
@@ -562,60 +514,92 @@ private fun ImagePreviewBody(content: PreviewContent.Image) {
                         if (darkCanvas) Icons.Default.LightMode else Icons.Default.DarkMode,
                         contentDescription = null,
                         modifier = Modifier.size(14.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        tint = MaterialTheme.colorScheme.onSurface
                     )
                     Spacer(Modifier.width(4.dp))
                     Text(
                         if (darkCanvas) "浅色底" else "深色底",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                 }
             }
         }
 
-        Box(
+        ZoomableBitmapBox(
+            bitmap = content.bitmap,
+            contentDescription = "图片预览",
+            isLoading = false,
+            backdrop = if (darkCanvas) Color(0xFF0D1117) else Color(0xFFF3F5F8),
+            maxScale = 5f,
+            resetKey = content,
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .padding(bottom = 10.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(if (darkCanvas) Color(0xFF0D1117) else Color(0xFFF3F5F8))
-                .clipToBounds()
-                .pointerInput(content) {
-                    detectTapGestures(
-                        onDoubleTap = {
-                            if (scale > 1.1f) {
-                                scale = 1f
-                                offsetX = 0f
-                                offsetY = 0f
-                            } else {
-                                scale = 2.5f
-                            }
-                        }
-                    )
-                }
-                .pointerInput(content) {
-                    detectTransformGestures { _, pan, zoom, _ ->
-                        val next = (scale * zoom).coerceIn(1f, 5f)
-                        scale = next
-                        if (next > 1f) {
-                            offsetX += pan.x
-                            offsetY += pan.y
-                        } else {
+                .padding(bottom = 10.dp),
+            imagePaddingDp = 0
+        )
+    }
+}
+
+@Composable
+private fun ZoomableBitmapBox(
+    bitmap: Bitmap?,
+    contentDescription: String,
+    isLoading: Boolean,
+    backdrop: Color,
+    maxScale: Float,
+    resetKey: Any,
+    modifier: Modifier = Modifier,
+    imagePaddingDp: Int = 0
+) {
+    var scale by remember(resetKey) { mutableFloatStateOf(1f) }
+    var offsetX by remember(resetKey) { mutableFloatStateOf(0f) }
+    var offsetY by remember(resetKey) { mutableFloatStateOf(0f) }
+
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .background(backdrop)
+            .clipToBounds()
+            .pointerInput(resetKey) {
+                detectTapGestures(
+                    onDoubleTap = {
+                        if (scale > 1.1f) {
+                            scale = 1f
                             offsetX = 0f
                             offsetY = 0f
+                        } else {
+                            scale = 2.4f
                         }
                     }
-                },
-            contentAlignment = Alignment.Center
-        ) {
+                )
+            }
+            .pointerInput(resetKey) {
+                detectTransformGestures { _, pan, zoom, _ ->
+                    val next = (scale * zoom).coerceIn(1f, maxScale)
+                    scale = next
+                    if (next > 1f) {
+                        offsetX += pan.x
+                        offsetY += pan.y
+                    } else {
+                        offsetX = 0f
+                        offsetY = 0f
+                    }
+                }
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        if (isLoading || bitmap == null) {
+            CircularProgressIndicator(modifier = Modifier.size(26.dp), strokeWidth = 2.5.dp)
+        } else {
             Image(
-                bitmap = content.bitmap.asImageBitmap(),
-                contentDescription = "图片预览",
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = contentDescription,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier
                     .fillMaxSize()
+                    .padding(imagePaddingDp.dp)
                     .graphicsLayer(
                         scaleX = scale,
                         scaleY = scale,

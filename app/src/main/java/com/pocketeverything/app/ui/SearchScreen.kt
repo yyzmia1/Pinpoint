@@ -38,7 +38,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -106,6 +108,7 @@ fun SearchScreen(
     sortOrder: SortOrder,
     searchResponse: SearchResponse,
     settings: AppSettings,
+    isDarkTheme: Boolean,
     modeStatuses: Map<AccessMode, ModeAvailability>,
     indexProgress: IndexProgressState,
     onQueryChange: (String) -> Unit,
@@ -114,6 +117,7 @@ fun SearchScreen(
     onItemClick: (SearchResultItem) -> Unit,
     onItemLongPress: (SearchResultItem) -> Unit,
     onSelectMode: (AccessMode) -> Unit,
+    onToggleTheme: () -> Unit,
     onQuickSync: () -> Unit,
     onFullScan: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -156,8 +160,10 @@ fun SearchScreen(
         ) {
             HeaderBar(
                 mode = settings.accessMode,
+                isDarkTheme = isDarkTheme,
                 availability = availability,
                 onModeClick = { showModeSheet = true },
+                onToggleTheme = onToggleTheme,
                 onQuickSync = onQuickSync,
                 onOpenSettings = onOpenSettings,
                 onModePillBounds = { rect -> targets = targets.copy(modePill = rect) }
@@ -279,8 +285,10 @@ fun SearchScreen(
 @Composable
 private fun HeaderBar(
     mode: AccessMode,
+    isDarkTheme: Boolean,
     availability: ModeAvailability?,
     onModeClick: () -> Unit,
+    onToggleTheme: () -> Unit,
     onQuickSync: () -> Unit,
     onOpenSettings: () -> Unit,
     onModePillBounds: (Rect) -> Unit
@@ -288,15 +296,15 @@ private fun HeaderBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 6.dp),
+            .padding(start = 16.dp, end = 6.dp, top = 4.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         BrandMarkIcon(size = 24.dp)
-        Spacer(Modifier.width(9.dp))
+        Spacer(Modifier.width(8.dp))
         Text(
-            text = "口袋快搜",
+            text = "Pinpoint",
             style = MaterialTheme.typography.titleLarge,
-            fontSize = 17.sp,
+            fontSize = 18.sp,
             modifier = Modifier.weight(1f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
@@ -305,8 +313,8 @@ private fun HeaderBar(
         Surface(
             onClick = onModeClick,
             shape = CircleShape,
-            color = MaterialTheme.colorScheme.surfaceContainerLow,
-            border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)),
             modifier = Modifier.onGloballyPositioned { coords ->
                 onModePillBounds(coords.boundsInRoot())
             }
@@ -330,26 +338,35 @@ private fun HeaderBar(
                 Icon(
                     Icons.Default.ExpandMore,
                     contentDescription = "切换模式",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
                     modifier = Modifier.size(16.dp)
                 )
             }
         }
 
-        IconButton(onClick = onQuickSync, modifier = Modifier.size(40.dp)) {
+        val actionTint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.82f)
+        IconButton(onClick = onToggleTheme, modifier = Modifier.size(36.dp)) {
+            Icon(
+                imageVector = if (isDarkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,
+                contentDescription = if (isDarkTheme) "切换白天模式" else "切换黑夜模式",
+                tint = actionTint,
+                modifier = Modifier.size(19.dp)
+            )
+        }
+        IconButton(onClick = onQuickSync, modifier = Modifier.size(36.dp)) {
             Icon(
                 Icons.Default.Refresh,
                 contentDescription = "增量同步",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp)
+                tint = actionTint,
+                modifier = Modifier.size(19.dp)
             )
         }
-        IconButton(onClick = onOpenSettings, modifier = Modifier.size(40.dp)) {
+        IconButton(onClick = onOpenSettings, modifier = Modifier.size(36.dp)) {
             Icon(
                 Icons.Default.Settings,
                 contentDescription = "设置",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp)
+                tint = actionTint,
+                modifier = Modifier.size(19.dp)
             )
         }
     }
@@ -494,18 +511,21 @@ private fun ScopePills(
                 color = if (isSelected) {
                     MaterialTheme.colorScheme.primaryContainer
                 } else {
-                    MaterialTheme.colorScheme.surfaceContainerLow
+                    MaterialTheme.colorScheme.surfaceContainer
                 },
                 contentColor = if (isSelected) {
-                    MaterialTheme.colorScheme.primary
+                    MaterialTheme.colorScheme.onPrimaryContainer
                 } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
+                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.84f)
                 },
-                border = if (isSelected) {
-                    BorderStroke(0.8.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f))
-                } else {
-                    null
-                }
+                border = BorderStroke(
+                    width = if (isSelected) 0.9.dp else 0.5.dp,
+                    color = if (isSelected) {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                    } else {
+                        MaterialTheme.colorScheme.outlineVariant
+                    }
+                )
             ) {
                 Text(
                     text = scope.label,

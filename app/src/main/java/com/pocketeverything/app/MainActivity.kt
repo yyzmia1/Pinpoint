@@ -2,17 +2,20 @@ package com.pocketeverything.app
 
 import android.Manifest
 import android.content.Intent
+import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.imePadding
@@ -22,6 +25,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.pocketeverything.app.data.ThemeMode
 import com.pocketeverything.app.search.AccessMode
 import com.pocketeverything.app.ui.FileDetailDialog
 import com.pocketeverything.app.ui.MainViewModel
@@ -70,12 +75,28 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         setContent {
-            PocketEverythingTheme {
+            val settings by viewModel.settings.collectAsState()
+            val systemDark = isSystemInDarkTheme()
+            val isDarkTheme = when (settings.themeMode) {
+                ThemeMode.SYSTEM -> systemDark
+                ThemeMode.LIGHT -> false
+                ThemeMode.DARK -> true
+            }
+
+            SideEffect {
+                val style = if (isDarkTheme) {
+                    SystemBarStyle.dark(AndroidColor.TRANSPARENT)
+                } else {
+                    SystemBarStyle.light(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT)
+                }
+                enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+            }
+
+            PocketEverythingTheme(darkTheme = isDarkTheme) {
                 val query by viewModel.query.collectAsState()
                 val quickScope by viewModel.quickScope.collectAsState()
                 val sortOrder by viewModel.sortOrder.collectAsState()
                 val searchResponse by viewModel.searchResponse.collectAsState()
-                val settings by viewModel.settings.collectAsState()
                 val modeStatuses by viewModel.modeStatuses.collectAsState()
                 val shizukuStatus by viewModel.shizukuLiveStatus.collectAsState()
                 val indexProgress by viewModel.indexProgress.collectAsState()
@@ -116,6 +137,7 @@ class MainActivity : ComponentActivity() {
                                 sortOrder = sortOrder,
                                 searchResponse = searchResponse,
                                 settings = settings,
+                                isDarkTheme = isDarkTheme,
                                 modeStatuses = modeStatuses,
                                 indexProgress = indexProgress,
                                 onQueryChange = { viewModel.updateQuery(it) },
@@ -124,6 +146,7 @@ class MainActivity : ComponentActivity() {
                                 onItemClick = { viewModel.onItemClicked(it) },
                                 onItemLongPress = { viewModel.showDetail(it) },
                                 onSelectMode = { viewModel.switchMode(it) },
+                                onToggleTheme = { viewModel.toggleDayNight(isDarkTheme) },
                                 onQuickSync = { viewModel.triggerQuickSync() },
                                 onFullScan = { viewModel.triggerFullRebuild(clearFirst = false) },
                                 onOpenSettings = { currentPage = AppPage.SETTINGS },
@@ -149,6 +172,7 @@ class MainActivity : ComponentActivity() {
                                 updateState = updateState,
                                 onBack = { currentPage = AppPage.SEARCH },
                                 onSelectMode = { viewModel.switchMode(it) },
+                                onSelectThemeMode = { viewModel.setThemeMode(it) },
                                 onRequestStoragePermission = { requestAllFilesPermission() },
                                 onOpenShizukuGuide = {
                                     previousPage = AppPage.SETTINGS

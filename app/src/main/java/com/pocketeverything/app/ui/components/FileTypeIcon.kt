@@ -16,12 +16,12 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.pocketeverything.app.ui.theme.isLightScheme
 import java.util.Locale
 
-private enum class FileVisualFamily {
+enum class FileVisualFamily {
     FOLDER,
     PDF,
     WORD,
@@ -57,6 +57,11 @@ fun BrandMarkIcon(
                 end = Offset(w, h)
             ),
             cornerRadius = CornerRadius(radius, radius)
+        )
+        drawRoundRect(
+            color = Color(0xFF38BDF8).copy(alpha = 0.28f),
+            cornerRadius = CornerRadius(radius, radius),
+            style = Stroke(width = 1.dp.toPx())
         )
 
         val docLeft = w * 0.23f
@@ -110,7 +115,7 @@ fun FileTypeIcon(
     modifier: Modifier = Modifier,
     size: Dp = 38.dp
 ) {
-    val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val dark = !MaterialTheme.colorScheme.isLightScheme
     val family = classifyVisualFamily(isDir, ext)
 
     if (family == FileVisualFamily.FOLDER) {
@@ -118,11 +123,11 @@ fun FileTypeIcon(
         return
     }
 
-    val paperBg = if (dark) Color(0xFF172033) else Color(0xFFFFFFFF)
-    val paperStroke = if (dark) Color(0xFF2D3A54) else Color(0xFFE2E8F0)
-    val foldFill = if (dark) Color(0xFF27344D) else Color(0xFFE2E8F0)
-    val neutralLine = if (dark) Color(0xFF475569) else Color(0xFFCBD5E1)
-    val accent = accentColorFor(family, dark)
+    val paperBg = fileIconPaperColor(dark)
+    val paperStroke = if (dark) Color(0xFF364863) else Color(0xFFDCE4EE)
+    val foldFill = if (dark) Color(0xFF32435D) else Color(0xFFE2E8F0)
+    val neutralLine = if (dark) Color(0xFF94A3B8) else Color(0xFF64748B)
+    val accent = fileIconAccentColor(family, dark)
 
     Box(
         modifier = modifier.size(size),
@@ -416,9 +421,8 @@ fun FileTypeIcon(
 
 @Composable
 private fun FolderIcon(dark: Boolean, modifier: Modifier = Modifier) {
-    val backColor = if (dark) Color(0xFFD97706) else Color(0xFFE5951A)
-    val frontTop = if (dark) Color(0xFFF59E0B) else Color(0xFFFBBF24)
-    val frontBottom = if (dark) Color(0xFFD97706) else Color(0xFFF59E0B)
+    // Bright, soft, airy Windows 11 / HyperOS / OneDrive style honey gold (never heavy dark amber)
+    val (backColor, frontTop, frontBottom) = folderPalette(dark)
 
     Canvas(modifier = modifier) {
         val w = this.size.width
@@ -459,13 +463,21 @@ private fun FolderIcon(dark: Boolean, modifier: Modifier = Modifier) {
         )
 
         drawLine(
-            color = Color.White.copy(alpha = if (dark) 0.22f else 0.38f),
+            color = Color(0xFFFFF8DC).copy(alpha = if (dark) 0.42f else 0.55f),
             start = Offset(left + r, pocketTop + 1.dp.toPx()),
             end = Offset(right - r, pocketTop + 1.dp.toPx()),
             strokeWidth = 1.dp.toPx(),
             cap = StrokeCap.Round
         )
     }
+}
+
+fun fileIconPaperColor(dark: Boolean): Color = if (dark) Color(0xFF1E293B) else Color.White
+
+fun folderPalette(dark: Boolean): Triple<Color, Color, Color> = if (dark) {
+    Triple(Color(0xFFE5B13E), Color(0xFFFFE57F), Color(0xFFFFD14D))
+} else {
+    Triple(Color(0xFFF3BA44), Color(0xFFFFE682), Color(0xFFFFD04E))
 }
 
 private fun classifyVisualFamily(isDir: Boolean, ext: String): FileVisualFamily {
@@ -488,20 +500,21 @@ private fun classifyVisualFamily(isDir: Boolean, ext: String): FileVisualFamily 
     }
 }
 
-private fun accentColorFor(family: FileVisualFamily, dark: Boolean): Color {
+fun fileIconAccentColor(family: FileVisualFamily, dark: Boolean): Color {
     fun pick(lightHex: Long, darkHex: Long) = Color(if (dark) darkHex else lightHex)
     return when (family) {
-        FileVisualFamily.PDF -> pick(0xFFD92D20, 0xFFF87171)
+        FileVisualFamily.FOLDER -> folderPalette(dark).second
+        FileVisualFamily.PDF -> pick(0xFFD92D20, 0xFFFB7185)
         FileVisualFamily.WORD -> pick(0xFF2563EB, 0xFF60A5FA)
-        FileVisualFamily.SHEET -> pick(0xFF059669, 0xFF34D399)
-        FileVisualFamily.SLIDES -> pick(0xFFD97706, 0xFFFB923C)
+        FileVisualFamily.SHEET -> pick(0xFF047857, 0xFF34D399)
+        FileVisualFamily.SLIDES -> pick(0xFFC2410C, 0xFFFB923C)
         FileVisualFamily.TEXT -> pick(0xFF0F766E, 0xFF2DD4BF)
-        FileVisualFamily.CODE -> pick(0xFF4F46E5, 0xFF818CF8)
-        FileVisualFamily.IMAGE -> pick(0xFF6366F1, 0xFFA5B4FC)
-        FileVisualFamily.VIDEO -> pick(0xFF0284C7, 0xFF38BDF8)
-        FileVisualFamily.AUDIO -> pick(0xFF0D9488, 0xFF2DD4BF)
-        FileVisualFamily.APK -> pick(0xFF65A30D, 0xFFA3E635)
-        FileVisualFamily.ARCHIVE -> pick(0xFFB45309, 0xFFFBBF24)
-        else -> pick(0xFF64748B, 0xFF94A3B8)
+        FileVisualFamily.CODE -> pick(0xFF4338CA, 0xFF818CF8)
+        FileVisualFamily.IMAGE -> pick(0xFF4F46E5, 0xFFA5B4FC)
+        FileVisualFamily.VIDEO -> pick(0xFF0369A1, 0xFF38BDF8)
+        FileVisualFamily.AUDIO -> pick(0xFF0F766E, 0xFF2DD4BF)
+        FileVisualFamily.APK -> pick(0xFF4D7C0F, 0xFFA3E635)
+        FileVisualFamily.ARCHIVE -> pick(0xFFB45309, 0xFFFCD34D)
+        FileVisualFamily.GENERIC -> pick(0xFF475569, 0xFF94A3B8)
     }
 }
