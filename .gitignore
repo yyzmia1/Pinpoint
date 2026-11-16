@@ -1,0 +1,41 @@
+# Built application files
+*.apk
+*.ap_
+*.aab
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+build/
+app/build/
+
+# Gradle files
+.gradle/
+
+# Local configuration & secrets
+local.properties
+*.jks
+*.keystore
+app/keystore/
+
+# Intellij / Android Studio
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Extracted unit-test native libs & pdfbox assets
+app/src/test/jniLibs/
+app/src/test/resources/com/tom_roush/
+
+# OS files
+.DS_Store
+Thumbs.db
