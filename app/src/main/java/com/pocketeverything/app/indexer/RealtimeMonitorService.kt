@@ -20,6 +20,8 @@ import com.pocketeverything.app.MainActivity
 import com.pocketeverything.app.PocketEverythingApp
 import com.pocketeverything.app.R
 import com.pocketeverything.app.fs.StorageRootsHelper
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -35,7 +37,8 @@ import java.io.File
  */
 class RealtimeMonitorService : Service() {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + exceptionHandler)
     private val observers = mutableListOf<FileObserver>()
     private var mediaObserver: ContentObserver? = null
     private var debounceJob: Job? = null
@@ -43,12 +46,17 @@ class RealtimeMonitorService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification())
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification())
+        } catch (_: Throwable) {
+            stopSelf()
+            return
+        }
         registerWatchers()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
@@ -75,7 +83,7 @@ class RealtimeMonitorService : Service() {
                     scheduleDebouncedSync()
                 }
             }
-            multiObserver.startWatching()
+            runCatching { multiObserver.startWatching() }
             observers.add(multiObserver)
         } else {
             for (d in dirs) {
@@ -85,7 +93,7 @@ class RealtimeMonitorService : Service() {
                         scheduleDebouncedSync()
                     }
                 }
-                single.startWatching()
+                runCatching { single.startWatching() }
                 observers.add(single)
             }
         }

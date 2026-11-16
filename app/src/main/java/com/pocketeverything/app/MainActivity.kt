@@ -35,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.pocketeverything.app.data.ThemeMode
+import com.pocketeverything.app.indexer.RealtimeMonitorService
 import com.pocketeverything.app.search.AccessMode
 import com.pocketeverything.app.ui.FileDetailDialog
 import com.pocketeverything.app.ui.MainViewModel
@@ -68,6 +69,14 @@ class MainActivity : ComponentActivity() {
     ) {
         viewModel.refreshModeStatuses()
         viewModel.triggerFullRebuild(clearFirst = false)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        val app = application as PocketEverythingApp
+        if (app.container.settingsRepository.settings.value.realtimeMonitorEnabled) {
+            runCatching { RealtimeMonitorService.start(this) }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

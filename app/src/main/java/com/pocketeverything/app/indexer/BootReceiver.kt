@@ -10,7 +10,7 @@ class BootReceiver : BroadcastReceiver() {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         val app = context.applicationContext as? PocketEverythingApp ?: return
         if (app.container.settingsRepository.settings.value.realtimeMonitorEnabled) {
-            RealtimeMonitorService.start(context)
+            runCatching { RealtimeMonitorService.start(context) }
         }
     }
 }

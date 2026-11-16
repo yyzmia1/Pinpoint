@@ -14,6 +14,8 @@ import com.pocketeverything.app.search.DatabaseStats
 import com.pocketeverything.app.search.FileUpsertEntry
 import com.pocketeverything.app.search.SqliteSearchDatabase
 import com.pocketeverything.app.search.Tier2Status
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -56,18 +58,25 @@ class TwoTierIndexManager(
     private val providerResolver: (AccessMode) -> FileSystemProvider,
     private val extractorDispatcher: ExtractorDispatcher = ExtractorDispatcher()
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        if (throwable is CancellationException) return@CoroutineExceptionHandler
+        _progress.value = _progress.value.copy(
+            tier1Phase = Tier1Phase.IDLE,
+            tier2Phase = Tier2Phase.IDLE,
+            errorMessage = throwable.message ?: "索引任务异常",
+            statusMessage = "同步中断：${throwable.message ?: "请重试"}"
+        )
+    }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + exceptionHandler)
     private val tier1Mutex = Mutex()
     private var tier1Job: Job? = null
     private var tier2Job: Job? = null
 
-    private val _progress = MutableStateFlow(
-        IndexProgressState(stats = db.getStats())
-    )
+    private val _progress = MutableStateFlow(IndexProgressState())
     val progress: StateFlow<IndexProgressState> = _progress.asStateFlow()
 
     fun refreshStats() {
-        val stats = db.getStats()
+        val stats = runCatching { db.getStats() }.getOrNull() ?: return
         _progress.value = _progress.value.copy(
             stats = stats,
             tier2PendingCount = stats.pendingDocs
@@ -79,11 +88,18 @@ class TwoTierIndexManager(
      * or runs a full initial scan if database is empty.
      */
     fun triggerStartupSync() {
-        val currentStats = db.getStats()
-        if (currentStats.totalEntries == 0L) {
-            startFullScan(clearExisting = false)
-        } else {
-            startQuickHotDirsRefresh()
+        scope.launch {
+            if (tier1Job?.isActive == true) return@launch
+            val currentStats = runCatching { db.getStats() }.getOrElse { DatabaseStats(0, 0, 0, 0, 0, 0, 0) }
+            if (currentStats.totalEntries == 0L) {
+                startFullScan(clearExisting = false)
+            } else {
+                _progress.value = _progress.value.copy(
+                    stats = currentStats,
+                    tier2PendingCount = currentStats.pendingDocs
+                )
+                startQuickHotDirsRefresh()
+            }
         }
     }
 
@@ -91,56 +107,66 @@ class TwoTierIndexManager(
         tier1Job?.cancel()
         tier1Job = scope.launch {
             tier1Mutex.withLock {
-                val settings = settingsRepo.settings.value
-                val provider = providerResolver(settings.accessMode)
-                if (provider.checkAvailability() !is ModeAvailability.Ready) {
-                    refreshStats()
-                    return@withLock
-                }
-
-                _progress.value = _progress.value.copy(
-                    tier1Phase = Tier1Phase.QUICK_SYNC,
-                    tier1ScannedCount = 0,
-                    statusMessage = "正在增量校验常用目录…",
-                    errorMessage = null
-                )
-
-                val filter = FilterEngine(settings.filterConfig)
-                val hotDirs = StorageRootsHelper.getHotDirectories(context)
-                val cachedSnapshots = db.getDirSnapshots(hotDirs)
-                val currentStats = runCatching { provider.statDirectories(hotDirs) }.getOrDefault(emptyMap())
-
-                val dirtyDirs = currentStats.filter { (dir, mtime) ->
-                    cachedSnapshots[dir] != mtime
-                }.keys.toList()
-
-                var scannedTotal = 0
-                if (dirtyDirs.isNotEmpty()) {
-                    for (dir in dirtyDirs) {
-                        if (!isActive) break
-                        val seenInDir = HashSet<String>(512)
-                        scannedTotal += provider.scanDirectories(listOf(dir), filter) { batch ->
-                            for (r in batch) seenInDir.add(r.path)
-                            val entries = batch.map { it.toUpsertEntry(filter) }
-                            db.upsertFileBatch(entries)
-                            _progress.value = _progress.value.copy(
-                                tier1ScannedCount = scannedTotal + seenInDir.size
-                            )
-                        }
-                        db.pruneDirectorySubtree(dir, seenInDir)
+                try {
+                    val settings = settingsRepo.settings.value
+                    val provider = providerResolver(settings.accessMode)
+                    if (provider.checkAvailability() !is ModeAvailability.Ready) {
+                        refreshStats()
+                        return@withLock
                     }
-                    db.saveDirSnapshots(currentStats, settings.accessMode)
-                }
 
-                val updatedStats = db.getStats()
-                _progress.value = _progress.value.copy(
-                    tier1Phase = Tier1Phase.IDLE,
-                    tier1ScannedCount = scannedTotal,
-                    stats = updatedStats,
-                    tier2PendingCount = updatedStats.pendingDocs,
-                    statusMessage = if (dirtyDirs.isEmpty()) "索引已是最新" else "增量同步完成 (+$scannedTotal 项)"
-                )
-                ensureTier2Running()
+                    _progress.value = _progress.value.copy(
+                        tier1Phase = Tier1Phase.QUICK_SYNC,
+                        tier1ScannedCount = 0,
+                        statusMessage = "正在增量校验常用目录…",
+                        errorMessage = null
+                    )
+
+                    val filter = FilterEngine(settings.filterConfig)
+                    val hotDirs = StorageRootsHelper.getHotDirectories(context)
+                    val cachedSnapshots = db.getDirSnapshots(hotDirs)
+                    val currentStats = runCatching { provider.statDirectories(hotDirs) }.getOrDefault(emptyMap())
+
+                    val dirtyDirs = currentStats.filter { (dir, mtime) ->
+                        cachedSnapshots[dir] != mtime
+                    }.keys.toList()
+
+                    var scannedTotal = 0
+                    if (dirtyDirs.isNotEmpty()) {
+                        for (dir in dirtyDirs) {
+                            if (!isActive) break
+                            val seenInDir = HashSet<String>(512)
+                            scannedTotal += provider.scanDirectories(listOf(dir), filter) { batch ->
+                                for (r in batch) seenInDir.add(r.path)
+                                val entries = batch.map { it.toUpsertEntry(filter) }
+                                db.upsertFileBatch(entries)
+                                _progress.value = _progress.value.copy(
+                                    tier1ScannedCount = scannedTotal + seenInDir.size
+                                )
+                            }
+                            db.pruneDirectorySubtree(dir, seenInDir)
+                        }
+                        db.saveDirSnapshots(currentStats, settings.accessMode)
+                    }
+
+                    val updatedStats = db.getStats()
+                    _progress.value = _progress.value.copy(
+                        tier1Phase = Tier1Phase.IDLE,
+                        tier1ScannedCount = scannedTotal,
+                        stats = updatedStats,
+                        tier2PendingCount = updatedStats.pendingDocs,
+                        statusMessage = if (dirtyDirs.isEmpty()) "索引已是最新" else "增量同步完成 (+$scannedTotal 项)"
+                    )
+                    ensureTier2Running()
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (t: Throwable) {
+                    _progress.value = _progress.value.copy(
+                        tier1Phase = Tier1Phase.IDLE,
+                        errorMessage = t.message ?: "增量同步失败",
+                        statusMessage = "增量同步中断：${t.message ?: "请重试"}"
+                    )
+                }
             }
         }
     }
@@ -218,11 +244,13 @@ class TwoTierIndexManager(
                         statusMessage = "一级索引完成（共 ${stats.totalEntries} 项）"
                     )
                     ensureTier2Running()
+                } catch (ce: CancellationException) {
+                    throw ce
                 } catch (t: Throwable) {
                     _progress.value = _progress.value.copy(
                         tier1Phase = Tier1Phase.IDLE,
                         errorMessage = t.message ?: "扫描失败",
-                        statusMessage = "扫描中断：${t.message}"
+                        statusMessage = "扫描中断：${t.message ?: "请重试"}"
                     )
                 }
             }
@@ -232,18 +260,28 @@ class TwoTierIndexManager(
     fun startDirectoryRefresh(dirPath: String) {
         scope.launch {
             tier1Mutex.withLock {
-                val settings = settingsRepo.settings.value
-                val provider = providerResolver(settings.accessMode)
-                if (provider.checkAvailability() !is ModeAvailability.Ready) return@withLock
-                val filter = FilterEngine(settings.filterConfig)
-                val seen = HashSet<String>(256)
-                provider.scanDirectories(listOf(dirPath), filter) { batch ->
-                    for (r in batch) seen.add(r.path)
-                    db.upsertFileBatch(batch.map { it.toUpsertEntry(filter) })
+                try {
+                    val settings = settingsRepo.settings.value
+                    val provider = providerResolver(settings.accessMode)
+                    if (provider.checkAvailability() !is ModeAvailability.Ready) return@withLock
+                    val filter = FilterEngine(settings.filterConfig)
+                    val seen = HashSet<String>(256)
+                    provider.scanDirectories(listOf(dirPath), filter) { batch ->
+                        for (r in batch) seen.add(r.path)
+                        db.upsertFileBatch(batch.map { it.toUpsertEntry(filter) })
+                    }
+                    db.pruneDirectorySubtree(dirPath, seen)
+                    refreshStats()
+                    ensureTier2Running()
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (t: Throwable) {
+                    _progress.value = _progress.value.copy(
+                        tier1Phase = Tier1Phase.IDLE,
+                        errorMessage = t.message ?: "目录刷新失败",
+                        statusMessage = "目录刷新中断：${t.message ?: "请重试"}"
+                    )
                 }
-                db.pruneDirectorySubtree(dirPath, seen)
-                refreshStats()
-                ensureTier2Running()
             }
         }
     }
@@ -251,78 +289,88 @@ class TwoTierIndexManager(
     fun ensureTier2Running() {
         if (tier2Job?.isActive == true) return
         tier2Job = scope.launch {
-            val semaphore = Semaphore(2)
-            var processed = 0
-            while (isActive) {
-                val tasks = db.fetchPendingTier2Tasks(limit = 20)
-                if (tasks.isEmpty()) break
+            try {
+                val semaphore = Semaphore(2)
+                var processed = 0
+                while (isActive) {
+                    val tasks = db.fetchPendingTier2Tasks(limit = 20)
+                    if (tasks.isEmpty()) break
 
-                val settings = settingsRepo.settings.value
-                val filter = FilterEngine(settings.filterConfig)
+                    val settings = settingsRepo.settings.value
+                    val filter = FilterEngine(settings.filterConfig)
 
-                _progress.value = _progress.value.copy(
-                    tier2Phase = Tier2Phase.EXTRACTING,
-                    tier2ProcessedCount = processed,
-                    tier2PendingCount = db.getStats().pendingDocs
-                )
+                    _progress.value = _progress.value.copy(
+                        tier2Phase = Tier2Phase.EXTRACTING,
+                        tier2ProcessedCount = processed,
+                        tier2PendingCount = db.getStats().pendingDocs
+                    )
 
-                tasks.map { task ->
-                    async {
-                        semaphore.withPermit {
-                            if (!isActive) return@withPermit
-                            val provider = providerResolver(task.accessMode)
-                            val maxBytes = filter.maxBytesForExtension(task.ext)
-                            val outcome = runCatching {
-                                provider.openFileStream(task.path, maxBytes) { input ->
-                                    extractorDispatcher.extractByExtension(task.ext, input, maxBytes)
+                    tasks.map { task ->
+                        async {
+                            semaphore.withPermit {
+                                if (!isActive) return@withPermit
+                                val provider = providerResolver(task.accessMode)
+                                val maxBytes = filter.maxBytesForExtension(task.ext)
+                                val outcome = runCatching {
+                                    provider.openFileStream(task.path, maxBytes) { input ->
+                                        extractorDispatcher.extractByExtension(task.ext, input, maxBytes)
+                                    }
+                                }.getOrElse { err ->
+                                    if (err is CancellationException) throw err
+                                    ExtractionResult.Failed(Tier2Status.ERROR, err.message ?: "无法读取文件")
                                 }
-                            }.getOrElse { err ->
-                                ExtractionResult.Failed(Tier2Status.ERROR, err.message ?: "无法读取文件")
-                            }
 
-                            when (outcome) {
-                                is ExtractionResult.Success -> {
-                                    db.saveTier2Result(
-                                        fileId = task.fileId,
-                                        mtime = task.mtime,
-                                        status = Tier2Status.INDEXED,
-                                        extractedText = outcome.text
-                                    )
-                                }
-                                is ExtractionResult.Failed -> {
-                                    db.saveTier2Result(
-                                        fileId = task.fileId,
-                                        mtime = task.mtime,
-                                        status = outcome.status,
-                                        errorMessage = outcome.message
-                                    )
+                                when (outcome) {
+                                    is ExtractionResult.Success -> {
+                                        db.saveTier2Result(
+                                            fileId = task.fileId,
+                                            mtime = task.mtime,
+                                            status = Tier2Status.INDEXED,
+                                            extractedText = outcome.text
+                                        )
+                                    }
+                                    is ExtractionResult.Failed -> {
+                                        db.saveTier2Result(
+                                            fileId = task.fileId,
+                                            mtime = task.mtime,
+                                            status = outcome.status,
+                                            errorMessage = outcome.message
+                                        )
+                                    }
                                 }
                             }
                         }
-                    }
-                }.awaitAll()
+                    }.awaitAll()
 
-                processed += tasks.size
-                val stats = db.getStats()
+                    processed += tasks.size
+                    val stats = db.getStats()
+                    _progress.value = _progress.value.copy(
+                        tier2Phase = Tier2Phase.EXTRACTING,
+                        tier2ProcessedCount = processed,
+                        tier2PendingCount = stats.pendingDocs,
+                        stats = stats
+                    )
+                }
+
+                val finalStats = db.getStats()
                 _progress.value = _progress.value.copy(
-                    tier2Phase = Tier2Phase.EXTRACTING,
-                    tier2ProcessedCount = processed,
-                    tier2PendingCount = stats.pendingDocs,
-                    stats = stats
+                    tier2Phase = Tier2Phase.IDLE,
+                    tier2PendingCount = finalStats.pendingDocs,
+                    stats = finalStats,
+                    statusMessage = if (_progress.value.tier1Phase == Tier1Phase.IDLE) {
+                        "就绪 · ${finalStats.totalEntries} 文件 / ${finalStats.indexedDocs} 正文"
+                    } else {
+                        _progress.value.statusMessage
+                    }
+                )
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                _progress.value = _progress.value.copy(
+                    tier2Phase = Tier2Phase.IDLE,
+                    errorMessage = t.message ?: "正文解析中断"
                 )
             }
-
-            val finalStats = db.getStats()
-            _progress.value = _progress.value.copy(
-                tier2Phase = Tier2Phase.IDLE,
-                tier2PendingCount = finalStats.pendingDocs,
-                stats = finalStats,
-                statusMessage = if (_progress.value.tier1Phase == Tier1Phase.IDLE) {
-                    "就绪 · ${finalStats.totalEntries} 文件 / ${finalStats.indexedDocs} 正文"
-                } else {
-                    _progress.value.statusMessage
-                }
-            )
         }
     }
 

@@ -301,4 +301,36 @@ class SqliteSearchDatabaseAndBenchmarkTest {
             assertEquals(listOf("subA", "subB", "alpha.png", "zeta.json"), children.map { it.name })
         }
     }
+
+    @Test
+    fun `updating modified files and pruning deleted files keeps FTS5 index consistent`() {
+        val t0 = System.currentTimeMillis()
+        val path = "/storage/emulated/0/Download/notes.md"
+        SqliteSearchDatabase(":memory:").use { db ->
+            db.upsertFileBatch(
+                listOf(
+                    FileUpsertEntry(path, "/storage/emulated/0/Download", "notes.md", "md", 120L, t0, false, AccessMode.NORMAL, true, Tier2Status.PENDING)
+                )
+            )
+            val id = db.fetchPendingTier2Tasks(5).single().fileId
+            db.saveTier2Result(id, t0, Tier2Status.INDEXED, "initial english draft only")
+            assertEquals(1, db.search("content:english").items.size)
+
+            // File modified: size/mtime changed -> re-queued Tier 2 -> body replaced with Chinese text
+            db.upsertFileBatch(
+                listOf(
+                    FileUpsertEntry(path, "/storage/emulated/0/Download", "notes.md", "md", 260L, t0 + 5000L, false, AccessMode.NORMAL, true, Tier2Status.PENDING)
+                )
+            )
+            val updatedTask = db.fetchPendingTier2Tasks(5).single()
+            db.saveTier2Result(updatedTask.fileId, t0 + 5000L, Tier2Status.INDEXED, "更新后的财务预算明细")
+            assertEquals(0, db.search("content:english").items.size)
+            assertEquals(1, db.search("content:预算").items.size)
+
+            // Directory pruned when file is removed
+            assertEquals(1, db.pruneDirectorySubtree("/storage/emulated/0/Download", emptySet()))
+            assertEquals(0L, db.getStats().totalEntries)
+            assertEquals(0, db.search("content:预算").items.size)
+        }
+    }
 }

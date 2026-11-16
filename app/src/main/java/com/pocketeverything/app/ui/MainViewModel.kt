@@ -23,6 +23,7 @@ import com.pocketeverything.app.search.SearchResponse
 import com.pocketeverything.app.search.SearchResultItem
 import com.pocketeverything.app.search.SortOrder
 import com.pocketeverything.app.ui.preview.PreviewPayload
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
@@ -142,13 +143,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 SearchTriggerParams(q, scope, sort, showRecent)
             }.distinctUntilChanged().collectLatest { params ->
                 val resp = withContext(Dispatchers.IO) {
-                    db.search(
-                        rawQuery = params.query,
-                        quickScope = params.scope,
-                        sortOrder = params.sort,
-                        limit = 150,
-                        showRecentOnEmpty = params.showRecentOnEmpty
-                    )
+                    try {
+                        db.search(
+                            rawQuery = params.query,
+                            quickScope = params.scope,
+                            sortOrder = params.sort,
+                            limit = 150,
+                            showRecentOnEmpty = params.showRecentOnEmpty
+                        )
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (t: Throwable) {
+                        SearchResponse(emptyList(), 0, 0L, queryError = "检索异常：${t.message ?: "请重试"}")
+                    }
                 }
                 _searchResponse.value = resp
             }

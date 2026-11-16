@@ -22,6 +22,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import rikka.shizuku.Shizuku
@@ -198,6 +200,7 @@ class PrivilegedFileProvider(
     @Volatile
     private var service: IPrivilegedFsService? = null
 
+    private val bindMutex = Mutex()
     private var rootConn: ServiceConnection? = null
     private var shizukuConn: ServiceConnection? = null
     private var shizukuArgs: Shizuku.UserServiceArgs? = null
@@ -234,10 +237,15 @@ class PrivilegedFileProvider(
         val current = service
         if (current != null && current.asBinder().isBinderAlive) return current
 
-        return when (mode) {
-            AccessMode.ROOT -> bindRootService()
-            AccessMode.SHIZUKU -> bindShizukuService()
-            AccessMode.NORMAL -> error("Normal mode does not use privileged binder")
+        return bindMutex.withLock {
+            val recheck = service
+            if (recheck != null && recheck.asBinder().isBinderAlive) return@withLock recheck
+            service = null
+            when (mode) {
+                AccessMode.ROOT -> bindRootService()
+                AccessMode.SHIZUKU -> bindShizukuService()
+                AccessMode.NORMAL -> error("Normal mode does not use privileged binder")
+            }
         }
     }
 
@@ -291,10 +299,18 @@ class PrivilegedFileProvider(
             .debuggable(BuildConfig.DEBUG)
             .version(BuildConfig.VERSION_CODE)
 
+        if (!runCatching { Shizuku.pingBinder() }.getOrDefault(false)) {
+            error("Shizuku 服务未运行或暂未连接")
+        }
+
         shizukuConn = conn
         shizukuArgs = args
         withContext(Dispatchers.Main) {
-            Shizuku.bindUserService(args, conn)
+            runCatching {
+                Shizuku.bindUserService(args, conn)
+            }.onFailure { err ->
+                if (!deferred.isCompleted) deferred.completeExceptionally(err)
+            }
         }
         return withTimeoutOrNull(12_000L) { deferred.await() }
             ?: error("Shizuku UserService 启动超时，请确认 Shizuku 正常运行并已授权")
@@ -324,40 +340,48 @@ class PrivilegedFileProvider(
         val excludedPrefixes = filterEngine.getRootExcludedPrefixes(mode)
         val excludedDirNames = filterEngine.getExcludedDirNames()
 
-        val remoteJob = async(Dispatchers.IO) {
-            try {
-                svc.scanTreeToPipe(
-                    roots.toTypedArray(),
-                    excludedPrefixes,
-                    excludedDirNames,
-                    filterEngine.config.deduplicateMounts,
-                    writeEnd
-                )
-            } finally {
-                runCatching { writeEnd.close() }
-            }
-        }
-
-        val collected = ArrayList<ScannedFileRecord>(1500)
-        var total = 0
-        withContext(Dispatchers.IO) {
-            ParcelFileDescriptor.AutoCloseInputStream(readEnd).use { rawIn ->
-                total = BinaryTreeStreamCodec.readStream(rawIn, mode, batchSize = 1500) { batch ->
-                    collected.addAll(batch)
+        try {
+            val remoteJob = async(Dispatchers.IO) {
+                try {
+                    svc.scanTreeToPipe(
+                        roots.toTypedArray(),
+                        excludedPrefixes,
+                        excludedDirNames,
+                        filterEngine.config.deduplicateMounts,
+                        writeEnd
+                    )
+                } finally {
+                    runCatching { writeEnd.close() }
                 }
             }
+
+            val collected = ArrayList<ScannedFileRecord>(1500)
+            var total = 0
+            withContext(Dispatchers.IO) {
+                ParcelFileDescriptor.AutoCloseInputStream(readEnd).use { rawIn ->
+                    total = BinaryTreeStreamCodec.readStream(rawIn, mode, batchSize = 1500) { batch ->
+                        collected.addAll(batch)
+                    }
+                }
+            }
+            remoteJob.await()
+            for (chunk in collected.chunked(1500)) {
+                onBatch(chunk)
+            }
+            total
+        } catch (t: Throwable) {
+            abortIpc(t, readEnd, writeEnd)
         }
-        remoteJob.await()
-        for (chunk in collected.chunked(1500)) {
-            onBatch(chunk)
-        }
-        total
     }
 
     override suspend fun statDirectories(dirPaths: List<String>): Map<String, Long> = withContext(Dispatchers.IO) {
         if (dirPaths.isEmpty()) return@withContext emptyMap()
         val svc = ensureBound()
-        val mtimes = svc.statDirectories(dirPaths.toTypedArray())
+        val mtimes = try {
+            svc.statDirectories(dirPaths.toTypedArray())
+        } catch (t: Throwable) {
+            abortIpc(t)
+        }
         val map = HashMap<String, Long>(dirPaths.size)
         for (i in dirPaths.indices) {
             if (i < mtimes.size && mtimes[i] >= 0L) {
@@ -385,21 +409,31 @@ class PrivilegedFileProvider(
         val readEnd = pipe[0]
         val writeEnd = pipe[1]
 
-        val copyJob = async(Dispatchers.IO) {
-            try {
-                svc.copyFileToFd(path, writeEnd, maxBytes)
-            } finally {
-                runCatching { writeEnd.close() }
+        try {
+            val copyJob = async(Dispatchers.IO) {
+                try {
+                    svc.copyFileToFd(path, writeEnd, maxBytes)
+                } finally {
+                    runCatching { writeEnd.close() }
+                }
             }
-        }
 
-        val result = withContext(Dispatchers.IO) {
-            ParcelFileDescriptor.AutoCloseInputStream(readEnd).use { input ->
-                block(input)
+            val result = withContext(Dispatchers.IO) {
+                ParcelFileDescriptor.AutoCloseInputStream(readEnd).use { input ->
+                    block(input)
+                }
             }
+            copyJob.await()
+            result
+        } catch (t: Throwable) {
+            abortIpc(t, readEnd, writeEnd)
         }
-        copyJob.await()
-        result
+    }
+
+    private fun abortIpc(t: Throwable, vararg pfds: ParcelFileDescriptor): Nothing {
+        for (pfd in pfds) runCatching { pfd.close() }
+        if (service?.asBinder()?.isBinderAlive != true) service = null
+        throw t
     }
 
     override suspend fun copyFileTo(path: String, targetFile: File, maxBytes: Long): Boolean {
