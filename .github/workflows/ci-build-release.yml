@@ -103,12 +103,15 @@ jobs:
           SHORT_SHA="${{ steps.pkg.outputs.short_sha }}"
 
           {
-            printf "## 测试版自动构建 (%s)\n\n" "$VERSION_NAME"
-            printf "- **构建号**：#%s\n" "$COMMIT_COUNT"
-            printf "- **提交**：\`%s\`\n" "$SHORT_SHA"
-            printf -- "- **最近变更**：\n\n"
+            printf '%s\n' "## 测试版自动构建 (${VERSION_NAME})"
+            printf '%s\n' ""
+            printf '%s\n' "- **构建号**：#${COMMIT_COUNT}"
+            printf '%s\n' "- **提交**：\`${SHORT_SHA}\`"
+            printf '%s\n' "- **最近变更**："
+            printf '%s\n' ""
             git log -1 --pretty=%B
-            printf "\n> 注：此为 \`main\` 分支轻量测试版（Debug 包可与正式版并存安装；正式发布请见稳定 Release）。\n"
+            printf '%s\n' ""
+            printf '%s\n' "> 注：此为 \`main\` 分支轻量测试版（Debug 包可与正式版并存安装；正式发布请见稳定 Release）。"
           } > dist/release-notes.md
 
           gh release delete nightly --cleanup-tag --yes 2>/dev/null || true
