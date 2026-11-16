@@ -14,16 +14,16 @@ class UpdateCheckerTest {
         val sampleJson = """
             {
               "tag_name": "v1.1.0",
-              "html_url": "https://github.com/yyzmia1/PocketEverything/releases/tag/v1.1.0",
+              "html_url": "https://github.com/yyzmia1/Pinpoint/releases/tag/v1.1.0",
               "body": "新增严格正则与 Shizuku 向导\n修复通配符匹配",
               "assets": [
                 {
-                  "name": "PocketEverything-debug.apk",
+                  "name": "Pinpoint-debug.apk",
                   "size": 31000000,
                   "browser_download_url": "https://example.com/debug.apk"
                 },
                 {
-                  "name": "PocketEverything-v1.1.0-release.apk",
+                  "name": "Pinpoint-v1.1.0-release.apk",
                   "size": 12900000,
                   "browser_download_url": "https://example.com/release.apk"
                 }

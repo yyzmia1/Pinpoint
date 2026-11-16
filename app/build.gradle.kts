@@ -36,8 +36,8 @@ android {
 
         buildConfigField("String", "GIT_HASH", "\"$gitShortHash\"")
         buildConfigField("String", "BUILD_DATE", "\"$buildDateStr\"")
-        buildConfigField("String", "GITHUB_REPO", "\"yyzmia1/PocketEverything\"")
-        buildConfigField("String", "GITHUB_URL", "\"https://github.com/yyzmia1/PocketEverything\"")
+        buildConfigField("String", "GITHUB_REPO", "\"yyzmia1/Pinpoint\"")
+        buildConfigField("String", "GITHUB_URL", "\"https://github.com/yyzmia1/Pinpoint\"")
         buildConfigField("String", "DEVELOPER_NAME", "\"yyzmiao\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

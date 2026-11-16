@@ -36,7 +36,7 @@ object UpdateChecker {
                 connectTimeout = timeoutMs
                 readTimeout = timeoutMs
                 setRequestProperty("Accept", "application/vnd.github+json")
-                setRequestProperty("User-Agent", "PocketEverything-Android")
+                setRequestProperty("User-Agent", "Pinpoint-Android")
             }
             val code = conn.responseCode
             if (code == 404) {

@@ -21,5 +21,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "PocketEverything"
+rootProject.name = "Pinpoint"
 include(":app")
