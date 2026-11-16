@@ -104,10 +104,62 @@ android {
         }
     }
 
+    val unitTestSqliteDir = layout.buildDirectory.dir("generated/unitTestSqlite")
+    val unitTestPdfboxDir = layout.buildDirectory.dir("generated/unitTestPdfboxAssets")
+
+    sourceSets {
+        getByName("test").resources.srcDir(unitTestPdfboxDir)
+    }
+
+    val osName = System.getProperty("os.name").lowercase()
+    val osArch = System.getProperty("os.arch").lowercase()
+    val isArm64 = osArch.contains("aarch64") || osArch.contains("arm64")
+    val (sqliteNativeEntryDir, sqliteNativeFileName) = when {
+        osName.contains("win") -> "natives/windows_x64" to "sqliteJni.dll"
+        osName.contains("mac") || osName.contains("darwin") ->
+            (if (isArm64) "natives/osx_arm64" else "natives/osx_x64") to "libsqliteJni.dylib"
+        else -> (if (isArm64) "natives/linux_arm64" else "natives/linux_x64") to "libsqliteJni.so"
+    }
+
+    val unitTestNativeSqliteCfg by configurations.creating { isTransitive = false }
+    val unitTestPdfboxAssetsCfg by configurations.creating { isTransitive = false }
+
+    val extractUnitTestSqliteNative = tasks.register<Sync>("extractUnitTestSqliteNative") {
+        from(zipTree(provider { unitTestNativeSqliteCfg.singleFile })) {
+            include("$sqliteNativeEntryDir/$sqliteNativeFileName")
+            eachFile { path = name }
+            includeEmptyDirs = false
+        }
+        into(unitTestSqliteDir)
+    }
+
+    val extractUnitTestPdfboxAssets = tasks.register<Sync>("extractUnitTestPdfboxAssets") {
+        from(zipTree(provider { unitTestPdfboxAssetsCfg.singleFile })) {
+            include("assets/com/tom_roush/**")
+            eachFile { path = path.removePrefix("assets/") }
+            includeEmptyDirs = false
+        }
+        into(unitTestPdfboxDir)
+    }
+
+    tasks.matching { it.name.contains("UnitTestJavaRes") }.configureEach {
+        dependsOn(extractUnitTestPdfboxAssets)
+    }
+
     testOptions {
         unitTests {
             isReturnDefaultValues = true
             all {
+                it.dependsOn(extractUnitTestSqliteNative, extractUnitTestPdfboxAssets)
+                val sqliteDirPath = unitTestSqliteDir.get().asFile.absolutePath
+                it.jvmArgumentProviders.add(
+                    CommandLineArgumentProvider {
+                        listOf(
+                            "-Dandroidx.sqlite.driver.bundled.path=$sqliteDirPath",
+                            "-Dandroidx.sqlite.driver.bundled.name=$sqliteNativeFileName"
+                        )
+                    }
+                )
                 it.maxHeapSize = "2048m"
                 it.testLogging {
                     showStandardStreams = true
@@ -119,6 +171,8 @@ android {
 }
 
 dependencies {
+    "unitTestNativeSqliteCfg"("androidx.sqlite:sqlite-bundled-jvm:${libs.versions.sqliteBundled.get()}")
+    "unitTestPdfboxAssetsCfg"(libs.pdfbox.android)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.ktx)
