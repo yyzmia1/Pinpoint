@@ -250,25 +250,46 @@ fun SettingsScreen(
                             )
                         }
                         Spacer(Modifier.width(8.dp))
-                        if (mode == AccessMode.NORMAL && status !is ModeAvailability.Ready) {
-                            TextButton(
-                                onClick = onRequestStoragePermission,
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                            ) {
-                                Text("去授权", style = MaterialTheme.typography.labelMedium)
+                        when {
+                            mode == AccessMode.NORMAL && status !is ModeAvailability.Ready -> {
+                                TextButton(
+                                    onClick = onRequestStoragePermission,
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text("去授权", style = MaterialTheme.typography.labelMedium)
+                                }
                             }
-                        } else {
-                            ModeDotBadge(status)
+                            mode == AccessMode.SHIZUKU -> {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    ModeDotBadge(status)
+                                    Surface(
+                                        onClick = onOpenShizukuGuide,
+                                        shape = CircleShape,
+                                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                        contentColor = MaterialTheme.colorScheme.primary
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(start = 8.dp, end = 4.dp, top = 3.dp, bottom = 3.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text("指引", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium)
+                                            Icon(
+                                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                                contentDescription = "Shizuku 指引",
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            else -> ModeDotBadge(status)
                         }
                     }
                 }
 
-                SettingsDivider()
-                NavigationRow(
-                    title = "Shizuku 配置向导",
-                    trailingValue = if (modeStatuses[AccessMode.SHIZUKU] is ModeAvailability.Ready) "已就绪" else "未就绪",
-                    onClick = onOpenShizukuGuide
-                )
                 SettingsDivider()
                 Row(
                     modifier = Modifier

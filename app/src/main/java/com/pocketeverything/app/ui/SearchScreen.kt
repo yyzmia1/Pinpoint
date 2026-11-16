@@ -36,6 +36,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DarkMode
@@ -828,24 +829,19 @@ private fun ModeSheet(
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface) {
         Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 28.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("访问模式", style = MaterialTheme.typography.titleLarge)
-                TextButton(onClick = onOpenShizukuGuide) {
-                    Text("Shizuku 向导")
-                }
-            }
+            Text(
+                text = "访问模式",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.padding(start = 4.dp, bottom = 10.dp)
+            )
             AccessMode.entries.forEach { mode ->
                 val selected = mode == current
                 val status = statuses[mode]
                 Surface(
                     onClick = { onSelect(mode) },
                     shape = RoundedCornerShape(14.dp),
-                    color = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.surfaceContainerLow,
-                    border = if (selected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)) else null,
+                    color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer,
+                    border = if (selected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)) else null,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(vertical = 4.dp)
@@ -855,7 +851,11 @@ private fun ModeSheet(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(mode.label, style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                text = mode.label,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                            )
                             Text(
                                 text = when (mode) {
                                     AccessMode.NORMAL -> "内部与外置存储公开目录"
@@ -863,10 +863,10 @@ private fun ModeSheet(
                                     AccessMode.ROOT -> "根目录 / 全盘索引与挂载去重"
                                 },
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.82f) else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Spacer(Modifier.width(10.dp))
+                        Spacer(Modifier.width(8.dp))
                         Box(
                             Modifier
                                 .size(8.dp)
@@ -882,8 +882,37 @@ private fun ModeSheet(
                                 null -> "检测中"
                             },
                             style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        if (mode == AccessMode.SHIZUKU) {
+                            Spacer(Modifier.width(8.dp))
+                            Surface(
+                                onClick = onOpenShizukuGuide,
+                                shape = CircleShape,
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.surface.copy(alpha = 0.25f)
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceContainerHigh
+                                },
+                                contentColor = if (selected) {
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.primary
+                                }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(start = 8.dp, end = 4.dp, top = 3.dp, bottom = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("指引", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium)
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                        contentDescription = "Shizuku 指引",
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
