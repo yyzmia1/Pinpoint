@@ -294,7 +294,7 @@ private fun HeaderBar(
         BrandMarkIcon(size = 24.dp)
         Spacer(Modifier.width(9.dp))
         Text(
-            text = "PocketEverything",
+            text = "口袋快搜",
             style = MaterialTheme.typography.titleLarge,
             fontSize = 17.sp,
             modifier = Modifier.weight(1f),
@@ -702,56 +702,56 @@ private fun ResultRow(
         Spacer(Modifier.width(12.dp))
 
         Column(modifier = Modifier.weight(1f)) {
+            // Top line: Filename on left + Smart timestamp pinned to top-right
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(IntrinsicSize.Min)
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Top
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = nameText,
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        text = pathText,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                Spacer(Modifier.width(12.dp))
-
-                Column(
-                    modifier = Modifier.fillMaxHeight(),
-                    verticalArrangement = Arrangement.SpaceBetween,
-                    horizontalAlignment = Alignment.End
-                ) {
-                    Text(
-                        text = FormatUtils.formatSmartDate(item.mtime),
-                        style = metaStyle,
-                        color = metaColor,
-                        maxLines = 1
-                    )
-                    if (!item.isDir) {
-                        Text(
-                            text = FormatUtils.formatBytes(item.size),
-                            style = metaStyle,
-                            color = metaColor,
-                            maxLines = 1
-                        )
-                    } else {
-                        Spacer(Modifier.height(1.dp))
-                    }
-                }
+                Text(
+                    text = nameText,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    text = FormatUtils.formatSmartDate(item.mtime),
+                    style = metaStyle,
+                    color = metaColor,
+                    maxLines = 1,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
             }
 
             if (item.snippets.isNotEmpty()) {
                 SnippetBlock(item, hlBg, hlFg)
+            }
+
+            Spacer(Modifier.height(3.dp))
+
+            // Bottom line: Parent path on left + File size strictly anchored at bottom-right
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = pathText,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (!item.isDir) {
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = FormatUtils.formatBytes(item.size),
+                        style = metaStyle,
+                        color = metaColor,
+                        maxLines = 1
+                    )
+                }
             }
         }
     }

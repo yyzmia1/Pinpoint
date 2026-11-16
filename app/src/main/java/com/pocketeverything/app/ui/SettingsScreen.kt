@@ -168,12 +168,12 @@ fun SettingsScreen(
                     Spacer(Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "PocketEverything",
+                            text = "口袋快搜",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            text = "v${BuildConfig.VERSION_NAME} · #${BuildConfig.VERSION_CODE} (${BuildConfig.GIT_HASH})",
+                            text = "PocketEverything · v${BuildConfig.VERSION_NAME} (#${BuildConfig.VERSION_CODE})",
                             style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -476,7 +476,7 @@ fun SettingsScreen(
             SettingsSection(title = "关于与开源", cardColor = cardColor) {
                 InfoRow("开发者", BuildConfig.DEVELOPER_NAME)
                 SettingsDivider()
-                InfoRow("构建日期", BuildConfig.BUILD_DATE)
+                InfoRow("构建日期", "${BuildConfig.BUILD_DATE} (${BuildConfig.GIT_HASH})")
                 SettingsDivider()
                 Row(
                     modifier = Modifier

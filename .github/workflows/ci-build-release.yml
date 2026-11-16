@@ -5,13 +5,19 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      build_release:
+        description: "Also compile R8 Release APK (slower)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
 
 concurrency:
   group: ci-main
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build-and-prerelease:
@@ -41,16 +47,20 @@ jobs:
             echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > app/keystore/pocket-release.jks
           fi
 
-      - name: Run unit tests and assemble APKs
+      - name: Run unit tests and assemble fast Debug test APK
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug --console=plain
+
+      - name: Assemble Release APK (on manual request)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_release == true }}
         env:
           POCKET_KEYSTORE_PASS: ${{ secrets.POCKET_KEYSTORE_PASS }}
           POCKET_KEY_ALIAS: ${{ secrets.POCKET_KEY_ALIAS }}
           POCKET_KEY_PASS: ${{ secrets.POCKET_KEY_PASS }}
-        run: |
-          chmod +x gradlew
-          ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --console=plain
+        run: ./gradlew :app:assembleRelease --console=plain
 
-      - name: Prepare signed test APKs
+      - name: Package test APKs
         id: pkg
         run: |
           VERSION_NAME="$(git describe --tags --match 'v*' --always | sed 's/^v//')"
@@ -98,7 +108,7 @@ jobs:
             printf "- **提交**：\`%s\`\n" "$SHORT_SHA"
             printf -- "- **最近变更**：\n\n"
             git log -1 --pretty=%B
-            printf "\n> 注：此为 \`main\` 分支每次提交自动构建的预发布测试版（Pre-release），正式版本请查看稳定 Release。\n"
+            printf "\n> 注：此为 \`main\` 分支轻量测试版（Debug 包可与正式版并存安装；正式发布请见稳定 Release）。\n"
           } > dist/release-notes.md
 
           gh release delete nightly --cleanup-tag --yes 2>/dev/null || true

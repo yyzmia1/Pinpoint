@@ -872,12 +872,7 @@ private fun FolderPreviewBody(
                     ) {
                         FileTypeIcon(isDir = child.isDir, ext = child.ext, size = 34.dp)
                         Spacer(Modifier.width(12.dp))
-                        Column(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxHeight(),
-                            verticalArrangement = Arrangement.SpaceBetween
-                        ) {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = child.name,
                                 style = MaterialTheme.typography.bodyMedium,
@@ -885,19 +880,25 @@ private fun FolderPreviewBody(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
-                            Text(
-                                text = FormatUtils.formatSmartDate(child.mtime),
-                                style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        if (!child.isDir) {
-                            Spacer(Modifier.width(10.dp))
-                            Text(
-                                text = FormatUtils.formatBytes(child.size),
-                                style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Spacer(Modifier.height(2.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = FormatUtils.formatSmartDate(child.mtime),
+                                    style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (!child.isDir) {
+                                    Text(
+                                        text = FormatUtils.formatBytes(child.size),
+                                        style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
                         }
                     }
                     HorizontalDivider(

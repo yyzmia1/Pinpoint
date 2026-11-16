@@ -72,7 +72,7 @@ fun WelcomeGuideOverlay(
     var stepIndex by remember { mutableIntStateOf(0) }
     val steps = listOf(
         GuideStep(
-            title = "欢迎使用 PocketEverything",
+            title = "欢迎使用口袋快搜",
             body = "离线秒搜设备上的文件名、目录以及 TXT / MD / DOCX / PDF 正文内容，支持任意中文片段毫秒命中。",
             target = targets.searchField
         ),
