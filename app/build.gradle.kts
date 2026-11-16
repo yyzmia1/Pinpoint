@@ -28,7 +28,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.pocketeverything.app"
+        applicationId = "com.yyzm.pinpoint"
         minSdk = 26
         targetSdk = 35
         versionCode = gitCommitCount

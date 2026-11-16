@@ -136,7 +136,7 @@ class RealtimeMonitorService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_search)
-            .setContentTitle("PocketEverything 实时监听中")
+            .setContentTitle("Pinpoint 实时监听中")
             .setContentText("正在静默追踪新建文档与下载目录变更")
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)

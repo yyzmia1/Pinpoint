@@ -235,7 +235,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 refreshModeStatuses()
                 indexManager.startFullScan(clearExisting = false)
             } else if (Shizuku.shouldShowRequestPermissionRationale()) {
-                _messages.tryEmit("请在 Shizuku 应用的授权管理中手动允许 PocketEverything")
+                _messages.tryEmit("请在 Shizuku 应用的授权管理中手动允许 Pinpoint")
                 openShizukuOrDownload()
             } else {
                 Shizuku.requestPermission(SHIZUKU_REQ_CODE)

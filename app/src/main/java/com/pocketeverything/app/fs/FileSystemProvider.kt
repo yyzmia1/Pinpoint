@@ -224,7 +224,7 @@ class PrivilegedFileProvider(
                     Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
                 }.getOrDefault(false)
                 if (granted) ModeAvailability.Ready
-                else ModeAvailability.NeedsPermission("请在 Shizuku 中授权 PocketEverything")
+                else ModeAvailability.NeedsPermission("请在 Shizuku 中授权 Pinpoint")
             }
             AccessMode.NORMAL -> ModeAvailability.Ready
         }
