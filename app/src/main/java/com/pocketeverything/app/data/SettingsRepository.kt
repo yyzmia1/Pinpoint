@@ -13,6 +13,8 @@ data class AppSettings(
     val filterConfig: FilterConfig = FilterConfig(),
     val realtimeMonitorEnabled: Boolean = false,
     val openContentHitsInPreview: Boolean = true,
+    val showRecentOnEmptyQuery: Boolean = true,
+    val hasSeenOnboarding: Boolean = false,
     val lastFullScanAtMillis: Long = 0L
 )
 
@@ -53,6 +55,8 @@ class SettingsRepository(context: Context) {
             ),
             realtimeMonitorEnabled = prefs.getBoolean(KEY_REALTIME_MONITOR, false),
             openContentHitsInPreview = prefs.getBoolean(KEY_PREVIEW_ON_CONTENT, true),
+            showRecentOnEmptyQuery = prefs.getBoolean(KEY_SHOW_RECENT_ON_EMPTY, true),
+            hasSeenOnboarding = prefs.getBoolean(KEY_HAS_SEEN_ONBOARDING, false),
             lastFullScanAtMillis = prefs.getLong(KEY_LAST_FULL_SCAN, 0L)
         )
     }
@@ -86,6 +90,16 @@ class SettingsRepository(context: Context) {
         _settings.value = _settings.value.copy(openContentHitsInPreview = enabled)
     }
 
+    fun setShowRecentOnEmptyQuery(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SHOW_RECENT_ON_EMPTY, enabled).apply()
+        _settings.value = _settings.value.copy(showRecentOnEmptyQuery = enabled)
+    }
+
+    fun setHasSeenOnboarding(seen: Boolean) {
+        prefs.edit().putBoolean(KEY_HAS_SEEN_ONBOARDING, seen).apply()
+        _settings.value = _settings.value.copy(hasSeenOnboarding = seen)
+    }
+
     fun markFullScanCompleted(timestampMillis: Long = System.currentTimeMillis()) {
         prefs.edit().putLong(KEY_LAST_FULL_SCAN, timestampMillis).apply()
         _settings.value = _settings.value.copy(lastFullScanAtMillis = timestampMillis)
@@ -103,6 +117,8 @@ class SettingsRepository(context: Context) {
         private const val KEY_MAX_PDF_MB = "max_pdf_mb"
         private const val KEY_REALTIME_MONITOR = "realtime_monitor"
         private const val KEY_PREVIEW_ON_CONTENT = "preview_on_content"
+        private const val KEY_SHOW_RECENT_ON_EMPTY = "show_recent_on_empty"
+        private const val KEY_HAS_SEEN_ONBOARDING = "has_seen_onboarding"
         private const val KEY_LAST_FULL_SCAN = "last_full_scan"
     }
 }

@@ -33,10 +33,17 @@ import androidx.compose.ui.unit.dp
 import com.pocketeverything.app.search.AccessMode
 import com.pocketeverything.app.ui.FileDetailDialog
 import com.pocketeverything.app.ui.MainViewModel
+import com.pocketeverything.app.ui.OnboardingTargets
 import com.pocketeverything.app.ui.ReaderPreviewSheet
 import com.pocketeverything.app.ui.SearchScreen
 import com.pocketeverything.app.ui.SettingsScreen
+import com.pocketeverything.app.ui.ShizukuGuideScreen
+import com.pocketeverything.app.ui.WelcomeGuideOverlay
 import com.pocketeverything.app.ui.theme.PocketEverythingTheme
+
+private enum class AppPage {
+    SEARCH, SETTINGS, SHIZUKU_GUIDE
+}
 
 class MainActivity : ComponentActivity() {
 
@@ -70,15 +77,23 @@ class MainActivity : ComponentActivity() {
                 val searchResponse by viewModel.searchResponse.collectAsState()
                 val settings by viewModel.settings.collectAsState()
                 val modeStatuses by viewModel.modeStatuses.collectAsState()
+                val shizukuStatus by viewModel.shizukuLiveStatus.collectAsState()
                 val indexProgress by viewModel.indexProgress.collectAsState()
+                val updateState by viewModel.updateState.collectAsState()
                 val previewPayload by viewModel.previewPayload.collectAsState()
                 val detailItem by viewModel.detailItem.collectAsState()
 
-                var showSettings by remember { mutableStateOf(false) }
+                var currentPage by remember { mutableStateOf(AppPage.SEARCH) }
+                var previousPage by remember { mutableStateOf(AppPage.SEARCH) }
+                var onboardingTargets by remember { mutableStateOf(OnboardingTargets()) }
                 val snackbarHostState = remember { SnackbarHostState() }
 
-                BackHandler(enabled = showSettings) {
-                    showSettings = false
+                BackHandler(enabled = currentPage != AppPage.SEARCH) {
+                    currentPage = when (currentPage) {
+                        AppPage.SHIZUKU_GUIDE -> previousPage
+                        AppPage.SETTINGS -> AppPage.SEARCH
+                        AppPage.SEARCH -> AppPage.SEARCH
+                    }
                 }
 
                 LaunchedEffect(Unit) {
@@ -92,46 +107,87 @@ class MainActivity : ComponentActivity() {
                         .fillMaxSize()
                         .background(MaterialTheme.colorScheme.background)
                 ) {
-                    if (showSettings) {
-                        SettingsScreen(
-                            settings = settings,
-                            modeStatuses = modeStatuses,
-                            indexProgress = indexProgress,
-                            onBack = { showSettings = false },
-                            onSelectMode = { viewModel.switchMode(it) },
-                            onRequestStoragePermission = { requestAllFilesPermission() },
-                            onRequestShizukuPermission = { viewModel.requestShizukuPermission() },
-                            onRefreshModes = { viewModel.refreshModeStatuses() },
-                            onUpdateFilterConfig = { viewModel.updateFilterConfig(it) },
-                            onSetPreviewPreference = { viewModel.setOpenContentHitsInPreview(it) },
-                            onSetRealtimeMonitor = { viewModel.setRealtimeMonitorEnabled(it) },
-                            onQuickSync = { viewModel.triggerQuickSync() },
-                            onFullRebuild = { viewModel.triggerFullRebuild(clearFirst = true) }
-                        )
-                    } else {
-                        SearchScreen(
-                            query = query,
-                            quickScope = quickScope,
-                            sortOrder = sortOrder,
-                            searchResponse = searchResponse,
-                            settings = settings,
-                            modeStatuses = modeStatuses,
-                            indexProgress = indexProgress,
-                            onQueryChange = { viewModel.updateQuery(it) },
-                            onScopeChange = { viewModel.updateQuickScope(it) },
-                            onSortChange = { viewModel.updateSortOrder(it) },
-                            onItemClick = { viewModel.onItemClicked(it) },
-                            onItemLongPress = { viewModel.showDetail(it) },
-                            onSelectMode = { viewModel.switchMode(it) },
-                            onQuickSync = { viewModel.triggerQuickSync() },
-                            onOpenSettings = { showSettings = true },
-                            onRequestPermissionForCurrentMode = {
-                                when (settings.accessMode) {
-                                    AccessMode.NORMAL -> requestAllFilesPermission()
-                                    AccessMode.SHIZUKU -> viewModel.requestShizukuPermission()
-                                    AccessMode.ROOT -> viewModel.switchMode(AccessMode.ROOT)
+                    when (currentPage) {
+                        AppPage.SEARCH -> {
+                            SearchScreen(
+                                query = query,
+                                quickScope = quickScope,
+                                sortOrder = sortOrder,
+                                searchResponse = searchResponse,
+                                settings = settings,
+                                modeStatuses = modeStatuses,
+                                indexProgress = indexProgress,
+                                onQueryChange = { viewModel.updateQuery(it) },
+                                onScopeChange = { viewModel.updateQuickScope(it) },
+                                onSortChange = { viewModel.updateSortOrder(it) },
+                                onItemClick = { viewModel.onItemClicked(it) },
+                                onItemLongPress = { viewModel.showDetail(it) },
+                                onSelectMode = { viewModel.switchMode(it) },
+                                onQuickSync = { viewModel.triggerQuickSync() },
+                                onOpenSettings = { currentPage = AppPage.SETTINGS },
+                                onOpenShizukuGuide = {
+                                    previousPage = AppPage.SEARCH
+                                    currentPage = AppPage.SHIZUKU_GUIDE
+                                },
+                                onRequestPermissionForCurrentMode = {
+                                    when (settings.accessMode) {
+                                        AccessMode.NORMAL -> requestAllFilesPermission()
+                                        AccessMode.SHIZUKU -> viewModel.requestShizukuPermission()
+                                        AccessMode.ROOT -> viewModel.switchMode(AccessMode.ROOT)
+                                    }
+                                },
+                                onTargetsMeasured = { onboardingTargets = it }
+                            )
+                        }
+                        AppPage.SETTINGS -> {
+                            SettingsScreen(
+                                settings = settings,
+                                modeStatuses = modeStatuses,
+                                indexProgress = indexProgress,
+                                updateState = updateState,
+                                onBack = { currentPage = AppPage.SEARCH },
+                                onSelectMode = { viewModel.switchMode(it) },
+                                onRequestStoragePermission = { requestAllFilesPermission() },
+                                onOpenShizukuGuide = {
+                                    previousPage = AppPage.SETTINGS
+                                    currentPage = AppPage.SHIZUKU_GUIDE
+                                },
+                                onRefreshModes = { viewModel.refreshModeStatuses() },
+                                onUpdateFilterConfig = { viewModel.updateFilterConfig(it) },
+                                onSetShowRecentOnEmpty = { viewModel.setShowRecentOnEmptyQuery(it) },
+                                onSetPreviewPreference = { viewModel.setOpenContentHitsInPreview(it) },
+                                onSetRealtimeMonitor = { viewModel.setRealtimeMonitorEnabled(it) },
+                                onQuickSync = { viewModel.triggerQuickSync() },
+                                onFullRebuild = { viewModel.triggerFullRebuild(clearFirst = true) },
+                                onCheckUpdates = { viewModel.checkForUpdates() },
+                                onDismissUpdateDialog = { viewModel.dismissUpdateDialog() },
+                                onOpenUrl = { viewModel.openUrl(it) },
+                                onCopyUrl = { viewModel.copyText("仓库地址", it) },
+                                onReplayOnboarding = {
+                                    viewModel.replayOnboarding()
+                                    currentPage = AppPage.SEARCH
                                 }
-                            }
+                            )
+                        }
+                        AppPage.SHIZUKU_GUIDE -> {
+                            ShizukuGuideScreen(
+                                status = shizukuStatus,
+                                onBack = { currentPage = previousPage },
+                                onRefreshStatus = { viewModel.refreshModeStatuses() },
+                                onOpenOrDownloadShizuku = { viewModel.openShizukuOrDownload() },
+                                onRequestPermission = { viewModel.requestShizukuPermission() },
+                                onEnableShizukuModeAndScan = {
+                                    viewModel.switchMode(AccessMode.SHIZUKU)
+                                    currentPage = AppPage.SEARCH
+                                }
+                            )
+                        }
+                    }
+
+                    if (currentPage == AppPage.SEARCH && !settings.hasSeenOnboarding) {
+                        WelcomeGuideOverlay(
+                            targets = onboardingTargets,
+                            onFinish = { viewModel.completeOnboarding() }
                         )
                     }
 

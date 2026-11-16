@@ -1,11 +1,16 @@
 package com.pocketeverything.app.ui
 
 import android.app.Application
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketeverything.app.BuildConfig
 import com.pocketeverything.app.PocketEverythingApp
 import com.pocketeverything.app.data.AppSettings
+import com.pocketeverything.app.data.UpdateCheckState
+import com.pocketeverything.app.data.UpdateChecker
 import com.pocketeverything.app.filter.FilterConfig
 import com.pocketeverything.app.fs.ModeAvailability
 import com.pocketeverything.app.indexer.IndexProgressState
@@ -41,6 +46,12 @@ data class PreviewPayload(
     val statusNote: String? = null
 )
 
+data class ShizukuLiveStatus(
+    val isInstalled: Boolean = false,
+    val isServiceRunning: Boolean = false,
+    val isPermissionGranted: Boolean = false
+)
+
 @OptIn(FlowPreview::class)
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as PocketEverythingApp
@@ -66,6 +77,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _modeStatuses = MutableStateFlow<Map<AccessMode, ModeAvailability>>(emptyMap())
     val modeStatuses: StateFlow<Map<AccessMode, ModeAvailability>> = _modeStatuses.asStateFlow()
+
+    private val _shizukuLiveStatus = MutableStateFlow(ShizukuLiveStatus())
+    val shizukuLiveStatus: StateFlow<ShizukuLiveStatus> = _shizukuLiveStatus.asStateFlow()
+
+    private val _updateState = MutableStateFlow<UpdateCheckState>(UpdateCheckState.Idle)
+    val updateState: StateFlow<UpdateCheckState> = _updateState.asStateFlow()
 
     private val _previewPayload = MutableStateFlow<PreviewPayload?>(null)
     val previewPayload: StateFlow<PreviewPayload?> = _previewPayload.asStateFlow()
@@ -108,17 +125,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _query.debounce(65),
                 _quickScope,
                 _sortOrder,
+                settingsRepo.settings,
                 indexManager.progress
-            ) { q, scope, sort, _ ->
-                Triple(q, scope, sort)
-            }.collectLatest { (q, scope, sort) ->
+            ) { q, scope, sort, st, _ ->
+                SearchTriggerParams(q, scope, sort, st.showRecentOnEmptyQuery)
+            }.collectLatest { params ->
                 val resp = withContext(Dispatchers.IO) {
-                    db.search(q, quickScope = scope, sortOrder = sort, limit = 150)
+                    db.search(
+                        rawQuery = params.query,
+                        quickScope = params.scope,
+                        sortOrder = params.sort,
+                        limit = 150,
+                        showRecentOnEmpty = params.showRecentOnEmpty
+                    )
                 }
                 _searchResponse.value = resp
             }
         }
     }
+
+    private data class SearchTriggerParams(
+        val query: String,
+        val scope: QuickScope,
+        val sort: SortOrder,
+        val showRecentOnEmpty: Boolean
+    )
 
     fun updateQuery(newQuery: String) {
         _query.value = newQuery
@@ -139,6 +170,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 map[mode] = container.providerFor(mode).checkAvailability()
             }
             _modeStatuses.value = map
+
+            val installed = runCatching {
+                app.packageManager.getPackageInfo(SHIZUKU_PACKAGE, 0)
+                true
+            }.getOrDefault(false)
+            val running = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
+            val granted = running && runCatching {
+                Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+            }.getOrDefault(false)
+            _shizukuLiveStatus.value = ShizukuLiveStatus(installed, running, granted)
         }
     }
 
@@ -151,7 +192,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             when (availability) {
                 is ModeAvailability.Ready -> {
                     settingsRepo.updateAccessMode(mode)
-                    _messages.tryEmit("已切换至 ${mode.label}，开始同步索引")
+                    _messages.tryEmit("已切换至 ${mode.label}")
                     indexManager.startFullScan(clearExisting = false)
                 }
                 is ModeAvailability.NeedsPermission -> {
@@ -172,7 +213,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun requestShizukuPermission() {
         runCatching {
             if (!Shizuku.pingBinder()) {
-                _messages.tryEmit("Shizuku 未启动，请先打开 Shizuku 应用")
+                _messages.tryEmit("Shizuku 服务未运行，请先启动 Shizuku")
                 return
             }
             if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
@@ -186,9 +227,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun openShizukuOrDownload() {
+        val launchIntent = app.packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)
+        if (launchIntent != null) {
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            app.startActivity(launchIntent)
+        } else {
+            openUrl("https://shizuku.rikka.app/zh-hans/download/")
+        }
+    }
+
+    fun openUrl(url: String) {
+        runCatching {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            app.startActivity(intent)
+        }.onFailure {
+            _messages.tryEmit("无法打开链接：$url")
+        }
+    }
+
+    fun checkForUpdates() {
+        if (_updateState.value is UpdateCheckState.Checking) return
+        _updateState.value = UpdateCheckState.Checking
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                UpdateChecker.checkLatestRelease(
+                    repoSlug = BuildConfig.GITHUB_REPO,
+                    currentVersion = BuildConfig.VERSION_NAME
+                )
+            }
+            _updateState.value = result
+        }
+    }
+
+    fun dismissUpdateDialog() {
+        if (_updateState.value is UpdateCheckState.Available || _updateState.value is UpdateCheckState.Error) {
+            _updateState.value = UpdateCheckState.Idle
+        }
+    }
+
+    fun completeOnboarding() {
+        settingsRepo.setHasSeenOnboarding(true)
+    }
+
+    fun replayOnboarding() {
+        settingsRepo.setHasSeenOnboarding(false)
+    }
+
     fun triggerQuickSync() {
         indexManager.startQuickHotDirsRefresh()
-        _messages.tryEmit("正在快速增量校对目录…")
+        _messages.tryEmit("正在增量校验目录")
     }
 
     fun triggerFullRebuild(clearFirst: Boolean = false) {
@@ -209,14 +299,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         settingsRepo.setOpenContentHitsInPreview(enabled)
     }
 
+    fun setShowRecentOnEmptyQuery(enabled: Boolean) {
+        settingsRepo.setShowRecentOnEmptyQuery(enabled)
+    }
+
     fun setRealtimeMonitorEnabled(enabled: Boolean) {
         settingsRepo.setRealtimeMonitorEnabled(enabled)
         if (enabled) {
             runCatching { RealtimeMonitorService.start(app) }
-            _messages.tryEmit("已开启常驻实时文件监控")
+            _messages.tryEmit("已开启常驻实时监听")
         } else {
             runCatching { RealtimeMonitorService.stop(app) }
-            _messages.tryEmit("已关闭常驻实时文件监控")
+            _messages.tryEmit("已关闭常驻实时监听")
         }
     }
 
@@ -236,11 +330,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openPreview(item: SearchResultItem) {
         viewModelScope.launch {
-            val terms = QuerySyntaxParser.parse(_query.value).positiveHighlightTerms
+            val rules = QuerySyntaxParser.parse(_query.value).positiveHighlightRules
             if (item.ext == "doc") {
                 _previewPayload.value = PreviewPayload(
                     item = item,
-                    fullText = "该文件为旧版二进制 Word (.doc) 格式。\n\n为保证手机端极致速度与极小体积，本应用仅对 .docx / .pdf / .txt / .md 提供正文解析。\n请转换为 .docx 或 PDF，或点击下方“用其他应用打开”。",
+                    fullText = "旧版二进制 .doc 暂不支持内置正文预览，建议转换为 .docx 或 PDF，或点击下方“用其他应用打开”。",
                     matchRanges = emptyList(),
                     statusNote = "旧版 .doc 暂不支持正文索引"
                 )
@@ -249,12 +343,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             val cachedText = withContext(Dispatchers.IO) { db.getRawDocumentText(item.id) }
             if (cachedText != null) {
-                val ranges = SnippetHighlighter.findMatchRanges(cachedText, terms, maxMatches = 500)
+                val ranges = SnippetHighlighter.findMatchRangesForRules(cachedText, rules, maxMatches = 500)
                 _previewPayload.value = PreviewPayload(item, cachedText, ranges)
                 return@launch
             }
 
-            // Fallback: live extraction if file wasn't extracted yet
             val liveResult = withContext(Dispatchers.IO) {
                 val provider = container.providerFor(item.accessMode)
                 val maxBytes = settings.value.filterConfig.maxBytesForExtensionOrDefault(item.ext)
@@ -269,13 +362,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             when (liveResult) {
                 is ExtractionResult.Success -> {
-                    val ranges = SnippetHighlighter.findMatchRanges(liveResult.text, terms, maxMatches = 500)
+                    val ranges = SnippetHighlighter.findMatchRangesForRules(liveResult.text, rules, maxMatches = 500)
                     _previewPayload.value = PreviewPayload(item, liveResult.text, ranges)
                 }
                 is ExtractionResult.Failed -> {
                     _previewPayload.value = PreviewPayload(
                         item = item,
-                        fullText = "无法内置预览文本（原因：${liveResult.status.label} ${liveResult.message.orEmpty()}）。\n\n可点击下方“用其他应用打开”直接调用系统阅读器查看。",
+                        fullText = "无法内置预览文本（${liveResult.status.label} ${liveResult.message.orEmpty()}）。\n\n可点击下方“用其他应用打开”。",
                         matchRanges = emptyList(),
                         statusNote = liveResult.status.label
                     )
@@ -343,5 +436,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val SHIZUKU_REQ_CODE = 2001
+        private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
     }
 }

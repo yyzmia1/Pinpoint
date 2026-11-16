@@ -12,8 +12,9 @@ enum class FileTypeFilter {
     FOLDER_ONLY
 }
 
-enum class CompareOp {
-    EQ, GT, GTE, LT, LTE
+sealed interface HighlightRule {
+    data class Literal(val text: String) : HighlightRule
+    data class RegexRule(val pattern: String, val caseSensitive: Boolean) : HighlightRule
 }
 
 sealed interface QueryNode {
@@ -26,6 +27,13 @@ sealed interface QueryNode {
         val field: MatchField = MatchField.ANY,
         val isQuotedPhrase: Boolean = false,
         val hasWildcard: Boolean = false
+    ) : QueryNode
+
+    data class RegexTerm(
+        val pattern: String,
+        val field: MatchField = MatchField.ANY,
+        val caseSensitive: Boolean = false,
+        val isValid: Boolean = true
     ) : QueryNode
 
     data class ExtFilter(val extensions: Set<String>) : QueryNode
@@ -45,5 +53,6 @@ sealed interface QueryNode {
 data class ParsedQuery(
     val root: QueryNode?,
     val positiveHighlightTerms: List<String>,
+    val positiveHighlightRules: List<HighlightRule> = emptyList(),
     val parseError: String? = null
 )

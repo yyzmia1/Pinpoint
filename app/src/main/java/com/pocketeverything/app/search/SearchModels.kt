@@ -35,8 +35,9 @@ enum class SortOrder(val label: String) {
 
 enum class QuickScope(val label: String) {
     ALL("全部"),
-    DOCS("文档正文"),
     FOLDERS("文件夹"),
+    FILES("文件"),
+    DOCS("文档正文"),
     NAME_ONLY("仅文件名"),
     CONTENT_ONLY("仅正文"),
     PDF("PDF"),

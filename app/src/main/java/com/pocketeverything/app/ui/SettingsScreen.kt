@@ -25,9 +25,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -40,6 +45,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -55,7 +61,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.pocketeverything.app.BuildConfig
 import com.pocketeverything.app.data.AppSettings
+import com.pocketeverything.app.data.UpdateCheckState
 import com.pocketeverything.app.filter.FilterConfig
 import com.pocketeverything.app.fs.ModeAvailability
 import com.pocketeverything.app.indexer.IndexProgressState
@@ -71,16 +79,23 @@ fun SettingsScreen(
     settings: AppSettings,
     modeStatuses: Map<AccessMode, ModeAvailability>,
     indexProgress: IndexProgressState,
+    updateState: UpdateCheckState,
     onBack: () -> Unit,
     onSelectMode: (AccessMode) -> Unit,
     onRequestStoragePermission: () -> Unit,
-    onRequestShizukuPermission: () -> Unit,
+    onOpenShizukuGuide: () -> Unit,
     onRefreshModes: () -> Unit,
     onUpdateFilterConfig: (FilterConfig) -> Unit,
+    onSetShowRecentOnEmpty: (Boolean) -> Unit,
     onSetPreviewPreference: (Boolean) -> Unit,
     onSetRealtimeMonitor: (Boolean) -> Unit,
     onQuickSync: () -> Unit,
-    onFullRebuild: () -> Unit
+    onFullRebuild: () -> Unit,
+    onCheckUpdates: () -> Unit,
+    onDismissUpdateDialog: () -> Unit,
+    onOpenUrl: (String) -> Unit,
+    onCopyUrl: (String) -> Unit,
+    onReplayOnboarding: () -> Unit
 ) {
     val cfg = settings.filterConfig
     var skipNoise by remember(cfg) { mutableStateOf(cfg.skipNoiseCaches) }
@@ -105,7 +120,7 @@ fun SettingsScreen(
                     containerColor = MaterialTheme.colorScheme.background,
                     titleContentColor = MaterialTheme.colorScheme.onBackground
                 ),
-                title = { Text("设置与索引", style = MaterialTheme.typography.titleLarge) },
+                title = { Text("设置", style = MaterialTheme.typography.titleLarge) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
@@ -123,6 +138,7 @@ fun SettingsScreen(
                 .padding(horizontal = 16.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // 1. Access Mode
             SectionGroup(title = "文件访问模式") {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     AccessMode.entries.forEach { mode ->
@@ -159,9 +175,9 @@ fun SettingsScreen(
                                     }
                                     Text(
                                         text = when (mode) {
-                                            AccessMode.NORMAL -> "扫描内部与外置存储公开目录"
-                                            AccessMode.SHIZUKU -> "免 Root 穿透 /Android/data，支持微信/QQ 文档"
-                                            AccessMode.ROOT -> "从 / 根目录全盘索引，自动挂载去重"
+                                            AccessMode.NORMAL -> "公开存储目录"
+                                            AccessMode.SHIZUKU -> "免 Root 穿透 /Android/data 与 /obb"
+                                            AccessMode.ROOT -> "根目录 / 全盘扫描与挂载去重"
                                         },
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -183,9 +199,9 @@ fun SettingsScreen(
                         modifier = Modifier.weight(1f)
                     ) { Text("文件权限") }
                     OutlinedButton(
-                        onClick = onRequestShizukuPermission,
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Shizuku") }
+                        onClick = onOpenShizukuGuide,
+                        modifier = Modifier.weight(1.1f)
+                    ) { Text("Shizuku 向导") }
                     OutlinedButton(
                         onClick = onRefreshModes,
                         modifier = Modifier.weight(0.75f)
@@ -193,21 +209,43 @@ fun SettingsScreen(
                 }
             }
 
-            SectionGroup(title = "索引库统计") {
-                val stats = indexProgress.stats
-                Text(
-                    text = indexProgress.statusMessage,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+            // 2. Search & Display Behavior
+            SectionGroup(title = "搜索与交互") {
+                ToggleRow(
+                    title = "搜索栏为空时显示最近文件",
+                    checked = settings.showRecentOnEmptyQuery,
+                    onCheckedChange = onSetShowRecentOnEmpty
                 )
-                Spacer(Modifier.height(10.dp))
+                ThinDivider()
+                ToggleRow(
+                    title = "正文命中优先内置定位预览",
+                    checked = settings.openContentHitsInPreview,
+                    onCheckedChange = onSetPreviewPreference
+                )
+                ThinDivider()
+                ToggleRow(
+                    title = "常驻实时监控",
+                    checked = settings.realtimeMonitorEnabled,
+                    onCheckedChange = { wantEnable ->
+                        if (wantEnable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        } else {
+                            onSetRealtimeMonitor(wantEnable)
+                        }
+                    }
+                )
+            }
+
+            // 3. Index Stats
+            SectionGroup(title = "索引统计") {
+                val stats = indexProgress.stats
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     StatCell(label = "总条目", value = "${stats.totalEntries}", modifier = Modifier.weight(1f))
-                    StatCell(label = "已抽正文", value = "${stats.indexedDocs}", modifier = Modifier.weight(1f))
-                    StatCell(label = "待解析", value = "${stats.pendingDocs}", modifier = Modifier.weight(1f))
+                    StatCell(label = "正文", value = "${stats.indexedDocs}", modifier = Modifier.weight(1f))
+                    StatCell(label = "待抽", value = "${stats.pendingDocs}", modifier = Modifier.weight(1f))
                     StatCell(label = "库体积", value = FormatUtils.formatBytes(stats.dbSizeBytes), modifier = Modifier.weight(1f))
                 }
                 Spacer(Modifier.height(12.dp))
@@ -234,52 +272,21 @@ fun SettingsScreen(
                 }
             }
 
-            SectionGroup(title = "交互与后台监听") {
-                ToggleRow(
-                    title = "正文命中优先内置定位预览",
-                    subtitle = "开启后点击正文命中直接跳转到匹配段落；关闭则直接唤起系统应用",
-                    checked = settings.openContentHitsInPreview,
-                    onCheckedChange = onSetPreviewPreference
-                )
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 8.dp),
-                    thickness = 0.5.dp,
-                    color = MaterialTheme.colorScheme.outlineVariant
-                )
-                ToggleRow(
-                    title = "常驻实时监控",
-                    subtitle = "默认关闭。开启后保留低功耗通知监听下载与文档变动实时入库",
-                    checked = settings.realtimeMonitorEnabled,
-                    onCheckedChange = { wantEnable ->
-                        if (wantEnable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        } else {
-                            onSetRealtimeMonitor(wantEnable)
-                        }
-                    }
-                )
-            }
-
+            // 4. Filter Rules
             SectionGroup(title = "路径与大小过滤") {
                 ToggleRow(
                     title = "屏蔽缓存与缩略图目录",
-                    subtitle = "跳过 .thumbnails、cache、code_cache、.git、lost+found 等噪点目录",
                     checked = skipNoise,
                     onCheckedChange = { skipNoise = it }
                 )
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 8.dp),
-                    thickness = 0.5.dp,
-                    color = MaterialTheme.colorScheme.outlineVariant
-                )
+                ThinDivider()
                 ToggleRow(
                     title = "挂载点与重复路径去重",
-                    subtitle = "Root 全盘模式下避免 /sdcard、/data/media/0 与 /storage/emulated/0 重复建库",
                     checked = dedupMounts,
                     onCheckedChange = { dedupMounts = it }
                 )
 
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(10.dp))
                 Text("TXT / MD 上限：${maxTxtMb.roundToInt()} MB", style = MaterialTheme.typography.bodyMedium)
                 Slider(value = maxTxtMb, onValueChange = { maxTxtMb = it }, valueRange = 1f..100f)
 
@@ -346,8 +353,181 @@ fun SettingsScreen(
                 }
             }
 
+            // 5. About, Auto Git Version, GitHub & Update Check
+            SectionGroup(title = "关于与更新") {
+                InfoRow("当前版本", "v${BuildConfig.VERSION_NAME} (#${BuildConfig.VERSION_CODE} · ${BuildConfig.GIT_HASH})")
+                ThinDivider()
+                InfoRow("构建日期", BuildConfig.BUILD_DATE)
+                ThinDivider()
+                InfoRow("开发者", BuildConfig.DEVELOPER_NAME)
+                ThinDivider()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onOpenUrl(BuildConfig.GITHUB_URL) }
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("GitHub 仓库", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            BuildConfig.GITHUB_REPO,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Icon(
+                        Icons.AutoMirrored.Filled.OpenInNew,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                ThinDivider()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onReplayOnboarding() }
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("重看新手引导", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = onCheckUpdates,
+                        enabled = updateState !is UpdateCheckState.Checking,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        if (updateState is UpdateCheckState.Checking) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("检测中")
+                        } else {
+                            Icon(Icons.Default.SystemUpdate, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("检测更新")
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = { onOpenUrl("${BuildConfig.GITHUB_URL}/releases") },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Releases")
+                    }
+                }
+
+                when (updateState) {
+                    is UpdateCheckState.UpToDate -> {
+                        Text(
+                            text = "已是最新版本 (v${updateState.currentVersion})",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Emerald400,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                    is UpdateCheckState.Error -> {
+                        Text(
+                            text = "检测失败：${updateState.message}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Rose400,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                    else -> Unit
+                }
+
+                Spacer(Modifier.height(4.dp))
+                TextButton(
+                    onClick = { onCopyUrl(BuildConfig.GITHUB_URL) },
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Text("复制仓库地址")
+                }
+            }
+
             Spacer(Modifier.height(32.dp))
         }
+    }
+
+    if (updateState is UpdateCheckState.Available) {
+        val info = updateState.info
+        AlertDialog(
+            onDismissRequest = onDismissUpdateDialog,
+            title = { Text("发现新版本 ${info.tagName}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (info.apkSizeBytes > 0L) {
+                        Text(
+                            "安装包大小：${FormatUtils.formatBytes(info.apkSizeBytes)}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Text(
+                        text = info.releaseNotes.ifBlank { "包含性能改进与问题修复。" },
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onOpenUrl(info.apkDownloadUrl ?: info.releaseUrl)
+                        onDismissUpdateDialog()
+                    }
+                ) {
+                    Text(if (info.apkDownloadUrl != null) "下载 APK" else "前往 Release")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismissUpdateDialog) { Text("稍后") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun ThinDivider() {
+    HorizontalDivider(
+        modifier = Modifier.padding(vertical = 8.dp),
+        thickness = 0.5.dp,
+        color = MaterialTheme.colorScheme.outlineVariant
+    )
+}
+
+@Composable
+private fun InfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            value,
+            style = MaterialTheme.typography.labelMedium,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
@@ -410,7 +590,6 @@ private fun StatCell(
 @Composable
 private fun ToggleRow(
     title: String,
-    subtitle: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit
 ) {
@@ -420,15 +599,7 @@ private fun ToggleRow(
             .clickable { onCheckedChange(!checked) },
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyMedium)
-            Text(
-                subtitle,
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 2.dp)
-            )
-        }
+        Text(title, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
         Spacer(Modifier.width(12.dp))
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }

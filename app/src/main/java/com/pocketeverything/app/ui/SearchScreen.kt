@@ -37,14 +37,26 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.automirrored.filled.Sort
+import androidx.compose.material.icons.automirrored.rounded.Article
+import androidx.compose.material.icons.automirrored.rounded.InsertDriveFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SearchOff
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.rounded.Android
+import androidx.compose.material.icons.rounded.AudioFile
+import androidx.compose.material.icons.rounded.Code
+import androidx.compose.material.icons.rounded.Description
+import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.FolderZip
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.PictureAsPdf
+import androidx.compose.material.icons.rounded.Slideshow
+import androidx.compose.material.icons.rounded.TableChart
+import androidx.compose.material.icons.rounded.VideoFile
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -69,12 +81,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -114,21 +129,34 @@ fun SearchScreen(
     onSelectMode: (AccessMode) -> Unit,
     onQuickSync: () -> Unit,
     onOpenSettings: () -> Unit,
-    onRequestPermissionForCurrentMode: () -> Unit
+    onOpenShizukuGuide: () -> Unit,
+    onRequestPermissionForCurrentMode: () -> Unit,
+    onTargetsMeasured: (OnboardingTargets) -> Unit = {}
 ) {
     var showSyntaxSheet by remember { mutableStateOf(false) }
     var showModeSheet by remember { mutableStateOf(false) }
+    var targets by remember { mutableStateOf(OnboardingTargets()) }
     val focusRequester = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     val listState = rememberLazyListState()
 
-    LaunchedEffect(Unit) { runCatching { focusRequester.requestFocus() } }
+    LaunchedEffect(settings.hasSeenOnboarding) {
+        if (settings.hasSeenOnboarding) {
+            runCatching { focusRequester.requestFocus() }
+        } else {
+            keyboard?.hide()
+        }
+    }
     LaunchedEffect(query, quickScope, sortOrder) { listState.scrollToItem(0) }
     LaunchedEffect(listState.isScrollInProgress) {
         if (listState.isScrollInProgress) keyboard?.hide()
     }
+    LaunchedEffect(targets) {
+        onTargetsMeasured(targets)
+    }
 
     val availability = modeStatuses[settings.accessMode]
+    val emptyHiddenBySetting = query.isBlank() && quickScope == QuickScope.ALL && !settings.showRecentOnEmptyQuery
 
     Scaffold(containerColor = MaterialTheme.colorScheme.background) { padding ->
         Column(
@@ -143,7 +171,8 @@ fun SearchScreen(
                 availability = availability,
                 onModeClick = { showModeSheet = true },
                 onQuickSync = onQuickSync,
-                onOpenSettings = onOpenSettings
+                onOpenSettings = onOpenSettings,
+                onModePillBounds = { rect -> targets = targets.copy(modePill = rect) }
             )
 
             SearchField(
@@ -152,6 +181,8 @@ fun SearchScreen(
                 focusRequester = focusRequester,
                 onSubmit = { keyboard?.hide() },
                 onHelp = { showSyntaxSheet = true },
+                onSearchBounds = { rect -> targets = targets.copy(searchField = rect) },
+                onHelpBounds = { rect -> targets = targets.copy(helpButton = rect) },
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
 
@@ -162,14 +193,26 @@ fun SearchScreen(
                         is ModeAvailability.Unavailable -> availability.reason
                         else -> ""
                     },
-                    onAction = onRequestPermissionForCurrentMode
+                    actionLabel = if (settings.accessMode == AccessMode.SHIZUKU) "向导" else "授权",
+                    onAction = {
+                        if (settings.accessMode == AccessMode.SHIZUKU) onOpenShizukuGuide()
+                        else onRequestPermissionForCurrentMode()
+                    }
                 )
             }
 
-            ScopePills(selected = quickScope, onSelect = onScopeChange)
+            ScopePills(
+                selected = quickScope,
+                onSelect = onScopeChange,
+                modifier = Modifier.onGloballyPositioned { coords ->
+                    targets = targets.copy(scopePills = coords.boundsInRoot())
+                }
+            )
 
             StatsRow(
                 query = query,
+                quickScope = quickScope,
+                showRecentOnEmpty = settings.showRecentOnEmptyQuery,
                 response = searchResponse,
                 progress = indexProgress,
                 sortOrder = sortOrder,
@@ -179,7 +222,10 @@ fun SearchScreen(
             IndexProgressStrip(indexProgress)
 
             if (searchResponse.items.isEmpty()) {
-                EmptyState(indexEmpty = indexProgress.stats.totalEntries == 0L)
+                EmptyState(
+                    indexEmpty = indexProgress.stats.totalEntries == 0L,
+                    hiddenRecent = emptyHiddenBySetting
+                )
             } else {
                 LazyColumn(
                     state = listState,
@@ -207,6 +253,10 @@ fun SearchScreen(
 
     if (showSyntaxSheet) {
         SyntaxGuideSheet(
+            onInsertSnippet = { token ->
+                val prefix = if (query.isNotEmpty() && !query.last().isWhitespace() && !token.startsWith("-")) "$query " else query
+                onQueryChange(prefix + token)
+            },
             onApplyExample = { onQueryChange(it) },
             onDismiss = { showSyntaxSheet = false }
         )
@@ -220,14 +270,14 @@ fun SearchScreen(
                 onSelectMode(it)
                 showModeSheet = false
             },
+            onOpenShizukuGuide = {
+                showModeSheet = false
+                onOpenShizukuGuide()
+            },
             onDismiss = { showModeSheet = false }
         )
     }
 }
-
-// ---------------------------------------------------------------------------------------------
-// Header & search field
-// ---------------------------------------------------------------------------------------------
 
 @Composable
 private fun HeaderBar(
@@ -235,12 +285,13 @@ private fun HeaderBar(
     availability: ModeAvailability?,
     onModeClick: () -> Unit,
     onQuickSync: () -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onModePillBounds: (Rect) -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 8.dp),
+            .padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
@@ -268,7 +319,10 @@ private fun HeaderBar(
         Surface(
             onClick = onModeClick,
             shape = CircleShape,
-            color = MaterialTheme.colorScheme.surfaceContainer
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            modifier = Modifier.onGloballyPositioned { coords ->
+                onModePillBounds(coords.boundsInRoot())
+            }
         ) {
             Row(
                 modifier = Modifier.padding(start = 10.dp, end = 6.dp, top = 5.dp, bottom = 5.dp),
@@ -311,6 +365,8 @@ private fun SearchField(
     focusRequester: FocusRequester,
     onSubmit: () -> Unit,
     onHelp: () -> Unit,
+    onSearchBounds: (Rect) -> Unit,
+    onHelpBounds: (Rect) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -321,30 +377,31 @@ private fun SearchField(
     )
 
     Surface(
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surfaceContainer,
         border = BorderStroke(1.5.dp, borderColor),
         modifier = modifier
             .fillMaxWidth()
-            .height(50.dp)
+            .height(46.dp)
+            .onGloballyPositioned { coords -> onSearchBounds(coords.boundsInRoot()) }
     ) {
         Row(
-            modifier = Modifier.padding(start = 14.dp, end = 4.dp),
+            modifier = Modifier.padding(start = 12.dp, end = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
                 Icons.Default.Search,
                 contentDescription = null,
                 tint = if (focused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(19.dp)
             )
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(8.dp))
             Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
                 if (query.isEmpty()) {
                     Text(
-                        text = "文件名、路径或正文，如 ext:pdf 合同",
+                        text = "文件名、路径或正文（如 ext:pdf 关键词）",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -367,7 +424,7 @@ private fun SearchField(
                 )
             }
             if (query.isNotEmpty()) {
-                IconButton(onClick = { onQueryChange("") }, modifier = Modifier.size(36.dp)) {
+                IconButton(onClick = { onQueryChange("") }, modifier = Modifier.size(34.dp)) {
                     Icon(
                         Icons.Default.Close,
                         contentDescription = "清空",
@@ -376,7 +433,12 @@ private fun SearchField(
                     )
                 }
             }
-            IconButton(onClick = onHelp, modifier = Modifier.size(36.dp)) {
+            IconButton(
+                onClick = onHelp,
+                modifier = Modifier
+                    .size(34.dp)
+                    .onGloballyPositioned { coords -> onHelpBounds(coords.boundsInRoot()) }
+            ) {
                 Icon(
                     Icons.AutoMirrored.Filled.HelpOutline,
                     contentDescription = "搜索语法",
@@ -389,14 +451,18 @@ private fun SearchField(
 }
 
 @Composable
-private fun PermissionBanner(message: String, onAction: () -> Unit) {
+private fun PermissionBanner(
+    message: String,
+    actionLabel: String,
+    onAction: () -> Unit
+) {
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
         contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(10.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 16.dp, end = 16.dp, top = 10.dp)
+            .padding(start = 16.dp, end = 16.dp, top = 8.dp)
     ) {
         Row(
             modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
@@ -405,19 +471,23 @@ private fun PermissionBanner(message: String, onAction: () -> Unit) {
             Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(16.dp))
             Spacer(Modifier.width(8.dp))
             Text(message, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-            TextButton(onClick = onAction) { Text("去授权") }
+            TextButton(onClick = onAction) { Text(actionLabel) }
         }
     }
 }
 
 @Composable
-private fun ScopePills(selected: QuickScope, onSelect: (QuickScope) -> Unit) {
+private fun ScopePills(
+    selected: QuickScope,
+    onSelect: (QuickScope) -> Unit,
+    modifier: Modifier = Modifier
+) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         QuickScope.entries.forEach { scope ->
             val isSelected = scope == selected
@@ -429,8 +499,8 @@ private fun ScopePills(selected: QuickScope, onSelect: (QuickScope) -> Unit) {
             ) {
                 Text(
                     text = scope.label,
-                    style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 4.dp)
                 )
             }
         }
@@ -440,6 +510,8 @@ private fun ScopePills(selected: QuickScope, onSelect: (QuickScope) -> Unit) {
 @Composable
 private fun StatsRow(
     query: String,
+    quickScope: QuickScope,
+    showRecentOnEmpty: Boolean,
     response: SearchResponse,
     progress: IndexProgressState,
     sortOrder: SortOrder,
@@ -455,12 +527,15 @@ private fun StatsRow(
         val stats = progress.stats
         val text = when {
             response.queryError != null -> "语法提示：${response.queryError}"
-            query.isBlank() -> "最近修改 · 库内 ${stats.totalEntries} 项 · ${stats.indexedDocs} 篇正文"
-            else -> "${response.totalReturned} 项结果 · ${response.elapsedMs} ms"
+            query.isBlank() && quickScope == QuickScope.ALL && !showRecentOnEmpty ->
+                "${stats.totalEntries} 项 · ${stats.indexedDocs} 正文"
+            query.isBlank() ->
+                "${stats.totalEntries} 项 · ${stats.indexedDocs} 正文"
+            else -> "${response.totalReturned} 项 · ${response.elapsedMs} ms"
         }
         Text(
             text = text,
-            style = MaterialTheme.typography.labelMedium,
+            style = MaterialTheme.typography.labelSmall,
             color = if (response.queryError != null) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -469,21 +544,21 @@ private fun StatsRow(
         Box {
             Row(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(6.dp))
                     .clickable { showSortMenu = true }
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
                     Icons.AutoMirrored.Filled.Sort,
                     contentDescription = "排序",
-                    modifier = Modifier.size(15.dp),
+                    modifier = Modifier.size(14.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.width(4.dp))
                 Text(
                     text = sortOrder.label,
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
@@ -511,10 +586,10 @@ private fun StatsRow(
 private fun IndexProgressStrip(progress: IndexProgressState) {
     val active = progress.tier1Phase != Tier1Phase.IDLE || progress.tier2Phase != Tier2Phase.IDLE
     if (!active) {
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(2.dp))
         return
     }
-    Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 6.dp)) {
+    Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 4.dp)) {
         LinearProgressIndicator(
             modifier = Modifier
                 .fillMaxWidth()
@@ -526,17 +601,17 @@ private fun IndexProgressStrip(progress: IndexProgressState) {
             text = if (progress.tier1Phase != Tier1Phase.IDLE) {
                 progress.statusMessage
             } else {
-                "正文解析中 · 已处理 ${progress.tier2ProcessedCount} · 剩余 ${progress.tier2PendingCount}"
+                "正文解析 · ${progress.tier2ProcessedCount} / 剩余 ${progress.tier2PendingCount}"
             },
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.padding(top = 4.dp)
+            modifier = Modifier.padding(top = 3.dp)
         )
     }
 }
 
 @Composable
-private fun EmptyState(indexEmpty: Boolean) {
+private fun EmptyState(indexEmpty: Boolean, hiddenRecent: Boolean) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -545,29 +620,24 @@ private fun EmptyState(indexEmpty: Boolean) {
         verticalArrangement = Arrangement.Center
     ) {
         Icon(
-            Icons.Default.SearchOff,
+            if (hiddenRecent) Icons.Default.Search else Icons.Default.SearchOff,
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-            modifier = Modifier.size(40.dp)
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f),
+            modifier = Modifier.size(38.dp)
         )
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(10.dp))
         Text(
-            text = if (indexEmpty) "索引库还是空的" else "没有找到匹配项",
-            style = MaterialTheme.typography.titleMedium
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            text = if (indexEmpty) "授予权限后会自动开始一级扫描，几秒内即可搜索" else "试试缩短关键词，或点右上角 ? 查看语法",
-            style = MaterialTheme.typography.bodySmall,
+            text = when {
+                indexEmpty -> "索引库尚为空"
+                hiddenRecent -> "输入关键词开始搜索"
+                else -> "无匹配结果"
+            },
+            style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Spacer(Modifier.height(80.dp))
+        Spacer(Modifier.height(72.dp))
     }
 }
-
-// ---------------------------------------------------------------------------------------------
-// Result row
-// ---------------------------------------------------------------------------------------------
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -592,55 +662,74 @@ private fun ResultRow(
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(onClick = onClick, onLongClick = onLongPress)
-            .padding(horizontal = 16.dp, vertical = 11.dp),
+            .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.Top
     ) {
-        FileTypeBadge(isDir = item.isDir, ext = item.ext)
+        FileTypeIcon(isDir = item.isDir, ext = item.ext)
         Spacer(Modifier.width(12.dp))
+
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = nameText,
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                text = pathText,
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 1.dp)
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Top
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = nameText,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = pathText,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
+
+                Spacer(Modifier.width(10.dp))
+
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        text = FormatUtils.formatSmartDate(item.mtime),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
+                        maxLines = 1
+                    )
+                    Row(
+                        modifier = Modifier.padding(top = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        statusTag(item.tier2Status)?.let { (label, color) ->
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = color,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(color.copy(alpha = 0.12f))
+                                    .padding(horizontal = 5.dp, vertical = 1.dp)
+                            )
+                        }
+                        if (!item.isDir) {
+                            Text(
+                                text = FormatUtils.formatBytes(item.size),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
 
             if (item.snippets.isNotEmpty()) {
                 SnippetBlock(item, hlBg, hlFg)
-            }
-
-            Row(
-                modifier = Modifier.padding(top = 3.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = buildString {
-                        if (!item.isDir) append(FormatUtils.formatBytes(item.size)).append("  ·  ")
-                        append(FormatUtils.formatSmartDate(item.mtime))
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f)
-                )
-                statusTag(item.tier2Status)?.let { (label, color) ->
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = label,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = color,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(color.copy(alpha = 0.12f))
-                            .padding(horizontal = 5.dp, vertical = 1.dp)
-                    )
-                }
             }
         }
     }
@@ -650,7 +739,7 @@ private fun ResultRow(
 private fun SnippetBlock(item: SearchResultItem, hlBg: Color, hlFg: Color) {
     Row(
         modifier = Modifier
-            .padding(top = 6.dp, bottom = 2.dp)
+            .padding(top = 6.dp)
             .height(IntrinsicSize.Min)
     ) {
         Box(
@@ -676,7 +765,7 @@ private fun SnippetBlock(item: SearchResultItem, hlBg: Color, hlFg: Color) {
             }
             if (item.contentMatchCount > 1) {
                 Text(
-                    text = "正文共 ${item.contentMatchCount} 处命中",
+                    text = "${item.contentMatchCount} 处匹配",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(top = 2.dp)
@@ -691,61 +780,56 @@ private fun statusTag(status: Tier2Status): Pair<String, Color>? {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     return when (status) {
         Tier2Status.INDEXED -> "正文" to MaterialTheme.colorScheme.primary
-        Tier2Status.SCANNED_OR_EMPTY -> "无文字层" to muted
-        Tier2Status.UNSUPPORTED_LEGACY_DOC -> "旧版 doc" to muted
+        Tier2Status.SCANNED_OR_EMPTY -> "无文字" to muted
+        Tier2Status.UNSUPPORTED_LEGACY_DOC -> ".doc" to muted
         Tier2Status.SKIPPED_SIZE -> "超限" to muted
-        Tier2Status.ENCRYPTED -> "已加密" to muted
+        Tier2Status.ENCRYPTED -> "加密" to muted
         else -> null
     }
 }
 
 @Composable
-private fun FileTypeBadge(isDir: Boolean, ext: String) {
+private fun FileTypeIcon(isDir: Boolean, ext: String) {
     val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    val color = fileTypeColor(isDir, ext.lowercase(), dark)
+    val lower = ext.lowercase()
+    val (icon, color) = fileTypeVisual(isDir, lower, dark)
     Box(
         modifier = Modifier
             .size(40.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(color.copy(alpha = if (dark) 0.16f else 0.12f)),
+            .clip(RoundedCornerShape(11.dp))
+            .background(color.copy(alpha = if (dark) 0.16f else 0.11f)),
         contentAlignment = Alignment.Center
     ) {
-        if (isDir) {
-            Icon(Icons.Default.Folder, contentDescription = null, tint = color, modifier = Modifier.size(21.dp))
-        } else {
-            Text(
-                text = ext.uppercase().take(4).ifBlank { "FILE" },
-                color = color,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace,
-                letterSpacing = 0.sp
-            )
-        }
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = color,
+            modifier = Modifier.size(22.dp)
+        )
     }
 }
 
-/** 400-weight tints on dark backgrounds, 600-weight on light ones for readable contrast. */
-private fun fileTypeColor(isDir: Boolean, ext: String, dark: Boolean): Color {
+private fun fileTypeVisual(isDir: Boolean, ext: String, dark: Boolean): Pair<ImageVector, Color> {
     fun pick(light: Long, darkTint: Long) = Color(if (dark) darkTint else light)
-    if (isDir) return if (dark) Amber400 else Color(0xFFD97706)
+    if (isDir) {
+        return Icons.Rounded.Folder to if (dark) Amber400 else Color(0xFFD97706)
+    }
     return when (ext) {
-        "pdf" -> if (dark) Rose400 else Color(0xFFE11D48)
-        "doc", "docx" -> pick(0xFF2563EB, 0xFF60A5FA)
-        "txt", "md", "markdown" -> if (dark) Emerald400 else Color(0xFF059669)
-        "jpg", "jpeg", "png", "gif", "webp", "heic", "bmp" -> pick(0xFF7C3AED, 0xFFA78BFA)
-        "mp4", "mkv", "mov", "avi", "mp3", "flac", "wav", "m4a" -> pick(0xFFDB2777, 0xFFF472B6)
-        "apk", "apks", "xapk" -> pick(0xFF65A30D, 0xFFA3E635)
-        "zip", "rar", "7z", "tar", "gz" -> pick(0xFFEA580C, 0xFFFB923C)
-        "xls", "xlsx", "csv" -> pick(0xFF16A34A, 0xFF4ADE80)
-        "ppt", "pptx" -> pick(0xFFC2410C, 0xFFFDBA74)
-        else -> pick(0xFF64748B, 0xFF94A3B8)
+        "pdf" -> Icons.Rounded.PictureAsPdf to if (dark) Rose400 else Color(0xFFE11D48)
+        "doc", "docx" -> Icons.Rounded.Description to pick(0xFF2563EB, 0xFF60A5FA)
+        "txt", "md", "markdown" -> Icons.AutoMirrored.Rounded.Article to if (dark) Emerald400 else Color(0xFF059669)
+        "xls", "xlsx", "csv" -> Icons.Rounded.TableChart to pick(0xFF16A34A, 0xFF4ADE80)
+        "ppt", "pptx" -> Icons.Rounded.Slideshow to pick(0xFFC2410C, 0xFFFDBA74)
+        "jpg", "jpeg", "png", "gif", "webp", "heic", "bmp", "svg" -> Icons.Rounded.Image to pick(0xFF7C3AED, 0xFFA78BFA)
+        "mp4", "mkv", "mov", "avi", "webm" -> Icons.Rounded.VideoFile to pick(0xFFDB2777, 0xFFF472B6)
+        "mp3", "flac", "wav", "m4a", "ogg" -> Icons.Rounded.AudioFile to pick(0xFF0891B2, 0xFF22D3EE)
+        "apk", "apks", "xapk" -> Icons.Rounded.Android to pick(0xFF65A30D, 0xFFA3E635)
+        "zip", "rar", "7z", "tar", "gz", "xz" -> Icons.Rounded.FolderZip to pick(0xFFEA580C, 0xFFFB923C)
+        "json", "xml", "yml", "yaml", "kt", "java", "py", "js", "ts", "html", "css", "sh", "c", "cpp", "rs" ->
+            Icons.Rounded.Code to pick(0xFF4F46E5, 0xFF818CF8)
+        else -> Icons.AutoMirrored.Rounded.InsertDriveFile to pick(0xFF64748B, 0xFF94A3B8)
     }
 }
-
-// ---------------------------------------------------------------------------------------------
-// Mode sheet & helpers
-// ---------------------------------------------------------------------------------------------
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -753,15 +837,21 @@ private fun ModeSheet(
     current: AccessMode,
     statuses: Map<AccessMode, ModeAvailability>,
     onSelect: (AccessMode) -> Unit,
+    onOpenShizukuGuide: () -> Unit,
     onDismiss: () -> Unit
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 28.dp)) {
-            Text(
-                "访问模式",
-                style = MaterialTheme.typography.titleLarge,
-                modifier = Modifier.padding(start = 4.dp, bottom = 12.dp)
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("访问模式", style = MaterialTheme.typography.titleLarge)
+                TextButton(onClick = onOpenShizukuGuide) {
+                    Text("Shizuku 向导")
+                }
+            }
             AccessMode.entries.forEach { mode ->
                 val selected = mode == current
                 val status = statuses[mode]
@@ -782,9 +872,9 @@ private fun ModeSheet(
                             Text(mode.label, style = MaterialTheme.typography.titleMedium)
                             Text(
                                 text = when (mode) {
-                                    AccessMode.NORMAL -> "扫描存储公开目录（Download、Documents 等）"
-                                    AccessMode.SHIZUKU -> "免 Root 穿透 /Android/data，可搜微信/QQ 文件"
-                                    AccessMode.ROOT -> "从 / 根目录全盘索引，自动挂载去重"
+                                    AccessMode.NORMAL -> "内部与外置存储公开目录"
+                                    AccessMode.SHIZUKU -> "免 Root 穿透 /Android/data 与 /obb"
+                                    AccessMode.ROOT -> "根目录 / 全盘索引与挂载去重"
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant

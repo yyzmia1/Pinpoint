@@ -1,5 +1,6 @@
 package com.pocketeverything.app
 
+import com.pocketeverything.app.search.HighlightRule
 import com.pocketeverything.app.search.SnippetHighlighter
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -17,5 +18,17 @@ class SnippetHighlighterTest {
         assertTrue(first.highlightRanges.isNotEmpty())
         val extractedFirstHighlight = first.text.substring(first.highlightRanges[0])
         assertEquals("补充协议", extractedFirstHighlight)
+    }
+
+    @Test
+    fun `highlights strict regex matches accurately`() {
+        val text = "Error ERR_404 occurred before ERR_502 timeout."
+        val ranges = SnippetHighlighter.findMatchRangesForRules(
+            text,
+            listOf(HighlightRule.RegexRule("""ERR_\d{3}""", caseSensitive = true))
+        )
+        assertEquals(2, ranges.size)
+        assertEquals("ERR_404", text.substring(ranges[0]))
+        assertEquals("ERR_502", text.substring(ranges[1]))
     }
 }

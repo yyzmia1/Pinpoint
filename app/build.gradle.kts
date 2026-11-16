@@ -1,8 +1,27 @@
+import java.time.LocalDate
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
+
+fun readGitOutput(vararg args: String): String? = try {
+    val process = ProcessBuilder("git", *args)
+        .directory(rootProject.projectDir)
+        .redirectErrorStream(true)
+        .start()
+    val output = process.inputStream.bufferedReader().readText().trim()
+    val exit = process.waitFor()
+    if (exit == 0 && output.isNotEmpty()) output else null
+} catch (_: Throwable) {
+    null
+}
+
+val gitCommitCount = readGitOutput("rev-list", "--count", "HEAD")?.toIntOrNull()?.coerceAtLeast(1) ?: 1
+val gitDescribe = readGitOutput("describe", "--tags", "--always")?.removePrefix("v") ?: "1.0.0"
+val gitShortHash = readGitOutput("rev-parse", "--short", "HEAD") ?: "local"
+val buildDateStr = LocalDate.now().toString()
 
 android {
     namespace = "com.pocketeverything.app"
@@ -12,8 +31,14 @@ android {
         applicationId = "com.pocketeverything.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = gitCommitCount
+        versionName = gitDescribe
+
+        buildConfigField("String", "GIT_HASH", "\"$gitShortHash\"")
+        buildConfigField("String", "BUILD_DATE", "\"$buildDateStr\"")
+        buildConfigField("String", "GITHUB_REPO", "\"yyzmia1/PocketEverything\"")
+        buildConfigField("String", "GITHUB_URL", "\"https://github.com/yyzmia1/PocketEverything\"")
+        buildConfigField("String", "DEVELOPER_NAME", "\"yyzmiao\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

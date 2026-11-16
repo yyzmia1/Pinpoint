@@ -33,8 +33,8 @@ class SqliteSearchDatabaseAndBenchmarkTest {
                     initialTier2Status = Tier2Status.PENDING
                 ),
                 FileUpsertEntry(
-                    path = "/storage/emulated/0/Android/data/com.tencent.mm/MicroMsg/Download/税务发票草稿.pdf",
-                    parentPath = "/storage/emulated/0/Android/data/com.tencent.mm/MicroMsg/Download",
+                    path = "/storage/emulated/0/Documents/税务发票草稿.pdf",
+                    parentPath = "/storage/emulated/0/Documents",
                     name = "税务发票草稿.pdf",
                     ext = "pdf",
                     size = 500_000L,
@@ -55,6 +55,18 @@ class SqliteSearchDatabaseAndBenchmarkTest {
                     accessMode = AccessMode.NORMAL,
                     needsTier2 = true,
                     initialTier2Status = Tier2Status.PENDING
+                ),
+                FileUpsertEntry(
+                    path = "/storage/emulated/0/Documents/ArchiveFolder",
+                    parentPath = "/storage/emulated/0/Documents",
+                    name = "ArchiveFolder",
+                    ext = "",
+                    size = 0L,
+                    mtime = now,
+                    isDir = true,
+                    accessMode = AccessMode.NORMAL,
+                    needsTier2 = false,
+                    initialTier2Status = Tier2Status.NOT_APPLICABLE
                 )
             )
             db.upsertFileBatch(entries)
@@ -65,7 +77,7 @@ class SqliteSearchDatabaseAndBenchmarkTest {
                 pending.first { it.name.contains("采购合同") }.fileId,
                 now,
                 Tier2Status.INDEXED,
-                "甲乙双方约定2026年交付设备并设立履约违约金条款，若延迟按每日万分之五结算。"
+                "甲乙双方约定2026年交付设备并设立履约违约金条款，若延迟按每日万分之五结算，比例为15%。"
             )
             db.saveTier2Result(
                 pending.first { it.name.contains("税务发票") }.fileId,
@@ -99,10 +111,87 @@ class SqliteSearchDatabaseAndBenchmarkTest {
             val r4 = db.search("2026年")
             assertEquals(1, r4.items.size)
 
-            // 5. QuickScope PDF
+            // 5. QuickScope PDF / FILES / FOLDERS
             val r5 = db.search("税", quickScope = QuickScope.PDF)
             assertEquals(1, r5.items.size)
             assertEquals("税务发票草稿.pdf", r5.items[0].name)
+
+            val onlyFolders = db.search("", quickScope = QuickScope.FOLDERS)
+            assertEquals(1, onlyFolders.items.size)
+            assertEquals("ArchiveFolder", onlyFolders.items[0].name)
+
+            val onlyFiles = db.search("", quickScope = QuickScope.FILES)
+            assertEquals(3, onlyFiles.items.size)
+            assertTrue(onlyFiles.items.none { it.isDir })
+
+            // 6. Empty query toggle
+            val hiddenEmpty = db.search("", quickScope = QuickScope.ALL, showRecentOnEmpty = false)
+            assertTrue(hiddenEmpty.items.isEmpty())
+        }
+    }
+
+    @Test
+    fun `strict wildcards, strict regex, and SQL metadata pushdown behave accurately`() {
+        val dbFile = Files.createTempFile("pocket_regex_", ".db").toFile()
+        dbFile.deleteOnExit()
+        val now = System.currentTimeMillis()
+
+        SqliteSearchDatabase(dbFile.absolutePath).use { db ->
+            val items = mutableListOf(
+                FileUpsertEntry("/storage/emulated/0/Download/2026_alpha.pdf", "/storage/emulated/0/Download", "2026_alpha.pdf", "pdf", 1024L, now, false, AccessMode.NORMAL, true, Tier2Status.PENDING),
+                FileUpsertEntry("/storage/emulated/0/Download/old_2026_alpha.pdf", "/storage/emulated/0/Download", "old_2026_alpha.pdf", "pdf", 1024L, now, false, AccessMode.NORMAL, true, Tier2Status.PENDING),
+                FileUpsertEntry("/storage/emulated/0/Download/2026_alpha.pdf.bak", "/storage/emulated/0/Download", "2026_alpha.pdf.bak", "bak", 1024L, now, false, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE),
+                FileUpsertEntry("/storage/emulated/0/Download/BakaSU_v4.2.apk", "/storage/emulated/0/Download", "BakaSU_v4.2.apk", "apk", 9_000_000L, now, false, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE),
+                FileUpsertEntry("/storage/emulated/0/Download/report_2026_v2.md", "/storage/emulated/0/Download", "report_2026_v2.md", "md", 2048L, now, false, AccessMode.NORMAL, true, Tier2Status.PENDING)
+            )
+            // Add 4500 decoy .jpg files containing "2026" to verify ext:pdf pushdown isn't starved by LIMIT 4000
+            for (i in 0 until 4500) {
+                items.add(
+                    FileUpsertEntry(
+                        "/storage/emulated/0/DCIM/IMG_2026_$i.jpg",
+                        "/storage/emulated/0/DCIM",
+                        "IMG_2026_$i.jpg",
+                        "jpg",
+                        2048L,
+                        now - i,
+                        false,
+                        AccessMode.NORMAL,
+                        false,
+                        Tier2Status.NOT_APPLICABLE
+                    )
+                )
+            }
+            db.upsertFileBatch(items)
+            val mdTask = db.fetchPendingTier2Tasks(10).first { it.name == "report_2026_v2.md" }
+            db.saveTier2Result(mdTask.fileId, mdTask.mtime, Tier2Status.INDEXED, "ErrorCode: ERR_503 at line 42")
+
+            // 1. Strict anchored wildcard: `2026*.pdf` must NOT match `old_2026_alpha.pdf` or `2026_alpha.pdf.bak`
+            val w1 = db.search("2026*.pdf")
+            assertEquals(listOf("2026_alpha.pdf"), w1.items.map { it.name })
+
+            // 2. Wildcard prefix matching across tokenized word `bakasu`
+            val w2 = db.search("Baka*.apk")
+            assertEquals(listOf("BakaSU_v4.2.apk"), w2.items.map { it.name })
+
+            // 3. Extension wildcard `*.apk`
+            val w3 = db.search("*.apk")
+            assertEquals(listOf("BakaSU_v4.2.apk"), w3.items.map { it.name })
+
+            // 4. Metadata pushdown: `ext:pdf 2026` must find both pdfs despite 4500 `2026` jpg decoys
+            val m1 = db.search("ext:pdf 2026")
+            assertEquals(2, m1.items.size)
+            assertTrue(m1.items.all { it.ext == "pdf" })
+
+            // 5. Strict regex on filename and body
+            val rx1 = db.search("""name:regex:^2026_[a-z]+\.pdf$""")
+            assertEquals(listOf("2026_alpha.pdf"), rx1.items.map { it.name })
+
+            val rx2 = db.search("""content:cregex:ERR_\d{3}""")
+            assertEquals(listOf("report_2026_v2.md"), rx2.items.map { it.name })
+            assertTrue(rx2.items[0].snippets.isNotEmpty())
+
+            val rx3 = db.search("""/^Baka[A-Z]{2}_v\d+\.\d+\.apk$/c""")
+            assertEquals(listOf("BakaSU_v4.2.apk"), rx3.items.map { it.name })
         }
     }
 
@@ -123,7 +212,7 @@ class SqliteSearchDatabaseAndBenchmarkTest {
                 val isDoc = i < 2000
                 val dirIdx = i / 100
                 val parent = if (i % 5 == 0) {
-                    "/storage/emulated/0/Android/data/com.tencent.mm/MicroMsg/Download/dir_$dirIdx"
+                    "/storage/emulated/0/Android/data/com.example.app/Download/dir_$dirIdx"
                 } else {
                     "/storage/emulated/0/Documents/project_$dirIdx"
                 }
@@ -155,7 +244,6 @@ class SqliteSearchDatabaseAndBenchmarkTest {
             }
             if (batch.isNotEmpty()) db.upsertFileBatch(batch)
 
-            // Populate 2000 Tier 2 Chinese documents
             val pending = db.fetchPendingTier2Tasks(2500)
             assertEquals(2000, pending.size)
             for ((idx, task) in pending.withIndex()) {
@@ -169,7 +257,6 @@ class SqliteSearchDatabaseAndBenchmarkTest {
                 db.saveTier2Result(task.fileId, task.mtime, Tier2Status.INDEXED, body)
             }
 
-            // Warm up page cache once
             db.search("合同")
 
             val q1 = db.search("税")

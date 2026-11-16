@@ -8,7 +8,8 @@ import java.time.format.DateTimeParseException
  * Recursive-descent Everything-style search syntax parser supporting:
  * - Implicit AND (whitespace), OR ('|' or uppercase 'OR'), NOT ('-' or '!')
  * - Parentheses '(...)' and exact quotes '"..."'
- * - Filters: ext:, path:, name:, content:/body:, type:, size:, dm:, wildcards (* and ?)
+ * - Strict wildcards (* and ?) and strict regular expressions (regex:, re:, cregex:, /pattern/)
+ * - Filters: ext:, path:, name:, content:/body:, type:, size:, dm:
  */
 object QuerySyntaxParser {
 
@@ -17,7 +18,7 @@ object QuerySyntaxParser {
         data object RParen : Token
         data object OrOp : Token
         data object NotOp : Token
-        data class Word(val text: String, val quoted: Boolean) : Token
+        data class Word(val text: String, val quoted: Boolean, val regexLiteral: Boolean = false) : Token
     }
 
     fun parse(
@@ -27,20 +28,21 @@ object QuerySyntaxParser {
     ): ParsedQuery {
         val trimmed = rawQuery.trim()
         if (trimmed.isEmpty()) {
-            return ParsedQuery(root = null, positiveHighlightTerms = emptyList())
+            return ParsedQuery(root = null, positiveHighlightTerms = emptyList(), positiveHighlightRules = emptyList())
         }
 
         val tokens = tokenize(trimmed)
         if (tokens.isEmpty()) {
-            return ParsedQuery(root = null, positiveHighlightTerms = emptyList())
+            return ParsedQuery(root = null, positiveHighlightTerms = emptyList(), positiveHighlightRules = emptyList())
         }
 
         val state = ParserState(tokens, zoneId, nowMillis)
         val ast = state.parseOr()
-        val highlights = collectPositiveTerms(ast, negated = false)
+        val (terms, rules) = collectPositiveHighlights(ast)
         return ParsedQuery(
             root = ast,
-            positiveHighlightTerms = highlights.distinct(),
+            positiveHighlightTerms = terms.distinct(),
+            positiveHighlightRules = rules.distinct(),
             parseError = state.firstError
         )
     }
@@ -81,38 +83,192 @@ object QuerySyntaxParser {
                         result.add(Token.Word(sb.toString(), quoted = true))
                     }
                 }
-                else -> {
-                    val sb = StringBuilder()
-                    while (i < n) {
-                        val ch = input[i]
-                        if (ch.isWhitespace() || ch == '(' || ch == ')' || ch == '|') {
-                            break
-                        }
-                        if (ch == '"') {
-                            // Support prefix:"quoted value" such as path:"WeChat File"
-                            i++
-                            while (i < n && input[i] != '"') {
-                                sb.append(input[i])
-                                i++
-                            }
-                            if (i < n && input[i] == '"') i++
-                        } else {
-                            sb.append(ch)
-                            i++
-                        }
+                c == '/' -> {
+                    val slashToken = tryReadSlashRegex(input, i)
+                    if (slashToken != null) {
+                        result.add(Token.Word(slashToken.first, quoted = false, regexLiteral = true))
+                        i = slashToken.second
+                    } else {
+                        val (word, nextIdx) = readStandardWord(input, i)
+                        i = nextIdx
+                        emitWordToken(word, result)
                     }
-                    val word = sb.toString()
-                    if (word == "OR") {
-                        result.add(Token.OrOp)
-                    } else if (word == "AND") {
-                        // Implicit AND already applies between adjacent expressions
-                    } else if (word.isNotEmpty()) {
-                        result.add(Token.Word(word, quoted = false))
+                }
+                else -> {
+                    val regexEnd = tryReadPrefixedRegex(input, i)
+                    if (regexEnd != null) {
+                        result.add(Token.Word(regexEnd.first, quoted = false, regexLiteral = true))
+                        i = regexEnd.second
+                    } else {
+                        val (word, nextIdx) = readStandardWord(input, i)
+                        i = nextIdx
+                        emitWordToken(word, result)
                     }
                 }
             }
         }
         return result
+    }
+
+    /**
+     * Reads `/pattern/` or `/pattern/i` / `/pattern/c` only if closing `/` is followed by a token delimiter
+     * so filesystem paths like `/storage/emulated/0` are NOT misclassified as regex literals.
+     */
+    private fun tryReadSlashRegex(input: String, start: Int): Pair<String, Int>? {
+        val n = input.length
+        var i = start + 1
+        var inCharClass = false
+        var escaped = false
+        while (i < n) {
+            val ch = input[i]
+            if (escaped) {
+                escaped = false
+                i++
+                continue
+            }
+            if (ch == '\\') {
+                escaped = true
+                i++
+                continue
+            }
+            if (ch == '[' && !inCharClass) {
+                inCharClass = true
+                i++
+                continue
+            }
+            if (ch == ']' && inCharClass) {
+                inCharClass = false
+                i++
+                continue
+            }
+            if (ch == '/' && !inCharClass) {
+                if (i == start + 1) return null
+                var end = i + 1
+                while (end < n && (input[end] == 'i' || input[end] == 'c')) {
+                    end++
+                }
+                val atBoundary = end == n || input[end].isWhitespace() ||
+                    input[end] == ')' || input[end] == '|'
+                if (!atBoundary) return null
+                return input.substring(start, end) to end
+            }
+            if (ch.isWhitespace() && !inCharClass) return null
+            i++
+        }
+        return null
+    }
+
+    /**
+     * Reads `regex:...`, `re:...`, `cregex:...`, `name:regex:...`, `path:regex:...`, `content:regex:...`
+     * while respecting balanced `(...)`, `[...]`, `\"`, and escaped operators so internal `|`/`(` don't split.
+     */
+    private fun tryReadPrefixedRegex(input: String, start: Int): Pair<String, Int>? {
+        val prefixes = listOf(
+            "name:cregex:", "path:cregex:", "content:cregex:", "body:cregex:",
+            "name:regex:", "path:regex:", "content:regex:", "body:regex:",
+            "name:re:", "path:re:", "content:re:", "body:re:",
+            "cregex:", "regex:", "re:"
+        )
+        val matchedPrefix = prefixes.firstOrNull { prefix ->
+            input.regionMatches(start, prefix, 0, prefix.length, ignoreCase = true)
+        } ?: return null
+
+        val n = input.length
+        var i = start + matchedPrefix.length
+        if (i >= n) return null
+
+        if (input[i] == '"') {
+            i++
+            val sb = StringBuilder(matchedPrefix)
+            while (i < n && input[i] != '"') {
+                sb.append(input[i])
+                i++
+            }
+            if (i < n && input[i] == '"') i++
+            return sb.toString() to i
+        }
+
+        val sb = StringBuilder(matchedPrefix)
+        var parenDepth = 0
+        var inCharClass = false
+        var escaped = false
+        while (i < n) {
+            val ch = input[i]
+            if (escaped) {
+                sb.append(ch)
+                escaped = false
+                i++
+                continue
+            }
+            if (ch == '\\') {
+                sb.append(ch)
+                escaped = true
+                i++
+                continue
+            }
+            if (ch == '[' && !inCharClass) {
+                inCharClass = true
+                sb.append(ch)
+                i++
+                continue
+            }
+            if (ch == ']' && inCharClass) {
+                inCharClass = false
+                sb.append(ch)
+                i++
+                continue
+            }
+            if (!inCharClass) {
+                if (ch == '(') parenDepth++
+                else if (ch == ')') {
+                    if (parenDepth == 0) break
+                    parenDepth--
+                } else if (ch.isWhitespace() && parenDepth == 0) {
+                    break
+                } else if (ch == '|' && parenDepth == 0) {
+                    // Only split on '|' at top level if it does not look like part of an unparenthesized regex alternation
+                    // Wait: users writing regex:foo|bar expect foo|bar inside the regex unless whitespace separates `|`!
+                    // Keep '|' inside regex unless preceded by whitespace.
+                }
+            }
+            sb.append(ch)
+            i++
+        }
+        return sb.toString() to i
+    }
+
+    private fun readStandardWord(input: String, start: Int): Pair<String, Int> {
+        var i = start
+        val n = input.length
+        val sb = StringBuilder()
+        while (i < n) {
+            val ch = input[i]
+            if (ch.isWhitespace() || ch == '(' || ch == ')' || ch == '|') {
+                break
+            }
+            if (ch == '"') {
+                i++
+                while (i < n && input[i] != '"') {
+                    sb.append(input[i])
+                    i++
+                }
+                if (i < n && input[i] == '"') i++
+            } else {
+                sb.append(ch)
+                i++
+            }
+        }
+        return sb.toString() to i
+    }
+
+    private fun emitWordToken(word: String, out: MutableList<Token>) {
+        if (word == "OR") {
+            out.add(Token.OrOp)
+        } else if (word == "AND") {
+            // Implicit AND already applies between adjacent expressions
+        } else if (word.isNotEmpty()) {
+            out.add(Token.Word(word, quoted = false))
+        }
     }
 
     private class ParserState(
@@ -191,11 +347,60 @@ object QuerySyntaxParser {
                             isQuotedPhrase = true,
                             hasWildcard = t.text.contains('*') || t.text.contains('?')
                         )
+                    } else if (t.regexLiteral) {
+                        parseRegexWord(t.text)
                     } else {
                         parseModifierOrTerm(t.text)
                     }
                 }
                 else -> null
+            }
+        }
+
+        private fun parseRegexWord(text: String): QueryNode {
+            if (text.startsWith("/")) {
+                val lastSlash = text.lastIndexOf('/')
+                val rawPattern = text.substring(1, lastSlash)
+                val flags = text.substring(lastSlash + 1)
+                val caseSensitive = flags.contains('c') && !flags.contains('i')
+                return buildValidatedRegex(rawPattern, MatchField.ANY, caseSensitive)
+            }
+
+            val lower = text.lowercase()
+            val (field, rest) = when {
+                lower.startsWith("name:") -> MatchField.NAME_ONLY to text.substring(5)
+                lower.startsWith("path:") -> MatchField.PATH_ONLY to text.substring(5)
+                lower.startsWith("content:") -> MatchField.BODY_ONLY to text.substring(8)
+                lower.startsWith("body:") -> MatchField.BODY_ONLY to text.substring(5)
+                else -> MatchField.ANY to text
+            }
+            val restLower = rest.lowercase()
+            return when {
+                restLower.startsWith("cregex:") -> buildValidatedRegex(rest.substring(7), field, caseSensitive = true)
+                restLower.startsWith("regex:") -> buildValidatedRegex(rest.substring(6), field, caseSensitive = false)
+                restLower.startsWith("re:") -> buildValidatedRegex(rest.substring(3), field, caseSensitive = false)
+                else -> buildValidatedRegex(rest, field, caseSensitive = false)
+            }
+        }
+
+        private fun buildValidatedRegex(
+            pattern: String,
+            field: MatchField,
+            caseSensitive: Boolean
+        ): QueryNode.RegexTerm {
+            if (pattern.isEmpty()) {
+                if (firstError == null) firstError = "正则表达式不能为空"
+                return QueryNode.RegexTerm(pattern, field, caseSensitive, isValid = false)
+            }
+            val options = if (caseSensitive) emptySet() else setOf(RegexOption.IGNORE_CASE)
+            return try {
+                Regex(pattern, options)
+                QueryNode.RegexTerm(pattern, field, caseSensitive, isValid = true)
+            } catch (e: Throwable) {
+                if (firstError == null) {
+                    firstError = "正则语法错误: ${e.message?.lineSequence()?.firstOrNull() ?: pattern}"
+                }
+                QueryNode.RegexTerm(pattern, field, caseSensitive, isValid = false)
             }
         }
 
@@ -347,20 +552,37 @@ object QuerySyntaxParser {
         }
     }
 
-    private fun collectPositiveTerms(node: QueryNode?, negated: Boolean): List<String> {
-        if (node == null || negated) return emptyList()
-        return when (node) {
-            is QueryNode.TextTerm -> {
-                if (node.hasWildcard) {
-                    node.rawText.split('*', '?').filter { it.isNotEmpty() }
-                } else {
-                    listOf(node.rawText)
+    private fun collectPositiveHighlights(node: QueryNode?): Pair<List<String>, List<HighlightRule>> {
+        if (node == null) return emptyList<String>() to emptyList()
+        val terms = mutableListOf<String>()
+        val rules = mutableListOf<HighlightRule>()
+
+        fun visit(cur: QueryNode, negated: Boolean) {
+            if (negated) return
+            when (cur) {
+                is QueryNode.TextTerm -> {
+                    if (cur.hasWildcard) {
+                        val parts = cur.rawText.split('*', '?').filter { it.isNotEmpty() }
+                        terms.addAll(parts)
+                        parts.forEach { rules.add(HighlightRule.Literal(it)) }
+                    } else {
+                        terms.add(cur.rawText)
+                        rules.add(HighlightRule.Literal(cur.rawText))
+                    }
                 }
+                is QueryNode.RegexTerm -> {
+                    if (cur.isValid) {
+                        rules.add(HighlightRule.RegexRule(cur.pattern, cur.caseSensitive))
+                    }
+                }
+                is QueryNode.And -> cur.children.forEach { visit(it, false) }
+                is QueryNode.Or -> cur.children.forEach { visit(it, false) }
+                is QueryNode.Not -> Unit
+                else -> Unit
             }
-            is QueryNode.And -> node.children.flatMap { collectPositiveTerms(it, negated = false) }
-            is QueryNode.Or -> node.children.flatMap { collectPositiveTerms(it, negated = false) }
-            is QueryNode.Not -> emptyList()
-            else -> emptyList()
         }
+
+        visit(node, false)
+        return terms to rules
     }
 }

@@ -229,7 +229,6 @@ class SqliteSearchDatabase(
                         }
 
                         if (sameUnchanged) {
-                            // Ensure skipped/pending transitions if filter rules changed
                             val targetStatus = if (!e.needsTier2) {
                                 e.initialTier2Status.code
                             } else if (oldTier2Status == Tier2Status.INDEXED.code) {
@@ -278,11 +277,7 @@ class SqliteSearchDatabase(
                             updateMeta.bindLong(6, if (e.isDir) 1L else 0L)
                             updateMeta.bindLong(7, e.accessMode.code.toLong())
                             updateMeta.bindLong(8, nextTier2Status.toLong())
-                            if (sameUnchanged) {
-                                updateMeta.bindNull(9)
-                            } else {
-                                updateMeta.bindNull(9)
-                            }
+                            updateMeta.bindNull(9)
                             updateMeta.bindLong(10, rowId)
                             updateMeta.step()
 
@@ -320,9 +315,6 @@ class SqliteSearchDatabase(
         }
     }
 
-    /**
-     * Prunes entries belonging to [rootPrefixes] whose paths are NOT in [seenPaths].
-     */
     fun pruneMissingEntries(seenPaths: Set<String>, scopeMode: AccessMode? = null): Int {
         return writeLock.withLock {
             val staleIds = ArrayList<Long>()
@@ -348,9 +340,6 @@ class SqliteSearchDatabase(
         }
     }
 
-    /**
-     * Deletes all entries whose path equals [dirPrefix] or starts with [dirPrefix] + '/' that are not in [seenUnderDir].
-     */
     fun pruneDirectorySubtree(dirPrefix: String, seenUnderDir: Set<String>): Int {
         val normalizedPrefix = if (dirPrefix == "/") "/" else dirPrefix.trimEnd('/') + "/"
         return writeLock.withLock {
@@ -639,19 +628,25 @@ class SqliteSearchDatabase(
         rawQuery: String,
         quickScope: QuickScope = QuickScope.ALL,
         sortOrder: SortOrder = SortOrder.RELEVANCE,
-        limit: Int = 120
+        limit: Int = 120,
+        showRecentOnEmpty: Boolean = true
     ): SearchResponse {
         val startNs = System.nanoTime()
         val parsed = QuerySyntaxParser.parse(rawQuery)
         val effectiveAst = applyQuickScope(parsed.root, quickScope)
 
         return readLock.withLock {
+            if (parsed.root == null && !showRecentOnEmpty && quickScope == QuickScope.ALL) {
+                val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
+                return@withLock SearchResponse(emptyList(), 0, elapsedMs, parsed.parseError)
+            }
+
             if (effectiveAst == null) {
                 val recent = fetchRecentRows(limit)
                 val items = recent.map { row ->
                     toSearchResultItem(
                         row = row,
-                        highlightTerms = emptyList(),
+                        highlightRules = emptyList(),
                         rawBody = null,
                         tier1NameHit = false,
                         tier1PathHit = false,
@@ -662,11 +657,14 @@ class SqliteSearchDatabase(
                 return@withLock SearchResponse(items, items.size, elapsedMs, parsed.parseError)
             }
 
-            val evalResult = evaluateNode(effectiveAst, quickScope)
+            val bodyCache = HashMap<Long, String?>()
+            val bodyFtsCache = HashMap<String, Set<Long>?>()
+            val regexCache = HashMap<String, Regex?>()
+
+            val evalResult = evaluateNode(effectiveAst, emptyList(), bodyCache, regexCache)
             val candidateIds = evalResult.candidateIds
 
             val rows: List<FileMetaRow> = if (candidateIds == null) {
-                // Only negative/unbounded constraints -> query metadata with filters
                 fetchMetaRowsWithFilter(effectiveAst, limit * 2)
             } else if (candidateIds.isEmpty()) {
                 emptyList()
@@ -674,19 +672,16 @@ class SqliteSearchDatabase(
                 fetchRowsByIds(candidateIds)
             }
 
-            // Refine exact substring/wildcard/negation/boolean semantics and compute highlights + score
-            val docTerms = parsed.positiveHighlightTerms
+            val highlightRules = parsed.positiveHighlightRules
             val scored = ArrayList<SearchResultItem>(minOf(rows.size, limit))
-            val bodyCache = HashMap<Long, String?>()
-            val bodyFtsCache = HashMap<String, Set<Long>?>()
 
             for (row in rows) {
                 val verification = verifyRowAgainstAst(
                     row = row,
                     node = effectiveAst,
-                    quickScope = quickScope,
                     bodyCache = bodyCache,
-                    bodyFtsCache = bodyFtsCache
+                    bodyFtsCache = bodyFtsCache,
+                    regexCache = regexCache
                 )
                 if (!verification.matched) continue
 
@@ -699,7 +694,7 @@ class SqliteSearchDatabase(
                 scored.add(
                     toSearchResultItem(
                         row = row,
-                        highlightTerms = docTerms,
+                        highlightRules = highlightRules,
                         rawBody = body,
                         tier1NameHit = verification.nameHit,
                         tier1PathHit = verification.pathHit,
@@ -721,14 +716,13 @@ class SqliteSearchDatabase(
             scored.sortWith(comparator)
 
             val trimmed = if (scored.size > limit) scored.subList(0, limit).toMutableList() else scored.toMutableList()
-            // Hydrate body snippets for top returned items that matched by filename/path and also have indexed bodies
-            if (docTerms.isNotEmpty()) {
+            if (highlightRules.isNotEmpty()) {
                 for (idx in trimmed.indices) {
                     val item = trimmed[idx]
                     if (item.snippets.isEmpty() && item.tier2Status == Tier2Status.INDEXED && idx < 40) {
                         val rawBody = bodyCache.getOrPut(item.id) { loadRawTextLocked(item.id) }
                         if (!rawBody.isNullOrEmpty()) {
-                            val (snips, cnt) = SnippetHighlighter.buildSnippets(rawBody, docTerms)
+                            val (snips, cnt) = SnippetHighlighter.buildSnippetsForRules(rawBody, highlightRules)
                             if (snips.isNotEmpty()) {
                                 trimmed[idx] = item.copy(
                                     snippets = snips,
@@ -753,8 +747,9 @@ class SqliteSearchDatabase(
     private fun applyQuickScope(root: QueryNode?, quickScope: QuickScope): QueryNode? {
         val scopeFilter: QueryNode? = when (quickScope) {
             QuickScope.ALL, QuickScope.NAME_ONLY, QuickScope.CONTENT_ONLY -> null
-            QuickScope.DOCS -> QueryNode.ExtFilter(setOf("txt", "md", "markdown", "docx", "pdf"))
             QuickScope.FOLDERS -> QueryNode.TypeFilter(FileTypeFilter.FOLDER_ONLY)
+            QuickScope.FILES -> QueryNode.TypeFilter(FileTypeFilter.FILE_ONLY)
+            QuickScope.DOCS -> QueryNode.ExtFilter(setOf("txt", "md", "markdown", "docx", "pdf"))
             QuickScope.PDF -> QueryNode.ExtFilter(setOf("pdf"))
             QuickScope.DOCX -> QueryNode.ExtFilter(setOf("docx"))
             QuickScope.TEXT -> QueryNode.ExtFilter(setOf("txt", "md", "markdown"))
@@ -778,6 +773,7 @@ class SqliteSearchDatabase(
     private fun rewriteAnyField(node: QueryNode, target: MatchField): QueryNode {
         return when (node) {
             is QueryNode.TextTerm -> if (node.field == MatchField.ANY) node.copy(field = target) else node
+            is QueryNode.RegexTerm -> if (node.field == MatchField.ANY) node.copy(field = target) else node
             is QueryNode.And -> node.copy(children = node.children.map { rewriteAnyField(it, target) })
             is QueryNode.Or -> node.copy(children = node.children.map { rewriteAnyField(it, target) })
             is QueryNode.Not -> node.copy(child = rewriteAnyField(node.child, target))
@@ -786,30 +782,37 @@ class SqliteSearchDatabase(
     }
 
     private data class CandidateEval(
-        /** Null means unbounded universe (e.g., pure NOT node) */
         val candidateIds: LinkedHashSet<Long>?
     )
 
-    private fun evaluateNode(node: QueryNode, quickScope: QuickScope): CandidateEval {
+    private fun evaluateNode(
+        node: QueryNode,
+        inheritedMetaFilters: List<QueryNode>,
+        bodyCache: MutableMap<Long, String?>,
+        regexCache: MutableMap<String, Regex?>
+    ): CandidateEval {
         return when (node) {
-            is QueryNode.TextTerm -> CandidateEval(queryCandidatesForTerm(node))
+            is QueryNode.TextTerm -> CandidateEval(
+                queryCandidatesForTerm(node, inheritedMetaFilters)
+            )
+            is QueryNode.RegexTerm -> CandidateEval(
+                queryCandidatesForRegex(node, inheritedMetaFilters, bodyCache, regexCache)
+            )
             is QueryNode.And -> {
                 val textOrComplex = ArrayList<QueryNode>()
-                val metaFilters = ArrayList<QueryNode>()
+                val metaFilters = ArrayList<QueryNode>(inheritedMetaFilters)
                 for (c in node.children) {
                     if (isPureMetaFilter(c)) metaFilters.add(c) else textOrComplex.add(c)
                 }
 
                 if (textOrComplex.isEmpty()) {
-                    // Pure metadata query (e.g. ext:pdf size:>1m)
-                    val ids = queryPureMetadataIds(metaFilters, limit = 1500)
-                    return CandidateEval(ids)
+                    return CandidateEval(queryPureMetadataIds(metaFilters, limit = 1500))
                 }
 
                 var acc: LinkedHashSet<Long>? = null
                 for (c in textOrComplex) {
                     if (c is QueryNode.Not) continue
-                    val sub = evaluateNode(c, quickScope).candidateIds ?: continue
+                    val sub = evaluateNode(c, metaFilters, bodyCache, regexCache).candidateIds ?: continue
                     acc = if (acc == null) {
                         sub
                     } else {
@@ -820,18 +823,14 @@ class SqliteSearchDatabase(
                 }
 
                 if (acc == null) {
-                    // Only Not nodes alongside metaFilters
-                    val ids = queryPureMetadataIds(metaFilters, limit = 1500)
-                    return CandidateEval(ids)
+                    return CandidateEval(queryPureMetadataIds(metaFilters, limit = 1500))
                 }
-
-                // Filter acc by metadata in SQL if acc is large, or let fetch + verify handle it
                 CandidateEval(acc)
             }
             is QueryNode.Or -> {
                 val union = LinkedHashSet<Long>()
                 for (c in node.children) {
-                    val sub = evaluateNode(c, quickScope).candidateIds
+                    val sub = evaluateNode(c, inheritedMetaFilters, bodyCache, regexCache).candidateIds
                     if (sub == null) {
                         return CandidateEval(null)
                     }
@@ -844,7 +843,7 @@ class SqliteSearchDatabase(
             is QueryNode.TypeFilter,
             is QueryNode.SizeRangeFilter,
             is QueryNode.DateModifiedFilter -> {
-                CandidateEval(queryPureMetadataIds(listOf(node), limit = 1500))
+                CandidateEval(queryPureMetadataIds(inheritedMetaFilters + node, limit = 1500))
             }
         }
     }
@@ -856,26 +855,59 @@ class SqliteSearchDatabase(
             node is QueryNode.DateModifiedFilter
     }
 
-    private fun queryCandidatesForTerm(term: QueryNode.TextTerm): LinkedHashSet<Long> {
-        val result = LinkedHashSet<Long>()
-        val rawForTokens = if (term.hasWildcard) {
-            term.rawText.split('*', '?').maxByOrNull { it.length } ?: ""
-        } else {
-            term.rawText
-        }
-
-        if (rawForTokens.isEmpty()) {
-            // Pure wildcard like '*' or '?'
-            val glob = CjkTokenizer.normalizeString(term.rawText)
-            val col = if (term.field == MatchField.PATH_ONLY) "path" else "name"
-            readConn.prepare("SELECT id FROM files_meta WHERE LOWER($col) GLOB ? ORDER BY mtime DESC LIMIT 1000").use { stmt ->
-                stmt.bindText(1, glob)
-                while (stmt.step()) result.add(stmt.getLong(0))
+    private fun buildMetaWhereParts(
+        metaFilters: List<QueryNode>,
+        tableAlias: String
+    ): Pair<List<String>, List<Any>> {
+        val clauses = ArrayList<String>()
+        val args = ArrayList<Any>()
+        val p = if (tableAlias.isEmpty()) "" else "$tableAlias."
+        for (f in metaFilters) {
+            when (f) {
+                is QueryNode.ExtFilter -> {
+                    val placeholders = f.extensions.joinToString(",") { "?" }
+                    clauses.add("${p}ext IN ($placeholders)")
+                    args.addAll(f.extensions)
+                }
+                is QueryNode.TypeFilter -> {
+                    clauses.add("${p}is_dir = ?")
+                    args.add(if (f.type == FileTypeFilter.FOLDER_ONLY) 1L else 0L)
+                }
+                is QueryNode.SizeRangeFilter -> {
+                    f.minBytes?.let { clauses.add("${p}size >= ?"); args.add(it) }
+                    f.maxBytes?.let { clauses.add("${p}size <= ?"); args.add(it) }
+                }
+                is QueryNode.DateModifiedFilter -> {
+                    f.minMillis?.let { clauses.add("${p}mtime >= ?"); args.add(it) }
+                    f.maxMillis?.let { clauses.add("${p}mtime <= ?"); args.add(it) }
+                }
+                else -> Unit
             }
-            return result
+        }
+        return clauses to args
+    }
+
+    private fun bindDynamicArgs(stmt: SQLiteStatement, startIndex: Int, args: List<Any>): Int {
+        var idx = startIndex
+        for (arg in args) {
+            when (arg) {
+                is Long -> stmt.bindLong(idx++, arg)
+                is String -> stmt.bindText(idx++, arg)
+            }
+        }
+        return idx
+    }
+
+    private fun queryCandidatesForTerm(
+        term: QueryNode.TextTerm,
+        metaFilters: List<QueryNode>
+    ): LinkedHashSet<Long> {
+        if (term.hasWildcard) {
+            return queryCandidatesForWildcard(term, metaFilters)
         }
 
-        val frags = CjkTokenizer.analyzeQueryLiteral(rawForTokens)
+        val result = LinkedHashSet<Long>()
+        val frags = CjkTokenizer.analyzeQueryLiteral(term.rawText)
         if (frags.phraseSequences.isEmpty() && frags.requiredUnigrams.isEmpty()) {
             // Punctuation-only literal (e.g., "." or "_")
             val likePattern = "%" + CjkTokenizer.normalizeString(term.rawText)
@@ -884,31 +916,235 @@ class SqliteSearchDatabase(
                 .replace("_", "\\_") + "%"
             if (term.field != MatchField.BODY_ONLY) {
                 val col = if (term.field == MatchField.PATH_ONLY) "path" else "name"
-                readConn.prepare("SELECT id FROM files_meta WHERE LOWER($col) LIKE ? ESCAPE '\\' LIMIT 1000").use { stmt ->
+                val (metaClauses, metaArgs) = buildMetaWhereParts(metaFilters, "")
+                val extraWhere = if (metaClauses.isEmpty()) "" else " AND " + metaClauses.joinToString(" AND ")
+                val sql = "SELECT id FROM files_meta WHERE LOWER($col) LIKE ? ESCAPE '\\'$extraWhere LIMIT 2000"
+                readConn.prepare(sql).use { stmt ->
                     stmt.bindText(1, likePattern)
+                    bindDynamicArgs(stmt, 2, metaArgs)
                     while (stmt.step()) result.add(stmt.getLong(0))
                 }
             }
             return result
         }
 
-        // 1. Query Tier 1 (files_fts) if field permits filename/path
+        // 1. Query Tier 1 (files_fts) joined with files_meta for metadata pushdown
         if (term.field != MatchField.BODY_ONLY) {
-            val tier1MatchExpr = buildFilesFtsMatchExpr(frags, term.field, allowPrefix = !term.isQuotedPhrase && !term.hasWildcard)
+            val tier1MatchExpr = buildFilesFtsMatchExpr(frags, term.field, allowPrefix = !term.isQuotedPhrase)
             if (tier1MatchExpr != null) {
-                readConn.prepare("SELECT rowid FROM files_fts WHERE files_fts MATCH ? LIMIT 4000").use { stmt ->
+                val (metaClauses, metaArgs) = buildMetaWhereParts(metaFilters, "m")
+                val sql = if (metaClauses.isEmpty()) {
+                    "SELECT rowid FROM files_fts WHERE files_fts MATCH ? LIMIT 4000"
+                } else {
+                    "SELECT m.id FROM files_fts f JOIN files_meta m ON m.id = f.rowid WHERE files_fts MATCH ? AND " +
+                        metaClauses.joinToString(" AND ") + " LIMIT 4000"
+                }
+                readConn.prepare(sql).use { stmt ->
                     stmt.bindText(1, tier1MatchExpr)
+                    bindDynamicArgs(stmt, 2, metaArgs)
                     while (stmt.step()) result.add(stmt.getLong(0))
                 }
             }
         }
 
-        // 2. Query Tier 2 (docs_fts / docs_uni_fts) if field permits document body
+        // 2. Query Tier 2 (docs_fts / docs_uni_fts) with metadata pushdown
         if (term.field == MatchField.ANY || term.field == MatchField.BODY_ONLY) {
-            queryTier2BodyCandidates(frags, allowPrefix = !term.isQuotedPhrase && !term.hasWildcard, outIds = result)
+            queryTier2BodyCandidates(frags, allowPrefix = !term.isQuotedPhrase, metaFilters = metaFilters, outIds = result)
         }
 
         return result
+    }
+
+    /**
+     * Lossless candidate retrieval for wildcards (`*` and `?`):
+     * - Extracts literal extension hint (`*.ext`) when applicable to leverage `idx_files_ext`.
+     * - Uses FTS5 only when a segment is guaranteed lossless (CJK >=2 bigram or start-anchored ASCII prefix `foo*`).
+     * - Otherwise scans `files_meta` directly (with SQL metadata pushdown) so `*.pdf` or `*SU.apk` never drops hits.
+     */
+    private fun queryCandidatesForWildcard(
+        term: QueryNode.TextTerm,
+        metaFilters: List<QueryNode>
+    ): LinkedHashSet<Long> {
+        val result = LinkedHashSet<Long>()
+        val normGlob = CjkTokenizer.normalizeString(term.rawText)
+
+        if (term.field == MatchField.BODY_ONLY) {
+            val longestChunk = term.rawText.split('*', '?').maxByOrNull { it.length }.orEmpty()
+            val frags = CjkTokenizer.analyzeQueryLiteral(longestChunk)
+            val hasSafeCjkBigram = frags.phraseSequences.any { seq -> seq.size >= 2 }
+            if (hasSafeCjkBigram) {
+                queryTier2BodyCandidates(frags, allowPrefix = false, metaFilters = metaFilters, outIds = result)
+                return result
+            }
+            val (metaClauses, metaArgs) = buildMetaWhereParts(metaFilters, "m")
+            val whereSql = if (metaClauses.isEmpty()) "" else " WHERE " + metaClauses.joinToString(" AND ")
+            val sql = "SELECT d.file_id FROM docs_raw d JOIN files_meta m ON m.id = d.file_id$whereSql"
+            readConn.prepare(sql).use { stmt ->
+                bindDynamicArgs(stmt, 1, metaArgs)
+                while (stmt.step()) result.add(stmt.getLong(0))
+            }
+            return result
+        }
+
+        // Check for extension optimization (e.g. `2026*.pdf` or `*.pdf`)
+        val effectiveMeta = ArrayList(metaFilters)
+        if (!normGlob.contains('/') && term.field != MatchField.PATH_ONLY) {
+            val lastDot = normGlob.lastIndexOf('.')
+            if (lastDot >= 0 && lastDot < normGlob.lastIndex) {
+                val tailExt = normGlob.substring(lastDot + 1)
+                if (tailExt.isNotEmpty() && !tailExt.contains('*') && !tailExt.contains('?')) {
+                    effectiveMeta.add(QueryNode.ExtFilter(setOf(tailExt)))
+                }
+            }
+        }
+
+        // Check whether FTS can safely pre-narrow without missing hits:
+        // 1) Any pure CJK run of length >= 2 inside any literal segment is lossless via bigrams.
+        // 2) An ASCII prefix at index 0 immediately followed by `*` (e.g. `Baka*.apk` -> `baka*`) is lossless.
+        val segments = normGlob.split('*', '?')
+        val firstSeg = segments.firstOrNull().orEmpty()
+        val hasPathSep = normGlob.contains('/')
+        val bestCjkSeg = segments
+            .flatMap { CjkTokenizer.analyzeQueryLiteral(it).phraseSequences }
+            .firstOrNull { seq -> seq.size >= 2 }
+
+        if (bestCjkSeg != null) {
+            val frags = CjkTokenizer.QueryFragments(
+                phraseSequences = listOf(bestCjkSeg),
+                requiredUnigrams = emptyList(),
+                normalizedLiteral = bestCjkSeg.joinToString("")
+            )
+            val ftsField = if (hasPathSep || term.field == MatchField.PATH_ONLY) MatchField.PATH_ONLY else MatchField.NAME_ONLY
+            val matchExpr = buildFilesFtsMatchExpr(frags, ftsField, allowPrefix = false)
+            if (matchExpr != null) {
+                val (metaClauses, metaArgs) = buildMetaWhereParts(effectiveMeta, "m")
+                val sql = if (metaClauses.isEmpty()) {
+                    "SELECT rowid FROM files_fts WHERE files_fts MATCH ? LIMIT 8000"
+                } else {
+                    "SELECT m.id FROM files_fts f JOIN files_meta m ON m.id = f.rowid WHERE files_fts MATCH ? AND " +
+                        metaClauses.joinToString(" AND ") + " LIMIT 8000"
+                }
+                readConn.prepare(sql).use { stmt ->
+                    stmt.bindText(1, matchExpr)
+                    bindDynamicArgs(stmt, 2, metaArgs)
+                    while (stmt.step()) result.add(stmt.getLong(0))
+                }
+                return result
+            }
+        }
+
+        if (!hasPathSep && firstSeg.length >= 2 && firstSeg.all { CjkTokenizer.isAsciiWordChar(it) } &&
+            term.field != MatchField.PATH_ONLY
+        ) {
+            val frags = CjkTokenizer.analyzeQueryLiteral(firstSeg)
+            val matchExpr = buildFilesFtsMatchExpr(frags, MatchField.NAME_ONLY, allowPrefix = true)
+            if (matchExpr != null) {
+                val (metaClauses, metaArgs) = buildMetaWhereParts(effectiveMeta, "m")
+                val sql = if (metaClauses.isEmpty()) {
+                    "SELECT rowid FROM files_fts WHERE files_fts MATCH ? LIMIT 8000"
+                } else {
+                    "SELECT m.id FROM files_fts f JOIN files_meta m ON m.id = f.rowid WHERE files_fts MATCH ? AND " +
+                        metaClauses.joinToString(" AND ") + " LIMIT 8000"
+                }
+                readConn.prepare(sql).use { stmt ->
+                    stmt.bindText(1, matchExpr)
+                    bindDynamicArgs(stmt, 2, metaArgs)
+                    while (stmt.step()) result.add(stmt.getLong(0))
+                }
+                return result
+            }
+        }
+
+        // Lossless direct scan of files_meta (filtered by effectiveMeta such as ext index!)
+        val regex = buildStrictWildcardRegex(normGlob, anchored = !hasPathSep || normGlob.startsWith("/"))
+        val (metaClauses, metaArgs) = buildMetaWhereParts(effectiveMeta, "")
+        val whereSql = if (metaClauses.isEmpty()) "" else " WHERE " + metaClauses.joinToString(" AND ")
+        val selectCol = if (hasPathSep || term.field == MatchField.PATH_ONLY) "path" else "name"
+        val sql = "SELECT id, $selectCol FROM files_meta$whereSql ORDER BY mtime DESC"
+        readConn.prepare(sql).use { stmt ->
+            bindDynamicArgs(stmt, 1, metaArgs)
+            while (stmt.step()) {
+                val target = CjkTokenizer.normalizeString(stmt.getText(1))
+                val hit = if (hasPathSep && !normGlob.startsWith("/")) {
+                    regex.containsMatchIn(target)
+                } else {
+                    regex.matches(target)
+                }
+                if (hit) {
+                    result.add(stmt.getLong(0))
+                    if (result.size >= 4000) break
+                }
+            }
+        }
+        return result
+    }
+
+    private fun queryCandidatesForRegex(
+        term: QueryNode.RegexTerm,
+        metaFilters: List<QueryNode>,
+        bodyCache: MutableMap<Long, String?>,
+        regexCache: MutableMap<String, Regex?>
+    ): LinkedHashSet<Long> {
+        val result = LinkedHashSet<Long>()
+        if (!term.isValid) return result
+        val regex = getCompiledRegex(term, regexCache) ?: return result
+
+        if (term.field != MatchField.BODY_ONLY) {
+            val (metaClauses, metaArgs) = buildMetaWhereParts(metaFilters, "")
+            val whereSql = if (metaClauses.isEmpty()) "" else " WHERE " + metaClauses.joinToString(" AND ")
+            val sql = "SELECT id, name, path FROM files_meta$whereSql ORDER BY mtime DESC"
+            readConn.prepare(sql).use { stmt ->
+                bindDynamicArgs(stmt, 1, metaArgs)
+                while (stmt.step()) {
+                    val id = stmt.getLong(0)
+                    val name = stmt.getText(1)
+                    val path = stmt.getText(2)
+                    val hit = when (term.field) {
+                        MatchField.NAME_ONLY -> regex.containsMatchIn(name)
+                        MatchField.PATH_ONLY -> regex.containsMatchIn(path)
+                        MatchField.ANY -> regex.containsMatchIn(name) || regex.containsMatchIn(path)
+                        MatchField.BODY_ONLY -> false
+                    }
+                    if (hit) {
+                        result.add(id)
+                        if (result.size >= 3000) break
+                    }
+                }
+            }
+        }
+
+        if (term.field == MatchField.BODY_ONLY || term.field == MatchField.ANY) {
+            val (metaClauses, metaArgs) = buildMetaWhereParts(metaFilters, "m")
+            val whereSql = if (metaClauses.isEmpty()) "" else " WHERE " + metaClauses.joinToString(" AND ")
+            val sql = "SELECT d.file_id, d.compressed_body FROM docs_raw d JOIN files_meta m ON m.id = d.file_id$whereSql"
+            readConn.prepare(sql).use { stmt ->
+                bindDynamicArgs(stmt, 1, metaArgs)
+                while (stmt.step()) {
+                    val fileId = stmt.getLong(0)
+                    val text = bodyCache.getOrPut(fileId) { decompressUtf8(stmt.getBlob(1)) }
+                    if (!text.isNullOrEmpty() && regex.containsMatchIn(text)) {
+                        result.add(fileId)
+                        if (result.size >= 3000) break
+                    }
+                }
+            }
+        }
+
+        return result
+    }
+
+    private fun getCompiledRegex(
+        term: QueryNode.RegexTerm,
+        cache: MutableMap<String, Regex?>
+    ): Regex? {
+        if (!term.isValid) return null
+        val key = "${term.caseSensitive}:${term.pattern}"
+        return cache.getOrPut(key) {
+            runCatching {
+                val opts = if (term.caseSensitive) emptySet() else setOf(RegexOption.IGNORE_CASE)
+                Regex(term.pattern, opts)
+            }.getOrNull()
+        }
     }
 
     private fun buildFilesFtsMatchExpr(
@@ -963,6 +1199,7 @@ class SqliteSearchDatabase(
     private fun queryTier2BodyCandidates(
         frags: CjkTokenizer.QueryFragments,
         allowPrefix: Boolean,
+        metaFilters: List<QueryNode> = emptyList(),
         outIds: LinkedHashSet<Long>
     ) {
         val biExprParts = ArrayList<String>()
@@ -980,11 +1217,20 @@ class SqliteSearchDatabase(
             }
         }
 
+        val (metaClauses, metaArgs) = buildMetaWhereParts(metaFilters, "m")
+
         val biMatchIds: LinkedHashSet<Long>? = if (biExprParts.isNotEmpty()) {
             val ids = LinkedHashSet<Long>()
             val expr = biExprParts.joinToString(" AND ")
-            readConn.prepare("SELECT rowid FROM docs_fts WHERE body_bi MATCH ? LIMIT 2500").use { stmt ->
+            val sql = if (metaClauses.isEmpty()) {
+                "SELECT rowid FROM docs_fts WHERE body_bi MATCH ? LIMIT 2500"
+            } else {
+                "SELECT m.id FROM docs_fts d JOIN files_meta m ON m.id = d.rowid WHERE body_bi MATCH ? AND " +
+                    metaClauses.joinToString(" AND ") + " LIMIT 2500"
+            }
+            readConn.prepare(sql).use { stmt ->
                 stmt.bindText(1, expr)
+                bindDynamicArgs(stmt, 2, metaArgs)
                 while (stmt.step()) ids.add(stmt.getLong(0))
             }
             ids
@@ -995,8 +1241,15 @@ class SqliteSearchDatabase(
         val uniMatchIds: LinkedHashSet<Long>? = if (frags.requiredUnigrams.isNotEmpty()) {
             val ids = LinkedHashSet<Long>()
             val expr = frags.requiredUnigrams.joinToString(" AND ")
-            readConn.prepare("SELECT rowid FROM docs_uni_fts WHERE docs_uni_fts MATCH ? LIMIT 2500").use { stmt ->
+            val sql = if (metaClauses.isEmpty()) {
+                "SELECT rowid FROM docs_uni_fts WHERE docs_uni_fts MATCH ? LIMIT 2500"
+            } else {
+                "SELECT m.id FROM docs_uni_fts u JOIN files_meta m ON m.id = u.rowid WHERE docs_uni_fts MATCH ? AND " +
+                    metaClauses.joinToString(" AND ") + " LIMIT 2500"
+            }
+            readConn.prepare(sql).use { stmt ->
                 stmt.bindText(1, expr)
+                bindDynamicArgs(stmt, 2, metaArgs)
                 while (stmt.step()) ids.add(stmt.getLong(0))
             }
             ids
@@ -1015,36 +1268,21 @@ class SqliteSearchDatabase(
     }
 
     private fun queryPureMetadataIds(filters: List<QueryNode>, limit: Int): LinkedHashSet<Long> {
-        val whereClauses = ArrayList<String>()
-        val bindArgs = ArrayList<Any>()
-        for (f in filters) {
-            appendMetaSql(f, whereClauses, bindArgs)
-        }
+        val (whereClauses, bindArgs) = buildMetaWhereParts(filters, "")
         val whereSql = if (whereClauses.isEmpty()) "" else "WHERE " + whereClauses.joinToString(" AND ")
         val sql = "SELECT id FROM files_meta $whereSql ORDER BY mtime DESC LIMIT ?"
         val out = LinkedHashSet<Long>()
         readConn.prepare(sql).use { stmt ->
-            var idx = 1
-            for (arg in bindArgs) {
-                when (arg) {
-                    is Long -> stmt.bindLong(idx++, arg)
-                    is String -> stmt.bindText(idx++, arg)
-                }
-            }
-            stmt.bindLong(idx, limit.toLong())
+            val nextIdx = bindDynamicArgs(stmt, 1, bindArgs)
+            stmt.bindLong(nextIdx, limit.toLong())
             while (stmt.step()) out.add(stmt.getLong(0))
         }
         return out
     }
 
     private fun fetchMetaRowsWithFilter(node: QueryNode, limit: Int): List<FileMetaRow> {
-        val whereClauses = ArrayList<String>()
-        val bindArgs = ArrayList<Any>()
-        if (node is QueryNode.And) {
-            for (c in node.children) appendMetaSql(c, whereClauses, bindArgs)
-        } else {
-            appendMetaSql(node, whereClauses, bindArgs)
-        }
+        val filters = if (node is QueryNode.And) node.children else listOf(node)
+        val (whereClauses, bindArgs) = buildMetaWhereParts(filters, "")
         val whereSql = if (whereClauses.isEmpty()) "" else "WHERE " + whereClauses.joinToString(" AND ")
         val sql = """
             SELECT id, path, parent_path, name, ext, size, mtime, is_dir, access_mode, tier2_status, tier2_error
@@ -1052,40 +1290,11 @@ class SqliteSearchDatabase(
         """.trimIndent()
         val rows = ArrayList<FileMetaRow>()
         readConn.prepare(sql).use { stmt ->
-            var idx = 1
-            for (arg in bindArgs) {
-                when (arg) {
-                    is Long -> stmt.bindLong(idx++, arg)
-                    is String -> stmt.bindText(idx++, arg)
-                }
-            }
-            stmt.bindLong(idx, limit.toLong())
+            val nextIdx = bindDynamicArgs(stmt, 1, bindArgs)
+            stmt.bindLong(nextIdx, limit.toLong())
             while (stmt.step()) rows.add(readMetaRow(stmt))
         }
         return rows
-    }
-
-    private fun appendMetaSql(node: QueryNode, clauses: MutableList<String>, args: MutableList<Any>) {
-        when (node) {
-            is QueryNode.ExtFilter -> {
-                val placeholders = node.extensions.joinToString(",") { "?" }
-                clauses.add("ext IN ($placeholders)")
-                args.addAll(node.extensions)
-            }
-            is QueryNode.TypeFilter -> {
-                clauses.add("is_dir = ?")
-                args.add(if (node.type == FileTypeFilter.FOLDER_ONLY) 1L else 0L)
-            }
-            is QueryNode.SizeRangeFilter -> {
-                node.minBytes?.let { clauses.add("size >= ?"); args.add(it) }
-                node.maxBytes?.let { clauses.add("size <= ?"); args.add(it) }
-            }
-            is QueryNode.DateModifiedFilter -> {
-                node.minMillis?.let { clauses.add("mtime >= ?"); args.add(it) }
-                node.maxMillis?.let { clauses.add("mtime <= ?"); args.add(it) }
-            }
-            else -> Unit
-        }
     }
 
     private fun fetchRecentRows(limit: Int): List<FileMetaRow> {
@@ -1149,9 +1358,9 @@ class SqliteSearchDatabase(
     private fun verifyRowAgainstAst(
         row: FileMetaRow,
         node: QueryNode,
-        quickScope: QuickScope,
         bodyCache: MutableMap<Long, String?>,
-        bodyFtsCache: MutableMap<String, Set<Long>?>
+        bodyFtsCache: MutableMap<String, Set<Long>?>,
+        regexCache: MutableMap<String, Regex?>
     ): VerifyOutcome {
         return when (node) {
             is QueryNode.And -> {
@@ -1159,7 +1368,7 @@ class SqliteSearchDatabase(
                 var pathHit = false
                 var bodyHit = false
                 for (c in node.children) {
-                    val sub = verifyRowAgainstAst(row, c, quickScope, bodyCache, bodyFtsCache)
+                    val sub = verifyRowAgainstAst(row, c, bodyCache, bodyFtsCache, regexCache)
                     if (!sub.matched) return VerifyOutcome(false)
                     nameHit = nameHit || sub.nameHit
                     pathHit = pathHit || sub.pathHit
@@ -1173,7 +1382,7 @@ class SqliteSearchDatabase(
                 var pathHit = false
                 var bodyHit = false
                 for (c in node.children) {
-                    val sub = verifyRowAgainstAst(row, c, quickScope, bodyCache, bodyFtsCache)
+                    val sub = verifyRowAgainstAst(row, c, bodyCache, bodyFtsCache, regexCache)
                     if (sub.matched) {
                         anyMatched = true
                         nameHit = nameHit || sub.nameHit
@@ -1184,7 +1393,7 @@ class SqliteSearchDatabase(
                 VerifyOutcome(anyMatched, nameHit, pathHit, bodyHit)
             }
             is QueryNode.Not -> {
-                val inner = verifyRowAgainstAst(row, node.child, quickScope, bodyCache, bodyFtsCache)
+                val inner = verifyRowAgainstAst(row, node.child, bodyCache, bodyFtsCache, regexCache)
                 VerifyOutcome(!inner.matched)
             }
             is QueryNode.ExtFilter -> VerifyOutcome(row.ext in node.extensions)
@@ -1205,7 +1414,36 @@ class SqliteSearchDatabase(
                 VerifyOutcome(minOk && maxOk)
             }
             is QueryNode.TextTerm -> verifyTextTerm(row, node, bodyCache, bodyFtsCache)
+            is QueryNode.RegexTerm -> verifyRegexTerm(row, node, bodyCache, regexCache)
         }
+    }
+
+    private fun verifyRegexTerm(
+        row: FileMetaRow,
+        term: QueryNode.RegexTerm,
+        bodyCache: MutableMap<Long, String?>,
+        regexCache: MutableMap<String, Regex?>
+    ): VerifyOutcome {
+        val regex = getCompiledRegex(term, regexCache) ?: return VerifyOutcome(false)
+        val nameHit = (term.field == MatchField.ANY || term.field == MatchField.NAME_ONLY) &&
+            regex.containsMatchIn(row.name)
+        val pathHit = (term.field == MatchField.ANY || term.field == MatchField.PATH_ONLY) &&
+            regex.containsMatchIn(row.path)
+        var bodyHit = false
+        val needBody = (term.field == MatchField.BODY_ONLY) ||
+            (term.field == MatchField.ANY && !nameHit && !pathHit)
+        if (needBody && row.tier2Status == Tier2Status.INDEXED) {
+            val rawBody = bodyCache.getOrPut(row.id) { loadRawTextLocked(row.id) }
+            if (!rawBody.isNullOrEmpty() && regex.containsMatchIn(rawBody)) {
+                bodyHit = true
+            }
+        }
+        return VerifyOutcome(
+            matched = nameHit || pathHit || bodyHit,
+            nameHit = nameHit,
+            pathHit = pathHit,
+            bodyHit = bodyHit
+        )
     }
 
     private fun verifyTextTerm(
@@ -1215,58 +1453,73 @@ class SqliteSearchDatabase(
         bodyFtsCache: MutableMap<String, Set<Long>?>
     ): VerifyOutcome {
         val normNeedle = CjkTokenizer.normalizeString(term.rawText)
-        val regex = if (term.hasWildcard) globToRegex(normNeedle) else null
-
-        fun matchesString(target: String): Boolean {
-            val normTarget = CjkTokenizer.normalizeString(target)
-            return if (regex != null) {
-                regex.containsMatchIn(normTarget)
-            } else {
-                normTarget.contains(normNeedle)
+        if (!term.hasWildcard) {
+            val nameHit = (term.field == MatchField.ANY || term.field == MatchField.NAME_ONLY) &&
+                CjkTokenizer.normalizeString(row.name).contains(normNeedle)
+            val pathHit = (term.field == MatchField.ANY || term.field == MatchField.PATH_ONLY) &&
+                CjkTokenizer.normalizeString(row.path).contains(normNeedle)
+            var bodyHit = false
+            val needBody = (term.field == MatchField.BODY_ONLY) ||
+                (term.field == MatchField.ANY && !nameHit && !pathHit)
+            if (needBody && row.tier2Status == Tier2Status.INDEXED) {
+                val ftsCandidateSet = bodyFtsCache.getOrPut(
+                    "${term.rawText}|${term.isQuotedPhrase}|false"
+                ) {
+                    val frags = CjkTokenizer.analyzeQueryLiteral(term.rawText)
+                    if (frags.phraseSequences.isEmpty() && frags.requiredUnigrams.isEmpty()) {
+                        null
+                    } else {
+                        val out = LinkedHashSet<Long>()
+                        queryTier2BodyCandidates(
+                            frags = frags,
+                            allowPrefix = !term.isQuotedPhrase,
+                            outIds = out
+                        )
+                        if (out.size >= 2500) null else out
+                    }
+                }
+                if (ftsCandidateSet == null || row.id in ftsCandidateSet) {
+                    val rawBody = bodyCache.getOrPut(row.id) { loadRawTextLocked(row.id) }
+                    if (!rawBody.isNullOrEmpty() &&
+                        CjkTokenizer.normalizeString(rawBody).contains(normNeedle)
+                    ) {
+                        bodyHit = true
+                    }
+                }
             }
+            return VerifyOutcome(
+                matched = nameHit || pathHit || bodyHit,
+                nameHit = nameHit,
+                pathHit = pathHit,
+                bodyHit = bodyHit
+            )
         }
 
-        val nameHit = if (term.field == MatchField.ANY || term.field == MatchField.NAME_ONLY) {
-            matchesString(row.name)
-        } else {
-            false
-        }
-        val pathHit = if (term.field == MatchField.ANY || term.field == MatchField.PATH_ONLY) {
-            matchesString(row.path)
-        } else {
-            false
-        }
+        // Strict wildcard verification:
+        // - Filename matching is strictly anchored (^...$).
+        // - Path matching anchors at start only if glob starts with '/'; otherwise matches full path.
+        // - Body matching (when BODY_ONLY) is single-line wildcard ([^\r\n]*).
+        val hasPathSep = normNeedle.contains('/')
+        val nameRegex = buildStrictWildcardRegex(normNeedle, anchored = true)
+        val pathRegex = buildStrictWildcardRegex(normNeedle, anchored = normNeedle.startsWith("/"))
+
+        val nameHit = !hasPathSep &&
+            (term.field == MatchField.ANY || term.field == MatchField.NAME_ONLY) &&
+            nameRegex.matches(CjkTokenizer.normalizeString(row.name))
+
+        val pathHit = (term.field == MatchField.PATH_ONLY || (term.field == MatchField.ANY && hasPathSep)) &&
+            run {
+                val normPath = CjkTokenizer.normalizeString(row.path)
+                if (normNeedle.startsWith("/")) pathRegex.matches(normPath)
+                else pathRegex.containsMatchIn(normPath)
+            }
 
         var bodyHit = false
-        val needBodyCheck = (term.field == MatchField.BODY_ONLY) ||
-            (term.field == MatchField.ANY && !nameHit && !pathHit)
-        if (needBodyCheck && row.tier2Status == Tier2Status.INDEXED) {
-            val ftsCandidateSet = bodyFtsCache.getOrPut(
-                "${term.rawText}|${term.isQuotedPhrase}|${term.hasWildcard}"
-            ) {
-                val rawForTokens = if (term.hasWildcard) {
-                    term.rawText.split('*', '?').maxByOrNull { it.length } ?: ""
-                } else {
-                    term.rawText
-                }
-                val frags = CjkTokenizer.analyzeQueryLiteral(rawForTokens)
-                if (frags.phraseSequences.isEmpty() && frags.requiredUnigrams.isEmpty()) {
-                    null
-                } else {
-                    val out = LinkedHashSet<Long>()
-                    queryTier2BodyCandidates(
-                        frags = frags,
-                        allowPrefix = !term.isQuotedPhrase && !term.hasWildcard,
-                        outIds = out
-                    )
-                    if (out.size >= 2500) null else out
-                }
-            }
-            if (ftsCandidateSet == null || row.id in ftsCandidateSet) {
-                val rawBody = bodyCache.getOrPut(row.id) { loadRawTextLocked(row.id) }
-                if (!rawBody.isNullOrEmpty() && matchesString(rawBody)) {
-                    bodyHit = true
-                }
+        if (term.field == MatchField.BODY_ONLY && row.tier2Status == Tier2Status.INDEXED) {
+            val rawBody = bodyCache.getOrPut(row.id) { loadRawTextLocked(row.id) }
+            if (!rawBody.isNullOrEmpty()) {
+                val bodyRegex = buildStrictWildcardRegex(normNeedle, anchored = false, singleLine = true)
+                bodyHit = bodyRegex.containsMatchIn(CjkTokenizer.normalizeString(rawBody))
             }
         }
 
@@ -1287,16 +1540,16 @@ class SqliteSearchDatabase(
 
     private fun toSearchResultItem(
         row: FileMetaRow,
-        highlightTerms: List<String>,
+        highlightRules: List<HighlightRule>,
         rawBody: String?,
         tier1NameHit: Boolean,
         tier1PathHit: Boolean,
         tier2Hit: Boolean
     ): SearchResultItem {
-        val nameRanges = if (highlightTerms.isEmpty()) emptyList() else SnippetHighlighter.findMatchRanges(row.name, highlightTerms)
-        val pathRanges = if (highlightTerms.isEmpty()) emptyList() else SnippetHighlighter.findMatchRanges(row.path, highlightTerms)
-        val (snippets, count) = if (!rawBody.isNullOrEmpty() && highlightTerms.isNotEmpty()) {
-            SnippetHighlighter.buildSnippets(rawBody, highlightTerms)
+        val nameRanges = if (highlightRules.isEmpty()) emptyList() else SnippetHighlighter.findMatchRangesForRules(row.name, highlightRules)
+        val pathRanges = if (highlightRules.isEmpty()) emptyList() else SnippetHighlighter.findMatchRangesForRules(row.path, highlightRules)
+        val (snippets, count) = if (!rawBody.isNullOrEmpty() && highlightRules.isNotEmpty()) {
+            SnippetHighlighter.buildSnippetsForRules(rawBody, highlightRules)
         } else {
             emptyList<MatchSnippet>() to 0
         }
@@ -1304,8 +1557,8 @@ class SqliteSearchDatabase(
         var score = 0.0
         if (tier1NameHit || nameRanges.isNotEmpty()) {
             score += 100.0
-            if (highlightTerms.any { row.name.equals(it, ignoreCase = true) }) score += 50.0
-            if (highlightTerms.any { row.name.startsWith(it, ignoreCase = true) }) score += 20.0
+            if (highlightRules.any { it is HighlightRule.Literal && row.name.equals(it.text, ignoreCase = true) }) score += 50.0
+            if (highlightRules.any { it is HighlightRule.Literal && row.name.startsWith(it.text, ignoreCase = true) }) score += 20.0
         }
         if (tier1PathHit || pathRanges.isNotEmpty()) score += 35.0
         if (tier2Hit || snippets.isNotEmpty()) score += 50.0 + minOf(count, 20) * 1.5
@@ -1330,17 +1583,26 @@ class SqliteSearchDatabase(
         )
     }
 
-    private fun globToRegex(glob: String): Regex {
-        val sb = StringBuilder()
+    private fun buildStrictWildcardRegex(
+        glob: String,
+        anchored: Boolean,
+        singleLine: Boolean = false
+    ): Regex {
+        val star = if (singleLine) "[^\\r\\n]*" else ".*"
+        val qMark = if (singleLine) "[^\\r\\n]" else "."
+        val sb = StringBuilder(glob.length * 2 + 4)
+        if (anchored) sb.append('^')
         for (ch in glob) {
             when (ch) {
-                '*' -> sb.append(".*")
-                '?' -> sb.append('.')
+                '*' -> sb.append(star)
+                '?' -> sb.append(qMark)
                 '\\', '.', '[', ']', '{', '}', '(', ')', '+', '^', '$', '|' -> sb.append('\\').append(ch)
                 else -> sb.append(ch)
             }
         }
-        return Regex(sb.toString(), RegexOption.DOT_MATCHES_ALL)
+        if (anchored) sb.append('$')
+        val opts = if (singleLine) emptySet() else setOf(RegexOption.DOT_MATCHES_ALL)
+        return Regex(sb.toString(), opts)
     }
 
     private fun ftsQuote(token: String): String = "\"" + token.replace("\"", "\"\"") + "\""
