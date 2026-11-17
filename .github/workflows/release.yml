@@ -45,10 +45,19 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Decode release keystore
+        id: keystore
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ -z "${RELEASE_KEYSTORE_BASE64:-}" ]; then
+            TAG_NAME="${GITHUB_REF_NAME:-}"
+            if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ -n "$TAG_NAME" ] && \
+               gh release view "$TAG_NAME" --json assets --jq '.assets | length' 2>/dev/null | grep -vq '^0$'; then
+              echo "Release assets for ${TAG_NAME} already exist and RELEASE_KEYSTORE_BASE64 is unset; skipping CI build."
+              echo "skip_build=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             echo "::error::Missing RELEASE_KEYSTORE_BASE64 secret. Configure signing secrets in Settings -> Secrets and variables -> Actions."
             exit 1
           fi
@@ -56,6 +65,7 @@ jobs:
           printf '%s' "$RELEASE_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > app/keystore/pocket-release.jks
 
       - name: Verify, test, and build signed Release & Debug APKs
+        if: steps.keystore.outputs.skip_build != 'true'
         env:
           POCKET_KEYSTORE_PASS: ${{ secrets.POCKET_KEYSTORE_PASS }}
           POCKET_KEY_ALIAS: ${{ secrets.POCKET_KEY_ALIAS }}
@@ -65,6 +75,7 @@ jobs:
           ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease --console=plain
 
       - name: Verify APK metadata and signatures
+        if: steps.keystore.outputs.skip_build != 'true'
         run: |
           BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
           REL_APK="app/build/outputs/apk/release/app-release.apk"
@@ -75,6 +86,7 @@ jobs:
           "$BUILD_TOOLS/apksigner" verify "$DBG_APK"
 
       - name: Package release assets
+        if: steps.keystore.outputs.skip_build != 'true'
         id: pkg
         run: |
           VERSION_NAME="$(git describe --tags --match 'v*' --always | sed 's/^v//')"
@@ -91,6 +103,7 @@ jobs:
           ls -lh dist
 
       - name: Upload release APK artifacts
+        if: steps.keystore.outputs.skip_build != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pinpoint-release-${{ steps.pkg.outputs.version_name }}
@@ -98,6 +111,7 @@ jobs:
           retention-days: 30
 
       - name: Publish GitHub Release
+        if: steps.keystore.outputs.skip_build != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

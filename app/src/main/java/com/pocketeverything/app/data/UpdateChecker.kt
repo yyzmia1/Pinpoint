@@ -8,7 +8,9 @@ data class ReleaseUpdateInfo(
     val releaseNotes: String,
     val releaseUrl: String,
     val apkDownloadUrl: String?,
-    val apkSizeBytes: Long
+    val apkSizeBytes: Long,
+    val publishedDate: String = "",
+    val isPrerelease: Boolean = false
 )
 
 sealed interface UpdateCheckState {
@@ -16,40 +18,52 @@ sealed interface UpdateCheckState {
     data object Checking : UpdateCheckState
     data class UpToDate(val currentVersion: String) : UpdateCheckState
     data class Available(val info: ReleaseUpdateInfo) : UpdateCheckState
-    data class Error(val message: String) : UpdateCheckState
+    data class Error(val message: String, val httpStatusCode: Int? = null) : UpdateCheckState
+}
+
+sealed interface ChangelogState {
+    data object Idle : ChangelogState
+    data object Loading : ChangelogState
+    data class Loaded(val releases: List<ReleaseUpdateInfo>) : ChangelogState
+    data class Error(val message: String) : ChangelogState
 }
 
 /**
- * Dependency-free GitHub Releases API checker & SemVer comparator.
+ * Dependency-free GitHub Releases API checker, history loader & SemVer comparator.
  */
 object UpdateChecker {
+
+    const val SILENT_CHECK_INTERVAL_MS = 24L * 60L * 60L * 1000L
+
+    fun shouldRunSilentCheck(lastCheckAtMillis: Long, nowMillis: Long): Boolean {
+        return lastCheckAtMillis <= 0L || (nowMillis - lastCheckAtMillis) >= SILENT_CHECK_INTERVAL_MS
+    }
+
+    fun shouldPromptSilentUpdate(
+        latestTag: String,
+        currentVersion: String,
+        ignoredTag: String
+    ): Boolean {
+        if (latestTag.isNotBlank() && latestTag == ignoredTag) return false
+        return isNewerVersion(currentVersion, latestTag)
+    }
 
     fun checkLatestRelease(
         repoSlug: String,
         currentVersion: String,
         timeoutMs: Int = 8000
     ): UpdateCheckState {
-        var conn: HttpURLConnection? = null
         return try {
-            val apiUrl = "https://api.github.com/repos/$repoSlug/releases/latest"
-            conn = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = timeoutMs
-                readTimeout = timeoutMs
-                setRequestProperty("Accept", "application/vnd.github+json")
-                setRequestProperty("User-Agent", "Pinpoint-Android")
-            }
-            val code = conn.responseCode
+            val (code, body) = fetchJson("https://api.github.com/repos/$repoSlug/releases/latest", timeoutMs)
             if (code == 404) {
                 return UpdateCheckState.UpToDate(currentVersion)
             }
             if (code !in 200..299) {
-                return UpdateCheckState.Error("GitHub 返回状态码 $code")
+                return UpdateCheckState.Error("GitHub 返回状态码 $code", httpStatusCode = code)
             }
-            val body = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
 
             val info = parseReleaseJson(body)
-                ?: return UpdateCheckState.Error("无法解析版本信息")
+                ?: return UpdateCheckState.Error("无法解析版本信息", httpStatusCode = code)
 
             if (isNewerVersion(currentVersion, info.tagName)) {
                 UpdateCheckState.Available(info)
@@ -58,16 +72,64 @@ object UpdateChecker {
             }
         } catch (t: Throwable) {
             UpdateCheckState.Error(t.message ?: "网络连接失败")
+        }
+    }
+
+    fun fetchReleaseHistory(
+        repoSlug: String,
+        perPage: Int = 15,
+        timeoutMs: Int = 8000
+    ): Result<List<ReleaseUpdateInfo>> = runCatching {
+        val (code, body) = fetchJson(
+            "https://api.github.com/repos/$repoSlug/releases?per_page=$perPage",
+            timeoutMs
+        )
+        if (code !in 200..299) {
+            error("GitHub 返回状态码 $code")
+        }
+        parseReleaseListJson(body)
+    }
+
+    private fun fetchJson(apiUrl: String, timeoutMs: Int): Pair<Int, String> {
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = timeoutMs
+                readTimeout = timeoutMs
+                setRequestProperty("Accept", "application/vnd.github+json")
+                setRequestProperty("User-Agent", "Pinpoint-Android")
+            }
+            val code = conn.responseCode
+            val body = if (code in 200..299) {
+                conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            } else {
+                ""
+            }
+            return code to body
         } finally {
             conn?.disconnect()
         }
     }
 
+    fun parseReleaseListJson(jsonText: String): List<ReleaseUpdateInfo> {
+        val list = SimpleJsonParser(jsonText).parseValue() as? List<*> ?: return emptyList()
+        return list.mapNotNull { item ->
+            (item as? Map<*, *>)?.let(::parseReleaseMap)
+        }
+    }
+
     fun parseReleaseJson(jsonText: String): ReleaseUpdateInfo? {
         val root = SimpleJsonParser(jsonText).parseValue() as? Map<*, *> ?: return null
+        return parseReleaseMap(root)
+    }
+
+    private fun parseReleaseMap(root: Map<*, *>): ReleaseUpdateInfo? {
         val tagName = root["tag_name"] as? String ?: return null
         val htmlUrl = root["html_url"] as? String ?: ""
         val notes = (root["body"] as? String).orEmpty().trim()
+        val publishedDate = (root["published_at"] as? String).orEmpty().take(10)
+        val isPrerelease = (root["prerelease"] as? Boolean) ?: false
         val assets = root["assets"] as? List<*> ?: emptyList<Any>()
 
         var apkUrl: String? = null
@@ -90,7 +152,9 @@ object UpdateChecker {
             releaseNotes = notes,
             releaseUrl = htmlUrl,
             apkDownloadUrl = apkUrl,
-            apkSizeBytes = apkSize
+            apkSizeBytes = apkSize,
+            publishedDate = publishedDate,
+            isPrerelease = isPrerelease
         )
     }
 

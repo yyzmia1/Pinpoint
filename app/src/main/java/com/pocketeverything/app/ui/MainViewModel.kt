@@ -1,14 +1,19 @@
 package com.pocketeverything.app.ui
 
 import android.app.Application
+import android.app.DownloadManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Environment
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketeverything.app.BuildConfig
 import com.pocketeverything.app.PocketEverythingApp
 import com.pocketeverything.app.data.AppSettings
+import com.pocketeverything.app.data.ChangelogState
+import com.pocketeverything.app.data.ReleaseUpdateInfo
 import com.pocketeverything.app.data.ThemeMode
 import com.pocketeverything.app.data.UpdateCheckState
 import com.pocketeverything.app.data.UpdateChecker
@@ -27,6 +32,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -41,6 +47,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
+import java.io.File
 
 data class ShizukuLiveStatus(
     val isInstalled: Boolean = false,
@@ -79,6 +86,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _updateState = MutableStateFlow<UpdateCheckState>(UpdateCheckState.Idle)
     val updateState: StateFlow<UpdateCheckState> = _updateState.asStateFlow()
+
+    private val _updateDialogInfo = MutableStateFlow<ReleaseUpdateInfo?>(null)
+    val updateDialogInfo: StateFlow<ReleaseUpdateInfo?> = _updateDialogInfo.asStateFlow()
+
+    private val _showChangelog = MutableStateFlow(false)
+    val showChangelog: StateFlow<Boolean> = _showChangelog.asStateFlow()
+
+    private val _changelogState = MutableStateFlow<ChangelogState>(ChangelogState.Idle)
+    val changelogState: StateFlow<ChangelogState> = _changelogState.asStateFlow()
+
+    private var updateCheckJob: Job? = null
+
+    @Volatile
+    var activeDownloadId: Long = -1L
+        private set
 
     private val _previewPayload = MutableStateFlow<PreviewPayload?>(null)
     val previewPayload: StateFlow<PreviewPayload?> = _previewPayload.asStateFlow()
@@ -126,6 +148,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         refreshModeStatuses()
         indexManager.triggerStartupSync()
+
+        viewModelScope.launch {
+            delay(1500L)
+            checkForUpdates(silent = true)
+        }
 
         viewModelScope.launch {
             val indexMutationTick = indexManager.progress
@@ -273,24 +300,114 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun checkForUpdates() {
-        if (_updateState.value is UpdateCheckState.Checking) return
-        _updateState.value = UpdateCheckState.Checking
-        viewModelScope.launch {
+    fun checkForUpdates(silent: Boolean = false) {
+        if (!silent && _updateState.value is UpdateCheckState.Checking) return
+        val now = System.currentTimeMillis()
+        if (silent && !UpdateChecker.shouldRunSilentCheck(settings.value.lastUpdateCheckAtMillis, now)) {
+            return
+        }
+        if (!silent) {
+            updateCheckJob?.cancel()
+            _updateState.value = UpdateCheckState.Checking
+        } else if (updateCheckJob?.isActive == true) {
+            return
+        }
+
+        updateCheckJob = viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 UpdateChecker.checkLatestRelease(
                     repoSlug = BuildConfig.GITHUB_REPO,
                     currentVersion = BuildConfig.VERSION_NAME
                 )
             }
-            _updateState.value = result
+            val reachedServer = result !is UpdateCheckState.Error || result.httpStatusCode != null
+            if (reachedServer) {
+                settingsRepo.markUpdateChecked()
+            }
+            if (silent) {
+                if (result is UpdateCheckState.Available &&
+                    UpdateChecker.shouldPromptSilentUpdate(
+                        latestTag = result.info.tagName,
+                        currentVersion = BuildConfig.VERSION_NAME,
+                        ignoredTag = settings.value.ignoredUpdateTag
+                    )
+                ) {
+                    _updateState.value = result
+                    _updateDialogInfo.value = result.info
+                }
+            } else {
+                _updateState.value = result
+                if (result is UpdateCheckState.Available) {
+                    _updateDialogInfo.value = result.info
+                }
+            }
         }
     }
 
     fun dismissUpdateDialog() {
-        if (_updateState.value is UpdateCheckState.Available || _updateState.value is UpdateCheckState.Error) {
-            _updateState.value = UpdateCheckState.Idle
+        _updateDialogInfo.value = null
+    }
+
+    fun ignoreUpdateVersion(tagName: String) {
+        settingsRepo.setIgnoredUpdateTag(tagName)
+        _updateDialogInfo.value = null
+        _messages.tryEmit("已忽略 $tagName 的自动弹窗提醒")
+    }
+
+    fun downloadUpdateApk(info: ReleaseUpdateInfo) {
+        val url = info.apkDownloadUrl
+        if (url.isNullOrBlank()) {
+            openUrl(info.releaseUrl)
+            return
         }
+        runCatching {
+            val dm = app.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            val safeFileName = "Pinpoint-${info.tagName}.apk".replace(Regex("[/\\\\:*?\"<>|]"), "_")
+            app.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)?.let { dir ->
+                val old = File(dir, safeFileName)
+                if (old.exists()) old.delete()
+            }
+            val request = DownloadManager.Request(Uri.parse(url))
+                .setTitle("Pinpoint ${info.tagName}")
+                .setDescription("正在下载安装包…")
+                .setMimeType("application/vnd.android.package-archive")
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalFilesDir(app, Environment.DIRECTORY_DOWNLOADS, safeFileName)
+            activeDownloadId = dm.enqueue(request)
+            _messages.tryEmit("已调用系统下载器下载，可在通知栏查看进度")
+        }.onFailure {
+            _messages.tryEmit("系统下载器不可用，已转为浏览器打开")
+            openUrl(info.releaseUrl)
+        }
+    }
+
+    fun notifyMessage(message: String) {
+        _messages.tryEmit(message)
+    }
+
+    fun openChangelog() {
+        _showChangelog.value = true
+        if (_changelogState.value is ChangelogState.Idle || _changelogState.value is ChangelogState.Error) {
+            refreshChangelog()
+        }
+    }
+
+    fun refreshChangelog() {
+        if (_changelogState.value is ChangelogState.Loading) return
+        _changelogState.value = ChangelogState.Loading
+        viewModelScope.launch {
+            val res = withContext(Dispatchers.IO) {
+                UpdateChecker.fetchReleaseHistory(BuildConfig.GITHUB_REPO, perPage = 15)
+            }
+            _changelogState.value = res.fold(
+                onSuccess = { list -> ChangelogState.Loaded(list) },
+                onFailure = { err -> ChangelogState.Error(err.message ?: "无法加载版本历史") }
+            )
+        }
+    }
+
+    fun closeChangelog() {
+        _showChangelog.value = false
     }
 
     fun completeOnboarding() {
@@ -334,6 +451,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleDayNight(currentlyDark: Boolean) {
         settingsRepo.setThemeMode(if (currentlyDark) ThemeMode.LIGHT else ThemeMode.DARK)
+    }
+
+    fun setUseDynamicColor(enabled: Boolean) {
+        settingsRepo.setUseDynamicColor(enabled)
     }
 
     fun setRealtimeMonitorEnabled(enabled: Boolean) {

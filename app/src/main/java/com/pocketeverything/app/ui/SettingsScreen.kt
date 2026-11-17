@@ -19,9 +19,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -37,6 +40,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
@@ -44,6 +48,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
@@ -72,8 +77,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pocketeverything.app.BuildConfig
 import com.pocketeverything.app.data.AppSettings
+import com.pocketeverything.app.data.ChangelogState
+import com.pocketeverything.app.data.ReleaseUpdateInfo
 import com.pocketeverything.app.data.ThemeMode
 import com.pocketeverything.app.data.UpdateCheckState
+import com.pocketeverything.app.data.UpdateChecker
 import com.pocketeverything.app.filter.FilterConfig
 import com.pocketeverything.app.fs.ModeAvailability
 import com.pocketeverything.app.indexer.IndexProgressState
@@ -96,6 +104,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onSelectMode: (AccessMode) -> Unit,
     onSelectThemeMode: (ThemeMode) -> Unit,
+    onSetDynamicColor: (Boolean) -> Unit,
     onRequestStoragePermission: () -> Unit,
     onOpenShizukuGuide: () -> Unit,
     onRefreshModes: () -> Unit,
@@ -106,7 +115,7 @@ fun SettingsScreen(
     onQuickSync: () -> Unit,
     onFullRebuild: () -> Unit,
     onCheckUpdates: () -> Unit,
-    onDismissUpdateDialog: () -> Unit,
+    onOpenChangelog: () -> Unit,
     onOpenUrl: (String) -> Unit,
     onCopyUrl: (String) -> Unit,
     onReplayOnboarding: () -> Unit
@@ -162,60 +171,87 @@ fun SettingsScreen(
                 color = cardColor,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    BrandMarkIcon(size = 44.dp)
-                    Spacer(Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Pinpoint",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = "v${BuildConfig.VERSION_NAME} · #${BuildConfig.VERSION_CODE}",
-                            style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        val statusText: Pair<String, Color>? = when (updateState) {
-                            is UpdateCheckState.UpToDate -> "已是最新版本" to Emerald400
-                            is UpdateCheckState.Available -> "发现新版本 ${updateState.info.tagName}" to MaterialTheme.colorScheme.primary
-                            is UpdateCheckState.Error -> "检查失败：${updateState.message}" to Rose400
-                            else -> null
-                        }
-                        if (statusText != null) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        BrandMarkIcon(size = 44.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = statusText.first,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = statusText.second,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.padding(top = 2.dp)
+                                text = "Pinpoint",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
                             )
+                            Text(
+                                text = "v${BuildConfig.VERSION_NAME} · #${BuildConfig.VERSION_CODE}",
+                                style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            val statusText: Pair<String, Color>? = when (updateState) {
+                                is UpdateCheckState.UpToDate -> "已是最新版本" to Emerald400
+                                is UpdateCheckState.Available -> "发现新版本 ${updateState.info.tagName}" to MaterialTheme.colorScheme.primary
+                                is UpdateCheckState.Error -> "检查失败：${updateState.message}" to Rose400
+                                else -> null
+                            }
+                            if (statusText != null) {
+                                Text(
+                                    text = statusText.first,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = statusText.second,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        FilledTonalButton(
+                            onClick = onCheckUpdates,
+                            enabled = updateState !is UpdateCheckState.Checking,
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                        ) {
+                            if (updateState is UpdateCheckState.Checking) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(15.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text("检测中", style = MaterialTheme.typography.labelLarge)
+                            } else {
+                                Text("检查更新", style = MaterialTheme.typography.labelLarge)
+                            }
                         }
                     }
-                    Spacer(Modifier.width(8.dp))
-                    FilledTonalButton(
-                        onClick = onCheckUpdates,
-                        enabled = updateState !is UpdateCheckState.Checking,
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(onClick = onOpenChangelog)
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        if (updateState is UpdateCheckState.Checking) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(15.dp),
-                                strokeWidth = 2.dp
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text("检测中", style = MaterialTheme.typography.labelLarge)
-                        } else {
-                            Text("检查更新", style = MaterialTheme.typography.labelLarge)
-                        }
+                        Text(
+                            text = "查看版本更新日志 (Changelog)",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Icon(
+                            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                            contentDescription = "查看更新日志",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
                     }
                 }
             }
@@ -408,6 +444,16 @@ fun SettingsScreen(
                     }
                 }
                 SettingsDivider()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    ToggleRow(
+                        title = "莫奈动态取色（跟随壁纸配色）",
+                        checked = settings.useDynamicColor,
+                        onCheckedChange = onSetDynamicColor
+                    )
+                } else {
+                    InfoRow("莫奈动态取色", "需 Android 12+")
+                }
+                SettingsDivider()
                 ToggleRow(
                     title = "点击优先使用内置预览",
                     checked = settings.openContentHitsInPreview,
@@ -580,6 +626,11 @@ fun SettingsScreen(
                 }
                 SettingsDivider()
                 NavigationRow(
+                    title = "更新日志 (Changelog)",
+                    onClick = onOpenChangelog
+                )
+                SettingsDivider()
+                NavigationRow(
                     title = "版本发布页 (Releases)",
                     onClick = { onOpenUrl("${BuildConfig.GITHUB_URL}/releases") }
                 )
@@ -588,56 +639,317 @@ fun SettingsScreen(
             Spacer(Modifier.height(28.dp))
         }
     }
+}
 
-    if (updateState is UpdateCheckState.Available) {
-        val info = updateState.info
-        AlertDialog(
-            onDismissRequest = onDismissUpdateDialog,
-            title = { Text("发现新版本 ${info.tagName}") },
-            text = {
-                val headingColor = MaterialTheme.colorScheme.onSurface
-                val codeBg = MaterialTheme.colorScheme.surfaceContainerHigh
-                val codeFg = MaterialTheme.colorScheme.primary
-                val renderedNotes = remember(info.releaseNotes, headingColor, codeBg, codeFg) {
-                    FormatUtils.renderMarkdown(
-                        markdown = info.releaseNotes.ifBlank { "包含性能改进与问题修复。" },
-                        headingColor = headingColor,
-                        codeBg = codeBg,
-                        codeFg = codeFg
+@Composable
+fun UpdateAvailableDialog(
+    info: ReleaseUpdateInfo,
+    onDownloadApk: () -> Unit,
+    onOpenBrowser: () -> Unit,
+    onIgnoreVersion: () -> Unit,
+    onDismissLater: () -> Unit
+) {
+    var ignoreChecked by remember(info.tagName) { mutableStateOf(false) }
+    val headingColor = MaterialTheme.colorScheme.onSurface
+    val codeBg = MaterialTheme.colorScheme.surfaceContainerHigh
+    val codeFg = MaterialTheme.colorScheme.primary
+    val renderedNotes = remember(info.releaseNotes, headingColor, codeBg, codeFg) {
+        FormatUtils.renderMarkdown(
+            markdown = info.releaseNotes.ifBlank { "包含性能改进与问题修复。" },
+            headingColor = headingColor,
+            codeBg = codeBg,
+            codeFg = codeFg
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismissLater,
+        title = { Text("发现新版本：${info.tagName}") },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                if (info.apkSizeBytes > 0L) {
+                    Text(
+                        text = "安装包大小：${FormatUtils.formatBytes(info.apkSizeBytes)}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
                     )
+                    Spacer(Modifier.height(6.dp))
                 }
                 Column(
                     modifier = Modifier
-                        .heightIn(max = 360.dp)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                        .fillMaxWidth()
+                        .heightIn(max = 300.dp)
+                        .verticalScroll(rememberScrollState())
                 ) {
-                    if (info.apkSizeBytes > 0L) {
-                        Text(
-                            "安装包大小：${FormatUtils.formatBytes(info.apkSizeBytes)}",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
                     Text(
                         text = renderedNotes,
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        onOpenUrl(info.apkDownloadUrl ?: info.releaseUrl)
-                        onDismissUpdateDialog()
-                    }
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { ignoreChecked = !ignoreChecked },
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(if (info.apkDownloadUrl != null) "下载 APK" else "前往 Release")
+                    Checkbox(
+                        checked = ignoreChecked,
+                        onCheckedChange = { ignoreChecked = it }
+                    )
+                    Text(
+                        text = "忽略此版本（不再静默提醒）",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
-            },
-            dismissButton = {
-                TextButton(onClick = onDismissUpdateDialog) { Text("稍后") }
             }
+        },
+        confirmButton = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onOpenBrowser,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("浏览器打开", maxLines = 1)
+                    }
+                    Button(
+                        onClick = onDownloadApk,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(if (info.apkDownloadUrl != null) "立即更新" else "前往下载", maxLines = 1)
+                    }
+                }
+                TextButton(
+                    onClick = { if (ignoreChecked) onIgnoreVersion() else onDismissLater() },
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Text(if (ignoreChecked) "确认忽略" else "暂不更新")
+                }
+            }
+        }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ChangelogSheet(
+    changelogState: ChangelogState,
+    currentVersionName: String,
+    currentVersionCode: Int,
+    buildDate: String,
+    gitHash: String,
+    onRefresh: () -> Unit,
+    onDownloadApk: (ReleaseUpdateInfo) -> Unit,
+    onOpenUrl: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val headingColor = MaterialTheme.colorScheme.onSurface
+    val codeBg = MaterialTheme.colorScheme.surfaceContainerHigh
+    val codeFg = MaterialTheme.colorScheme.primary
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("版本更新日志", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        text = "当前安装：v$currentVersionName (#$currentVersionCode)",
+                        style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                IconButton(onClick = onRefresh) {
+                    Icon(Icons.Default.Refresh, contentDescription = "刷新更新日志")
+                }
+                TextButton(onClick = { onOpenUrl("${BuildConfig.GITHUB_URL}/releases") }) {
+                    Text("全部版本")
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            when (changelogState) {
+                is ChangelogState.Idle, is ChangelogState.Loading -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(220.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                }
+                is ChangelogState.Error -> {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 24.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "Pinpoint v$currentVersionName",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "构建号 #$currentVersionCode · 日期 $buildDate ($gitHash)",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "暂时无法从 GitHub 拉取完整历史（${changelogState.message}），可重试或直接打开网页查看。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(onClick = onRefresh) { Text("重试") }
+                                Button(onClick = { onOpenUrl("${BuildConfig.GITHUB_URL}/releases") }) {
+                                    Text("浏览器查看")
+                                }
+                            }
+                        }
+                    }
+                }
+                is ChangelogState.Loaded -> {
+                    val list = changelogState.releases
+                    if (list.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(160.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("暂无已发布版本记录", style = MaterialTheme.typography.bodyMedium)
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 520.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            contentPadding = PaddingValues(bottom = 24.dp)
+                        ) {
+                            items(list, key = { it.tagName }) { rel ->
+                                val cleanRel = rel.tagName.trim().removePrefix("v").removePrefix("V")
+                                val cleanCur = currentVersionName.trim().removePrefix("v").removePrefix("V")
+                                    .substringBefore('-').substringBefore('+')
+                                val isCurrent = cleanRel == cleanCur
+                                val isNewer = UpdateChecker.isNewerVersion(currentVersionName, rel.tagName)
+                                val notes = remember(rel.releaseNotes, headingColor, codeBg, codeFg) {
+                                    FormatUtils.renderMarkdown(
+                                        markdown = rel.releaseNotes.ifBlank { "常规版本更新与问题修复。" },
+                                        headingColor = headingColor,
+                                        codeBg = codeBg,
+                                        codeFg = codeFg
+                                    )
+                                }
+
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = MaterialTheme.colorScheme.surfaceContainer,
+                                    border = if (isCurrent) {
+                                        BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f))
+                                    } else {
+                                        null
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = rel.tagName,
+                                                style = MaterialTheme.typography.titleMedium,
+                                                fontWeight = FontWeight.SemiBold,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            if (rel.publishedDate.isNotBlank()) {
+                                                Text(
+                                                    text = rel.publishedDate,
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                                Spacer(Modifier.width(6.dp))
+                                            }
+                                            when {
+                                                isCurrent -> ChangelogBadge("当前版本", MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.onPrimaryContainer)
+                                                isNewer -> ChangelogBadge("可升级", MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.onSecondaryContainer)
+                                                rel.isPrerelease -> ChangelogBadge("测试版", MaterialTheme.colorScheme.surfaceContainerHigh, MaterialTheme.colorScheme.onSurfaceVariant)
+                                            }
+                                        }
+                                        Text(
+                                            text = notes,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.End
+                                        ) {
+                                            TextButton(
+                                                onClick = { onOpenUrl(rel.releaseUrl.ifBlank { "${BuildConfig.GITHUB_URL}/releases" }) },
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                            ) {
+                                                Text("Release 页面", style = MaterialTheme.typography.labelMedium)
+                                            }
+                                            if (isNewer && rel.apkDownloadUrl != null) {
+                                                Spacer(Modifier.width(6.dp))
+                                                FilledTonalButton(
+                                                    onClick = { onDownloadApk(rel) },
+                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                                                ) {
+                                                    Text("立即更新", style = MaterialTheme.typography.labelMedium)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChangelogBadge(text: String, bg: Color, fg: Color) {
+    Surface(
+        shape = CircleShape,
+        color = bg,
+        contentColor = fg
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
         )
     }
 }

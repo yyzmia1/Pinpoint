@@ -26,7 +26,10 @@ data class AppSettings(
     val showRecentOnEmptyQuery: Boolean = true,
     val hasSeenOnboarding: Boolean = false,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
-    val lastFullScanAtMillis: Long = 0L
+    val useDynamicColor: Boolean = true,
+    val lastFullScanAtMillis: Long = 0L,
+    val lastUpdateCheckAtMillis: Long = 0L,
+    val ignoredUpdateTag: String = ""
 )
 
 class SettingsRepository(context: Context) {
@@ -69,7 +72,10 @@ class SettingsRepository(context: Context) {
             showRecentOnEmptyQuery = prefs.getBoolean(KEY_SHOW_RECENT_ON_EMPTY, true),
             hasSeenOnboarding = prefs.getBoolean(KEY_HAS_SEEN_ONBOARDING, false),
             themeMode = ThemeMode.fromCode(prefs.getInt(KEY_THEME_MODE, ThemeMode.SYSTEM.code)),
-            lastFullScanAtMillis = prefs.getLong(KEY_LAST_FULL_SCAN, 0L)
+            useDynamicColor = prefs.getBoolean(KEY_DYNAMIC_COLOR, true),
+            lastFullScanAtMillis = prefs.getLong(KEY_LAST_FULL_SCAN, 0L),
+            lastUpdateCheckAtMillis = prefs.getLong(KEY_LAST_UPDATE_CHECK, 0L),
+            ignoredUpdateTag = prefs.getString(KEY_IGNORED_UPDATE_TAG, "").orEmpty()
         )
     }
 
@@ -117,9 +123,24 @@ class SettingsRepository(context: Context) {
         _settings.value = _settings.value.copy(themeMode = mode)
     }
 
+    fun setUseDynamicColor(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_DYNAMIC_COLOR, enabled).apply()
+        _settings.value = _settings.value.copy(useDynamicColor = enabled)
+    }
+
     fun markFullScanCompleted(timestampMillis: Long = System.currentTimeMillis()) {
         prefs.edit().putLong(KEY_LAST_FULL_SCAN, timestampMillis).apply()
         _settings.value = _settings.value.copy(lastFullScanAtMillis = timestampMillis)
+    }
+
+    fun markUpdateChecked(timestampMillis: Long = System.currentTimeMillis()) {
+        prefs.edit().putLong(KEY_LAST_UPDATE_CHECK, timestampMillis).apply()
+        _settings.value = _settings.value.copy(lastUpdateCheckAtMillis = timestampMillis)
+    }
+
+    fun setIgnoredUpdateTag(tagName: String) {
+        prefs.edit().putString(KEY_IGNORED_UPDATE_TAG, tagName).apply()
+        _settings.value = _settings.value.copy(ignoredUpdateTag = tagName)
     }
 
     companion object {
@@ -137,6 +158,9 @@ class SettingsRepository(context: Context) {
         private const val KEY_SHOW_RECENT_ON_EMPTY = "show_recent_on_empty"
         private const val KEY_HAS_SEEN_ONBOARDING = "has_seen_onboarding"
         private const val KEY_THEME_MODE = "theme_mode"
+        private const val KEY_DYNAMIC_COLOR = "use_dynamic_color"
         private const val KEY_LAST_FULL_SCAN = "last_full_scan"
+        private const val KEY_LAST_UPDATE_CHECK = "last_update_check_at"
+        private const val KEY_IGNORED_UPDATE_TAG = "ignored_update_tag"
     }
 }

@@ -31,7 +31,21 @@ Desktop *Everything*-style query syntax · Sub-10 ms CJK substring retrieval ove
   - **Root**: Full-tree traversal from `/` via `libsu` `RootService`, using POSIX `Os.lstat` and `(st_dev, st_ino)` deduplication to skip symlinks, virtual filesystems, and duplicate bind mounts.
 - **Two-Tier Streaming Pipeline**: Separates instant Tier-1 path/metadata indexing from bounded asynchronous Tier-2 document extraction (`.txt`, `.md`, `.docx`, `.pdf`), backed by `ParcelFileDescriptor` pipe streaming so large scans run with bounded heap memory.
 - **Universal QuickLook Preview (`ReaderPreviewSheet`)**: Built-in text/code/log viewer (UTF-8/BOM/GB18030 detection), hardware `PdfRenderer` page viewer (including image-only scanned PDFs), zoomable image canvas, `ZIP`/`APK` archive inspector, media metadata viewer, directory drill-down, and hex head inspector.
-- **Adaptive Material 3 UI & Built-in Updater**: Day/Night theme modes with WCAG-verified contrast and direct GitHub Releases update checks with Markdown release-note rendering.
+- **Adaptive Material You (Monet) UI & Safe In-App Updater**: Supports Android 12+ wallpaper-driven Monet dynamic color alongside System / Light / Dark modes, 24h throttled silent startup update checks, strict SemVer comparison, version ignore blacklist, system `DownloadManager` APK installation with browser fallback, and an in-app multi-release **Changelog** sheet with Markdown rendering.
+
+---
+
+## Screenshots & Demo
+
+> Real-device full-disk indexing & instant search recording (`docs/media/pinpoint-demo.webp`) is ready to be dropped in directly from an ADB capture:
+>
+> ```bash
+> adb shell screenrecord --time-limit 15 /sdcard/pinpoint-demo.mp4
+> adb pull /sdcard/pinpoint-demo.mp4
+> ffmpeg -i pinpoint-demo.mp4 -vf "fps=15,scale=420:-1:flags=lanczos" -loop 0 docs/media/pinpoint-demo.webp
+> ```
+>
+> *(Once added at `docs/media/pinpoint-demo.webp`, embed with `![Pinpoint Real-Device Demo](docs/media/pinpoint-demo.webp)`.)*
 
 ---
 
