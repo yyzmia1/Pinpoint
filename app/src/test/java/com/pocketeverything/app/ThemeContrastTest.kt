@@ -3,6 +3,7 @@ package com.pocketeverything.app
 import androidx.compose.material3.ColorScheme
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
+import com.pocketeverything.app.data.ThemeAccent
 import com.pocketeverything.app.ui.components.FileVisualFamily
 import com.pocketeverything.app.ui.components.fileIconAccentColor
 import com.pocketeverything.app.ui.components.fileIconPaperColor
@@ -11,6 +12,9 @@ import com.pocketeverything.app.ui.theme.Amber200
 import com.pocketeverything.app.ui.theme.DarkColors
 import com.pocketeverything.app.ui.theme.LightColors
 import com.pocketeverything.app.ui.theme.Slate950
+import com.pocketeverything.app.ui.theme.accentColorScheme
+import com.pocketeverything.app.ui.theme.seedColorScheme
+import com.pocketeverything.app.ui.theme.withPureBlackIfEnabled
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.max
@@ -56,6 +60,28 @@ class ThemeContrastTest {
     fun `both light and dark color schemes meet WCAG contrast across all buttons and labels`() {
         verifyScheme("Light", LightColors)
         verifyScheme("Dark", DarkColors)
+    }
+
+    @Test
+    fun `all preset theme accents and custom background seed schemes meet WCAG contrast`() {
+        for (accent in ThemeAccent.entries) {
+            verifyScheme("Light-${accent.name}", accentColorScheme(accent, darkTheme = false))
+            val darkScheme = accentColorScheme(accent, darkTheme = true)
+            verifyScheme("Dark-${accent.name}", darkScheme)
+            verifyScheme("PureBlack-${accent.name}", darkScheme.withPureBlackIfEnabled(darkTheme = true, pureBlack = true))
+        }
+
+        val sampleSeeds = listOf(
+            0xFFE11D48.toInt(),
+            0xFF059669.toInt(),
+            0xFFD97706.toInt(),
+            0xFF4F46E5.toInt(),
+            0xFF64748B.toInt()
+        )
+        for (seed in sampleSeeds) {
+            verifyScheme("SeedLight-${Integer.toHexString(seed)}", seedColorScheme(seed, darkTheme = false))
+            verifyScheme("SeedDark-${Integer.toHexString(seed)}", seedColorScheme(seed, darkTheme = true))
+        }
     }
 
     @Test

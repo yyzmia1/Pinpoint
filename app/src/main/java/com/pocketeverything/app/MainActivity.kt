@@ -6,6 +6,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Build
@@ -19,6 +21,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
@@ -34,10 +37,15 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import com.pocketeverything.app.data.ThemeMode
 import com.pocketeverything.app.indexer.RealtimeMonitorService
@@ -50,12 +58,16 @@ import com.pocketeverything.app.ui.ReaderPreviewSheet
 import com.pocketeverything.app.ui.SearchScreen
 import com.pocketeverything.app.ui.SettingsScreen
 import com.pocketeverything.app.ui.ShizukuGuideScreen
+import com.pocketeverything.app.ui.ThemeSettingsScreen
 import com.pocketeverything.app.ui.UpdateAvailableDialog
 import com.pocketeverything.app.ui.WelcomeGuideOverlay
 import com.pocketeverything.app.ui.theme.PocketEverythingTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
 
 private enum class AppPage {
-    SEARCH, SETTINGS, SHIZUKU_GUIDE
+    SEARCH, SETTINGS, THEME_SETTINGS, SHIZUKU_GUIDE
 }
 
 class MainActivity : ComponentActivity() {
@@ -124,9 +136,46 @@ class MainActivity : ComponentActivity() {
                 enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
             }
 
+            val customBgBitmap by produceState<Bitmap?>(
+                initialValue = null,
+                settings.customBgEnabled,
+                settings.customBgPath,
+                settings.customBgBlur
+            ) {
+                value = if (!settings.customBgEnabled || settings.customBgPath.isBlank()) {
+                    null
+                } else {
+                    withContext(Dispatchers.IO) {
+                        runCatching {
+                            val f = File(settings.customBgPath)
+                            if (!f.exists()) null else {
+                                val raw = BitmapFactory.decodeFile(f.absolutePath)
+                                if (raw != null && settings.customBgBlur && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                                    val sw = (raw.width / 10).coerceAtLeast(16)
+                                    val sh = (raw.height / 10).coerceAtLeast(16)
+                                    val small = Bitmap.createScaledBitmap(raw, sw, sh, true)
+                                    Bitmap.createScaledBitmap(small, raw.width / 2, raw.height / 2, true)
+                                } else {
+                                    raw
+                                }
+                            }
+                        }.getOrNull()
+                    }
+                }
+            }
+
+            val hasCustomBg = customBgBitmap != null
+
             PocketEverythingTheme(
                 darkTheme = isDarkTheme,
-                dynamicColor = settings.useDynamicColor
+                dynamicColor = settings.useDynamicColor,
+                themeAccent = settings.themeAccent,
+                pureBlackDark = settings.pureBlackDark,
+                hasCustomBg = hasCustomBg,
+                cardOpacity = settings.customBgOpacity,
+                extractColorFromBg = settings.extractColorFromBg,
+                customBgSeedArgb = settings.customBgSeedArgb,
+                hapticsEnabled = settings.hapticFeedbackEnabled
             ) {
                 val query by viewModel.query.collectAsState()
                 val quickScope by viewModel.quickScope.collectAsState()
@@ -151,6 +200,7 @@ class MainActivity : ComponentActivity() {
                 BackHandler(enabled = currentPage != AppPage.SEARCH) {
                     currentPage = when (currentPage) {
                         AppPage.SHIZUKU_GUIDE -> previousPage
+                        AppPage.THEME_SETTINGS -> AppPage.SETTINGS
                         AppPage.SETTINGS -> AppPage.SEARCH
                         AppPage.SEARCH -> AppPage.SEARCH
                     }
@@ -167,6 +217,30 @@ class MainActivity : ComponentActivity() {
                         .fillMaxSize()
                         .background(MaterialTheme.colorScheme.background)
                 ) {
+                    customBgBitmap?.let { bmp ->
+                        Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .then(
+                                    if (settings.customBgBlur && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                        Modifier.blur(18.dp)
+                                    } else {
+                                        Modifier
+                                    }
+                                )
+                        )
+                        if (settings.customBgDim > 0f) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.Black.copy(alpha = settings.customBgDim.coerceIn(0f, 0.85f)))
+                            )
+                        }
+                    }
+
                     when (currentPage) {
                         AppPage.SEARCH -> {
                             SearchScreen(
@@ -210,8 +284,7 @@ class MainActivity : ComponentActivity() {
                                 updateState = updateState,
                                 onBack = { currentPage = AppPage.SEARCH },
                                 onSelectMode = { viewModel.switchMode(it) },
-                                onSelectThemeMode = { viewModel.setThemeMode(it) },
-                                onSetDynamicColor = { viewModel.setUseDynamicColor(it) },
+                                onOpenThemeSettings = { currentPage = AppPage.THEME_SETTINGS },
                                 onRequestStoragePermission = { requestAllFilesPermission() },
                                 onOpenShizukuGuide = {
                                     previousPage = AppPage.SETTINGS
@@ -232,6 +305,28 @@ class MainActivity : ComponentActivity() {
                                     viewModel.replayOnboarding()
                                     currentPage = AppPage.SEARCH
                                 }
+                            )
+                        }
+                        AppPage.THEME_SETTINGS -> {
+                            ThemeSettingsScreen(
+                                settings = settings,
+                                isDarkTheme = isDarkTheme,
+                                onBack = { currentPage = AppPage.SETTINGS },
+                                onSelectThemeMode = { viewModel.setThemeMode(it) },
+                                onSetDynamicColor = { viewModel.setUseDynamicColor(it) },
+                                onSelectThemeAccent = { viewModel.setThemeAccent(it) },
+                                onSetPureBlackDark = { viewModel.setPureBlackDark(it) },
+                                onSetCustomBgEnabled = { viewModel.setCustomBgEnabled(it) },
+                                onPickCustomBgUri = { viewModel.applyCustomBgUri(it) },
+                                onClearCustomBg = { viewModel.clearCustomBg() },
+                                onSetCustomBgOpacity = { viewModel.setCustomBgOpacity(it) },
+                                onSetCustomBgDim = { viewModel.setCustomBgDim(it) },
+                                onSetCustomBgBlur = { viewModel.setCustomBgBlur(it) },
+                                onSetExtractColorFromBg = { viewModel.setExtractColorFromBg(it) },
+                                onSetHapticFeedback = { viewModel.setHapticFeedbackEnabled(it) },
+                                onSetUseMonospaceFont = { viewModel.setUseMonospaceFont(it) },
+                                onSetCompactListMode = { viewModel.setCompactListMode(it) },
+                                onResetThemeSettings = { viewModel.resetThemeSettings() }
                             )
                         }
                         AppPage.SHIZUKU_GUIDE -> {

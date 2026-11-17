@@ -18,6 +18,19 @@ enum class ThemeMode(val code: Int, val label: String) {
     }
 }
 
+enum class ThemeAccent(val code: Int, val label: String) {
+    SKY(0, "晴空蓝"),
+    SAGE(1, "莫奈森绿"),
+    ROSE(2, "樱花雾粉"),
+    AMBER(3, "落日琥珀"),
+    VIOLET(4, "极光鸢尾"),
+    MONO(5, "极简石墨");
+
+    companion object {
+        fun fromCode(code: Int): ThemeAccent = entries.firstOrNull { it.code == code } ?: SKY
+    }
+}
+
 data class AppSettings(
     val accessMode: AccessMode = AccessMode.NORMAL,
     val filterConfig: FilterConfig = FilterConfig(),
@@ -26,7 +39,19 @@ data class AppSettings(
     val showRecentOnEmptyQuery: Boolean = true,
     val hasSeenOnboarding: Boolean = false,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
-    val useDynamicColor: Boolean = true,
+    val useDynamicColor: Boolean = false,
+    val themeAccent: ThemeAccent = ThemeAccent.SKY,
+    val pureBlackDark: Boolean = false,
+    val customBgEnabled: Boolean = false,
+    val customBgPath: String = "",
+    val customBgOpacity: Float = 0.82f,
+    val customBgDim: Float = 0.25f,
+    val customBgBlur: Boolean = false,
+    val extractColorFromBg: Boolean = true,
+    val customBgSeedArgb: Int = 0,
+    val hapticFeedbackEnabled: Boolean = true,
+    val useMonospaceFont: Boolean = false,
+    val compactListMode: Boolean = false,
     val lastFullScanAtMillis: Long = 0L,
     val lastUpdateCheckAtMillis: Long = 0L,
     val ignoredUpdateTag: String = ""
@@ -72,7 +97,19 @@ class SettingsRepository(context: Context) {
             showRecentOnEmptyQuery = prefs.getBoolean(KEY_SHOW_RECENT_ON_EMPTY, true),
             hasSeenOnboarding = prefs.getBoolean(KEY_HAS_SEEN_ONBOARDING, false),
             themeMode = ThemeMode.fromCode(prefs.getInt(KEY_THEME_MODE, ThemeMode.SYSTEM.code)),
-            useDynamicColor = prefs.getBoolean(KEY_DYNAMIC_COLOR, true),
+            useDynamicColor = prefs.getBoolean(KEY_DYNAMIC_COLOR, false),
+            themeAccent = ThemeAccent.fromCode(prefs.getInt(KEY_THEME_ACCENT, ThemeAccent.SKY.code)),
+            pureBlackDark = prefs.getBoolean(KEY_PURE_BLACK_DARK, false),
+            customBgEnabled = prefs.getBoolean(KEY_CUSTOM_BG_ENABLED, false),
+            customBgPath = prefs.getString(KEY_CUSTOM_BG_PATH, "").orEmpty(),
+            customBgOpacity = prefs.getFloat(KEY_CUSTOM_BG_OPACITY, 0.82f).coerceIn(0.30f, 1.0f),
+            customBgDim = prefs.getFloat(KEY_CUSTOM_BG_DIM, 0.25f).coerceIn(0.0f, 0.85f),
+            customBgBlur = prefs.getBoolean(KEY_CUSTOM_BG_BLUR, false),
+            extractColorFromBg = prefs.getBoolean(KEY_EXTRACT_COLOR_FROM_BG, true),
+            customBgSeedArgb = prefs.getInt(KEY_CUSTOM_BG_SEED_ARGB, 0),
+            hapticFeedbackEnabled = prefs.getBoolean(KEY_HAPTIC_FEEDBACK, true),
+            useMonospaceFont = prefs.getBoolean(KEY_USE_MONOSPACE_FONT, false),
+            compactListMode = prefs.getBoolean(KEY_COMPACT_LIST_MODE, false),
             lastFullScanAtMillis = prefs.getLong(KEY_LAST_FULL_SCAN, 0L),
             lastUpdateCheckAtMillis = prefs.getLong(KEY_LAST_UPDATE_CHECK, 0L),
             ignoredUpdateTag = prefs.getString(KEY_IGNORED_UPDATE_TAG, "").orEmpty()
@@ -128,6 +165,111 @@ class SettingsRepository(context: Context) {
         _settings.value = _settings.value.copy(useDynamicColor = enabled)
     }
 
+    fun setThemeAccent(accent: ThemeAccent) {
+        prefs.edit()
+            .putInt(KEY_THEME_ACCENT, accent.code)
+            .putBoolean(KEY_DYNAMIC_COLOR, false)
+            .putBoolean(KEY_EXTRACT_COLOR_FROM_BG, false)
+            .apply()
+        _settings.value = _settings.value.copy(
+            themeAccent = accent,
+            useDynamicColor = false,
+            extractColorFromBg = false
+        )
+    }
+
+    fun setPureBlackDark(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_PURE_BLACK_DARK, enabled).apply()
+        _settings.value = _settings.value.copy(pureBlackDark = enabled)
+    }
+
+    fun setCustomBgEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_CUSTOM_BG_ENABLED, enabled).apply()
+        _settings.value = _settings.value.copy(customBgEnabled = enabled)
+    }
+
+    fun setCustomBgImage(path: String, seedArgb: Int) {
+        val enabled = path.isNotBlank()
+        prefs.edit()
+            .putString(KEY_CUSTOM_BG_PATH, path)
+            .putInt(KEY_CUSTOM_BG_SEED_ARGB, seedArgb)
+            .putBoolean(KEY_CUSTOM_BG_ENABLED, enabled)
+            .apply()
+        _settings.value = _settings.value.copy(
+            customBgPath = path,
+            customBgSeedArgb = seedArgb,
+            customBgEnabled = enabled
+        )
+    }
+
+    fun setCustomBgOpacity(opacity: Float) {
+        val v = opacity.coerceIn(0.30f, 1.0f)
+        prefs.edit().putFloat(KEY_CUSTOM_BG_OPACITY, v).apply()
+        _settings.value = _settings.value.copy(customBgOpacity = v)
+    }
+
+    fun setCustomBgDim(dim: Float) {
+        val v = dim.coerceIn(0.0f, 0.85f)
+        prefs.edit().putFloat(KEY_CUSTOM_BG_DIM, v).apply()
+        _settings.value = _settings.value.copy(customBgDim = v)
+    }
+
+    fun setCustomBgBlur(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_CUSTOM_BG_BLUR, enabled).apply()
+        _settings.value = _settings.value.copy(customBgBlur = enabled)
+    }
+
+    fun setExtractColorFromBg(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_EXTRACT_COLOR_FROM_BG, enabled).apply()
+        _settings.value = _settings.value.copy(extractColorFromBg = enabled)
+    }
+
+    fun setHapticFeedbackEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_HAPTIC_FEEDBACK, enabled).apply()
+        _settings.value = _settings.value.copy(hapticFeedbackEnabled = enabled)
+    }
+
+    fun setUseMonospaceFont(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_USE_MONOSPACE_FONT, enabled).apply()
+        _settings.value = _settings.value.copy(useMonospaceFont = enabled)
+    }
+
+    fun setCompactListMode(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_COMPACT_LIST_MODE, enabled).apply()
+        _settings.value = _settings.value.copy(compactListMode = enabled)
+    }
+
+    fun resetThemeSettings() {
+        prefs.edit()
+            .putInt(KEY_THEME_MODE, ThemeMode.SYSTEM.code)
+            .putBoolean(KEY_DYNAMIC_COLOR, false)
+            .putInt(KEY_THEME_ACCENT, ThemeAccent.SKY.code)
+            .putBoolean(KEY_PURE_BLACK_DARK, false)
+            .putBoolean(KEY_CUSTOM_BG_ENABLED, false)
+            .putFloat(KEY_CUSTOM_BG_OPACITY, 0.82f)
+            .putFloat(KEY_CUSTOM_BG_DIM, 0.25f)
+            .putBoolean(KEY_CUSTOM_BG_BLUR, false)
+            .putBoolean(KEY_EXTRACT_COLOR_FROM_BG, true)
+            .putBoolean(KEY_HAPTIC_FEEDBACK, true)
+            .putBoolean(KEY_USE_MONOSPACE_FONT, false)
+            .putBoolean(KEY_COMPACT_LIST_MODE, false)
+            .apply()
+        _settings.value = _settings.value.copy(
+            themeMode = ThemeMode.SYSTEM,
+            useDynamicColor = false,
+            themeAccent = ThemeAccent.SKY,
+            pureBlackDark = false,
+            customBgEnabled = false,
+            customBgOpacity = 0.82f,
+            customBgDim = 0.25f,
+            customBgBlur = false,
+            extractColorFromBg = true,
+            hapticFeedbackEnabled = true,
+            useMonospaceFont = false,
+            compactListMode = false
+        )
+    }
+
     fun markFullScanCompleted(timestampMillis: Long = System.currentTimeMillis()) {
         prefs.edit().putLong(KEY_LAST_FULL_SCAN, timestampMillis).apply()
         _settings.value = _settings.value.copy(lastFullScanAtMillis = timestampMillis)
@@ -159,6 +301,18 @@ class SettingsRepository(context: Context) {
         private const val KEY_HAS_SEEN_ONBOARDING = "has_seen_onboarding"
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_DYNAMIC_COLOR = "use_dynamic_color"
+        private const val KEY_THEME_ACCENT = "theme_accent"
+        private const val KEY_PURE_BLACK_DARK = "pure_black_dark"
+        private const val KEY_CUSTOM_BG_ENABLED = "custom_bg_enabled"
+        private const val KEY_CUSTOM_BG_PATH = "custom_bg_path"
+        private const val KEY_CUSTOM_BG_OPACITY = "custom_bg_opacity"
+        private const val KEY_CUSTOM_BG_DIM = "custom_bg_dim"
+        private const val KEY_CUSTOM_BG_BLUR = "custom_bg_blur"
+        private const val KEY_EXTRACT_COLOR_FROM_BG = "extract_color_from_bg"
+        private const val KEY_CUSTOM_BG_SEED_ARGB = "custom_bg_seed_argb"
+        private const val KEY_HAPTIC_FEEDBACK = "haptic_feedback_enabled"
+        private const val KEY_USE_MONOSPACE_FONT = "use_monospace_font"
+        private const val KEY_COMPACT_LIST_MODE = "compact_list_mode"
         private const val KEY_LAST_FULL_SCAN = "last_full_scan"
         private const val KEY_LAST_UPDATE_CHECK = "last_update_check_at"
         private const val KEY_IGNORED_UPDATE_TAG = "ignored_update_tag"

@@ -5,6 +5,8 @@ import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Environment
 import androidx.lifecycle.AndroidViewModel
@@ -14,9 +16,13 @@ import com.pocketeverything.app.PocketEverythingApp
 import com.pocketeverything.app.data.AppSettings
 import com.pocketeverything.app.data.ChangelogState
 import com.pocketeverything.app.data.ReleaseUpdateInfo
+import com.pocketeverything.app.data.ThemeAccent
 import com.pocketeverything.app.data.ThemeMode
 import com.pocketeverything.app.data.UpdateCheckState
 import com.pocketeverything.app.data.UpdateChecker
+import com.pocketeverything.app.ui.theme.extractSeedColorArgb
+import java.io.FileOutputStream
+import kotlin.math.max
 import com.pocketeverything.app.filter.FilterConfig
 import com.pocketeverything.app.fs.ModeAvailability
 import com.pocketeverything.app.indexer.IndexProgressState
@@ -455,6 +461,113 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setUseDynamicColor(enabled: Boolean) {
         settingsRepo.setUseDynamicColor(enabled)
+    }
+
+    fun setThemeAccent(accent: ThemeAccent) {
+        settingsRepo.setThemeAccent(accent)
+    }
+
+    fun setPureBlackDark(enabled: Boolean) {
+        settingsRepo.setPureBlackDark(enabled)
+    }
+
+    fun setCustomBgEnabled(enabled: Boolean) {
+        settingsRepo.setCustomBgEnabled(enabled)
+    }
+
+    fun setCustomBgOpacity(opacity: Float) {
+        settingsRepo.setCustomBgOpacity(opacity)
+    }
+
+    fun setCustomBgDim(dim: Float) {
+        settingsRepo.setCustomBgDim(dim)
+    }
+
+    fun setCustomBgBlur(enabled: Boolean) {
+        settingsRepo.setCustomBgBlur(enabled)
+    }
+
+    fun setExtractColorFromBg(enabled: Boolean) {
+        settingsRepo.setExtractColorFromBg(enabled)
+    }
+
+    fun setHapticFeedbackEnabled(enabled: Boolean) {
+        settingsRepo.setHapticFeedbackEnabled(enabled)
+    }
+
+    fun setUseMonospaceFont(enabled: Boolean) {
+        settingsRepo.setUseMonospaceFont(enabled)
+    }
+
+    fun setCompactListMode(enabled: Boolean) {
+        settingsRepo.setCompactListMode(enabled)
+    }
+
+    fun resetThemeSettings() {
+        settingsRepo.resetThemeSettings()
+        _messages.tryEmit("已恢复默认主题与外观设置")
+    }
+
+    fun applyCustomBgUri(uri: Uri) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    app.contentResolver.openInputStream(uri)?.use {
+                        BitmapFactory.decodeStream(it, null, boundsOpts)
+                    }
+                    val maxEdge = max(boundsOpts.outWidth, boundsOpts.outHeight)
+                    var sample = 1
+                    while (maxEdge / sample > 1440) {
+                        sample *= 2
+                    }
+                    val decodeOpts = BitmapFactory.Options().apply {
+                        inSampleSize = sample
+                        inPreferredConfig = Bitmap.Config.ARGB_8888
+                    }
+                    val bmp = app.contentResolver.openInputStream(uri)?.use {
+                        BitmapFactory.decodeStream(it, null, decodeOpts)
+                    } ?: error("无法解码所选图片")
+
+                    val seedArgb = extractSeedColorArgb(bmp)
+                    val outFile = File(app.filesDir, "custom_bg_${System.currentTimeMillis()}.jpg")
+                    FileOutputStream(outFile).use { out ->
+                        bmp.compress(Bitmap.CompressFormat.JPEG, 88, out)
+                    }
+                    bmp.recycle()
+
+                    app.filesDir.listFiles()?.forEach { f ->
+                        if (f.name.startsWith("custom_bg_") && f.absolutePath != outFile.absolutePath) {
+                            runCatching { f.delete() }
+                        }
+                    }
+                    outFile.absolutePath to seedArgb
+                }
+            }
+            result.fold(
+                onSuccess = { (path, seed) ->
+                    settingsRepo.setCustomBgImage(path, seed)
+                    _messages.tryEmit("已应用自定义背景图片")
+                },
+                onFailure = { err ->
+                    _messages.tryEmit("设置背景失败：${err.message ?: "文件不可读"}")
+                }
+            )
+        }
+    }
+
+    fun clearCustomBg() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                app.filesDir.listFiles()?.forEach { f ->
+                    if (f.name.startsWith("custom_bg_")) {
+                        runCatching { f.delete() }
+                    }
+                }
+            }
+            settingsRepo.setCustomBgImage("", 0)
+            _messages.tryEmit("已清除自定义背景图片")
+        }
     }
 
     fun setRealtimeMonitorEnabled(enabled: Boolean) {

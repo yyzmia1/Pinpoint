@@ -78,6 +78,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -98,8 +99,11 @@ import com.pocketeverything.app.ui.components.FileTypeIcon
 import com.pocketeverything.app.ui.theme.Amber200
 import com.pocketeverything.app.ui.theme.Amber400
 import com.pocketeverything.app.ui.theme.Emerald400
+import com.pocketeverything.app.ui.theme.LocalCardOpacity
+import com.pocketeverything.app.ui.theme.LocalHasCustomBg
 import com.pocketeverything.app.ui.theme.Rose400
 import com.pocketeverything.app.ui.theme.Slate950
+import com.pocketeverything.app.ui.theme.rememberAppHaptics
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -148,10 +152,14 @@ fun SearchScreen(
         onTargetsMeasured(targets)
     }
 
+    val haptics = rememberAppHaptics()
+    val hasCustomBg = LocalHasCustomBg.current
     val availability = modeStatuses[settings.accessMode]
     val emptyHiddenBySetting = query.isBlank() && quickScope == QuickScope.ALL && !settings.showRecentOnEmptyQuery
 
-    Scaffold(containerColor = MaterialTheme.colorScheme.background) { padding ->
+    Scaffold(
+        containerColor = if (hasCustomBg) Color.Transparent else MaterialTheme.colorScheme.background
+    ) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -163,10 +171,22 @@ fun SearchScreen(
                 mode = settings.accessMode,
                 isDarkTheme = isDarkTheme,
                 availability = availability,
-                onModeClick = { showModeSheet = true },
-                onToggleTheme = onToggleTheme,
-                onQuickSync = onQuickSync,
-                onOpenSettings = onOpenSettings,
+                onModeClick = {
+                    haptics.click()
+                    showModeSheet = true
+                },
+                onToggleTheme = {
+                    haptics.click()
+                    onToggleTheme()
+                },
+                onQuickSync = {
+                    haptics.click()
+                    onQuickSync()
+                },
+                onOpenSettings = {
+                    haptics.tick()
+                    onOpenSettings()
+                },
                 onModePillBounds = { rect -> targets = targets.copy(modePill = rect) }
             )
 
@@ -175,7 +195,10 @@ fun SearchScreen(
                 onQueryChange = onQueryChange,
                 focusRequester = focusRequester,
                 onSubmit = { keyboard?.hide() },
-                onHelp = { showSyntaxSheet = true },
+                onHelp = {
+                    haptics.tick()
+                    showSyntaxSheet = true
+                },
                 onSearchBounds = { rect -> targets = targets.copy(searchField = rect) },
                 onHelpBounds = { rect -> targets = targets.copy(helpButton = rect) },
                 modifier = Modifier.padding(horizontal = 16.dp)
@@ -198,7 +221,10 @@ fun SearchScreen(
 
             ScopePills(
                 selected = quickScope,
-                onSelect = onScopeChange,
+                onSelect = {
+                    haptics.tick()
+                    onScopeChange(it)
+                },
                 modifier = Modifier.onGloballyPositioned { coords ->
                     targets = targets.copy(scopePills = coords.boundsInRoot())
                 }
@@ -208,10 +234,14 @@ fun SearchScreen(
                 query = query,
                 quickScope = quickScope,
                 showRecentOnEmpty = settings.showRecentOnEmptyQuery,
+                useMonospaceFont = settings.useMonospaceFont,
                 response = searchResponse,
                 progress = indexProgress,
                 sortOrder = sortOrder,
-                onSortChange = onSortChange
+                onSortChange = {
+                    haptics.tick()
+                    onSortChange(it)
+                }
             )
 
             IndexProgressStrip(indexProgress)
@@ -246,8 +276,16 @@ fun SearchScreen(
                         }
                         ResultRow(
                             item = item,
-                            onClick = { onItemClick(item) },
-                            onLongPress = { onItemLongPress(item) }
+                            useMonospaceFont = settings.useMonospaceFont,
+                            compactMode = settings.compactListMode,
+                            onClick = {
+                                haptics.tick()
+                                onItemClick(item)
+                            },
+                            onLongPress = {
+                                haptics.click()
+                                onItemLongPress(item)
+                            }
                         )
                     }
                 }
@@ -391,9 +429,10 @@ private fun SearchField(
         label = "searchBorder"
     )
 
+    val cardAlpha = LocalCardOpacity.current
     Surface(
         shape = RoundedCornerShape(24.dp),
-        color = MaterialTheme.colorScheme.surfaceContainer,
+        color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = cardAlpha),
         border = BorderStroke(1.2.dp, borderColor),
         modifier = modifier
             .fillMaxWidth()
@@ -497,6 +536,7 @@ private fun ScopePills(
     onSelect: (QuickScope) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val cardAlpha = LocalCardOpacity.current
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -510,9 +550,9 @@ private fun ScopePills(
                 onClick = { onSelect(scope) },
                 shape = CircleShape,
                 color = if (isSelected) {
-                    MaterialTheme.colorScheme.primaryContainer
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = cardAlpha)
                 } else {
-                    MaterialTheme.colorScheme.surfaceContainer
+                    MaterialTheme.colorScheme.surfaceContainer.copy(alpha = cardAlpha)
                 },
                 contentColor = if (isSelected) {
                     MaterialTheme.colorScheme.onPrimaryContainer
@@ -544,12 +584,14 @@ private fun StatsRow(
     query: String,
     quickScope: QuickScope,
     showRecentOnEmpty: Boolean,
+    useMonospaceFont: Boolean,
     response: SearchResponse,
     progress: IndexProgressState,
     sortOrder: SortOrder,
     onSortChange: (SortOrder) -> Unit
 ) {
     var showSortMenu by remember { mutableStateOf(false) }
+    val monoFamily = if (useMonospaceFont) FontFamily.Monospace else FontFamily.Default
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -567,7 +609,10 @@ private fun StatsRow(
         }
         Text(
             text = text,
-            style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontFamily = monoFamily,
+                fontFeatureSettings = "tnum"
+            ),
             color = if (response.queryError != null) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -686,11 +731,14 @@ private fun EmptyState(
 @Composable
 private fun ResultRow(
     item: SearchResultItem,
+    useMonospaceFont: Boolean,
+    compactMode: Boolean,
     onClick: () -> Unit,
     onLongPress: () -> Unit
 ) {
     val hlBg = Amber200.copy(alpha = 0.72f)
     val hlFg = Slate950
+    val monoFamily = if (useMonospaceFont) FontFamily.Monospace else FontFamily.Default
 
     val nameText = remember(item.name, item.matchedNameRanges) {
         FormatUtils.buildHighlightedText(item.name, item.matchedNameRanges, hlBg, hlFg)
@@ -703,6 +751,7 @@ private fun ResultRow(
     val metaStyle = MaterialTheme.typography.labelSmall.copy(
         fontSize = 11.5.sp,
         lineHeight = 16.sp,
+        fontFamily = monoFamily,
         fontFeatureSettings = "tnum"
     )
     val metaColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f)
@@ -711,13 +760,13 @@ private fun ResultRow(
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(onClick = onClick, onLongClick = onLongPress)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .padding(horizontal = 16.dp, vertical = if (compactMode) 6.dp else 10.dp),
         verticalAlignment = Alignment.Top
     ) {
         FileTypeIcon(
             isDir = item.isDir,
             ext = item.ext,
-            size = 38.dp,
+            size = if (compactMode) 34.dp else 38.dp,
             modifier = Modifier.padding(top = 1.dp)
         )
         Spacer(Modifier.width(12.dp))
@@ -749,7 +798,7 @@ private fun ResultRow(
                 SnippetBlock(item, hlBg, hlFg)
             }
 
-            Spacer(Modifier.height(3.dp))
+            Spacer(Modifier.height(if (compactMode) 1.dp else 3.dp))
 
             // Bottom line: Parent path on left + File size strictly anchored at bottom-right
             Row(
@@ -758,7 +807,7 @@ private fun ResultRow(
             ) {
                 Text(
                     text = pathText,
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelMedium.copy(fontFamily = monoFamily),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,

@@ -70,7 +70,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -79,7 +81,6 @@ import com.pocketeverything.app.BuildConfig
 import com.pocketeverything.app.data.AppSettings
 import com.pocketeverything.app.data.ChangelogState
 import com.pocketeverything.app.data.ReleaseUpdateInfo
-import com.pocketeverything.app.data.ThemeMode
 import com.pocketeverything.app.data.UpdateCheckState
 import com.pocketeverything.app.data.UpdateChecker
 import com.pocketeverything.app.filter.FilterConfig
@@ -89,9 +90,12 @@ import com.pocketeverything.app.search.AccessMode
 import com.pocketeverything.app.ui.components.BrandMarkIcon
 import com.pocketeverything.app.ui.theme.Amber400
 import com.pocketeverything.app.ui.theme.Emerald400
+import com.pocketeverything.app.ui.theme.LocalCardOpacity
+import com.pocketeverything.app.ui.theme.LocalHasCustomBg
 import com.pocketeverything.app.ui.theme.Rose400
 import com.pocketeverything.app.ui.theme.groupedBackdrop
 import com.pocketeverything.app.ui.theme.groupedCard
+import com.pocketeverything.app.ui.theme.rememberAppHaptics
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -103,8 +107,7 @@ fun SettingsScreen(
     updateState: UpdateCheckState,
     onBack: () -> Unit,
     onSelectMode: (AccessMode) -> Unit,
-    onSelectThemeMode: (ThemeMode) -> Unit,
-    onSetDynamicColor: (Boolean) -> Unit,
+    onOpenThemeSettings: () -> Unit,
     onRequestStoragePermission: () -> Unit,
     onOpenShizukuGuide: () -> Unit,
     onRefreshModes: () -> Unit,
@@ -136,8 +139,11 @@ fun SettingsScreen(
         if (granted) onSetRealtimeMonitor(true)
     }
 
-    val pageBackdrop = MaterialTheme.colorScheme.groupedBackdrop
-    val cardColor = MaterialTheme.colorScheme.groupedCard
+    val haptics = rememberAppHaptics()
+    val hasCustomBg = LocalHasCustomBg.current
+    val cardAlpha = LocalCardOpacity.current
+    val pageBackdrop = if (hasCustomBg) Color.Transparent else MaterialTheme.colorScheme.groupedBackdrop
+    val cardColor = MaterialTheme.colorScheme.groupedCard.copy(alpha = cardAlpha)
 
     Scaffold(
         containerColor = pageBackdrop,
@@ -149,7 +155,10 @@ fun SettingsScreen(
                 ),
                 title = { Text("设置", style = MaterialTheme.typography.titleLarge) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = {
+                        haptics.tick()
+                        onBack()
+                    }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 }
@@ -403,55 +412,53 @@ fun SettingsScreen(
 
             // 4. Appearance, Search & Preview Behavior
             SettingsSection(title = "外观与搜索", cardColor = cardColor) {
+                val themeSummary = buildString {
+                    append(settings.themeMode.label)
+                    append(" · ")
+                    when {
+                        hasCustomBg && settings.extractColorFromBg && settings.customBgSeedArgb != 0 -> append("背景图取色")
+                        settings.useDynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> append("系统动态色")
+                        else -> append(settings.themeAccent.label)
+                    }
+                }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("主题模式", style = MaterialTheme.typography.bodyMedium)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        ThemeMode.entries.forEach { mode ->
-                            val selected = settings.themeMode == mode
-                            Surface(
-                                onClick = { onSelectThemeMode(mode) },
-                                shape = CircleShape,
-                                color = if (selected) {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceContainerHigh
-                                },
-                                contentColor = if (selected) {
-                                    MaterialTheme.colorScheme.onPrimaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                                border = if (selected) {
-                                    BorderStroke(0.8.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
-                                } else {
-                                    null
-                                }
-                            ) {
-                                Text(
-                                    text = mode.label,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp)
-                                )
-                            }
+                        .clickable {
+                            haptics.click()
+                            onOpenThemeSettings()
                         }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("主题与外观", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                        Text(
+                            text = "主题模式、莫奈色盘、自定义背景与微震动",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-                }
-                SettingsDivider()
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    ToggleRow(
-                        title = "莫奈动态取色（跟随壁纸配色）",
-                        checked = settings.useDynamicColor,
-                        onCheckedChange = onSetDynamicColor
+                    Spacer(Modifier.width(8.dp))
+                    TwoToneSwatchDot(
+                        primary = MaterialTheme.colorScheme.primary,
+                        container = MaterialTheme.colorScheme.primaryContainer,
+                        isSelected = true
                     )
-                } else {
-                    InfoRow("莫奈动态取色", "需 Android 12+")
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = themeSummary,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(Modifier.width(2.dp))
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = "进入主题设置",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
                 SettingsDivider()
                 ToggleRow(
@@ -1018,11 +1025,16 @@ private fun SettingsSection(
     cardColor: Color,
     content: @Composable () -> Unit
 ) {
+    val hasCustomBg = LocalHasCustomBg.current
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
             text = title,
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.labelLarge.copy(
+                shadow = if (hasCustomBg) {
+                    Shadow(color = Color.Black.copy(alpha = 0.55f), offset = Offset(0f, 1f), blurRadius = 4f)
+                } else null
+            ),
+            color = if (hasCustomBg) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(start = 6.dp, bottom = 6.dp)
         )
         Surface(
@@ -1067,16 +1079,26 @@ private fun ToggleRow(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit
 ) {
+    val haptics = rememberAppHaptics()
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onCheckedChange(!checked) }
+            .clickable {
+                haptics.click()
+                onCheckedChange(!checked)
+            }
             .padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(title, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
         Spacer(Modifier.width(12.dp))
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        ThumbSwitch(
+            checked = checked,
+            onCheckedChange = {
+                haptics.click()
+                onCheckedChange(it)
+            }
+        )
     }
 }
 
