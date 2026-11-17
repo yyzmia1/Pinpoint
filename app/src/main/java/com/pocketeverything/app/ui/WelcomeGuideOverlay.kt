@@ -77,8 +77,8 @@ fun WelcomeGuideOverlay(
             target = targets.searchField
         ),
         GuideStep(
-            title = "三种访问模式",
-            body = "点击右上角胶囊可切换普通、Shizuku（免 Root 访问受限目录）与 Root 全盘模式；详细引导可在设置中查看。",
+            title = "一次选定模式，日常全自动增量",
+            body = "普通模式仅公开 /sdcard；Shizuku 可穿透 /Android/data 与 /obb；Root 支持全盘（默认跳过高噪 /data，按需勾选）。首次建库后，每次打开与开机都会自动增量更新全部用户目录。",
             target = targets.modePill
         ),
         GuideStep(

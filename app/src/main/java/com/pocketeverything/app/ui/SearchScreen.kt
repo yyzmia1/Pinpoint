@@ -101,7 +101,6 @@ import com.pocketeverything.app.ui.theme.Amber400
 import com.pocketeverything.app.ui.theme.Emerald400
 import com.pocketeverything.app.ui.theme.LocalCardOpacity
 import com.pocketeverything.app.ui.theme.LocalHasCustomBg
-import com.pocketeverything.app.ui.theme.Rose400
 import com.pocketeverything.app.ui.theme.Slate950
 import com.pocketeverything.app.ui.theme.rememberAppHaptics
 
@@ -127,7 +126,11 @@ fun SearchScreen(
     onFullScan: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenShizukuGuide: () -> Unit,
+    onRefreshModes: () -> Unit = {},
+    onRequestStoragePermission: () -> Unit = {},
     onRequestPermissionForCurrentMode: () -> Unit,
+    onCancelScan: () -> Unit = {},
+    onDismissScanError: () -> Unit = {},
     onTargetsMeasured: (OnboardingTargets) -> Unit = {}
 ) {
     var showSyntaxSheet by remember { mutableStateOf(false) }
@@ -173,6 +176,7 @@ fun SearchScreen(
                 availability = availability,
                 onModeClick = {
                     haptics.click()
+                    onRefreshModes()
                     showModeSheet = true
                 },
                 onToggleTheme = {
@@ -244,7 +248,22 @@ fun SearchScreen(
                 }
             )
 
-            IndexProgressStrip(indexProgress)
+            IndexProgressStrip(
+                progress = indexProgress,
+                hideError = availability != null && availability !is ModeAvailability.Ready,
+                onCancelScan = onCancelScan,
+                onRetryScan = {
+                    when {
+                        availability != null && availability !is ModeAvailability.Ready -> {
+                            if (settings.accessMode == AccessMode.SHIZUKU) onOpenShizukuGuide()
+                            else onRequestPermissionForCurrentMode()
+                        }
+                        indexProgress.stats.totalEntries > 0L -> onQuickSync()
+                        else -> onFullScan()
+                    }
+                },
+                onDismissError = onDismissScanError
+            )
 
             if (searchResponse.items.isEmpty()) {
                 EmptyState(
@@ -315,6 +334,10 @@ fun SearchScreen(
             onOpenShizukuGuide = {
                 showModeSheet = false
                 onOpenShizukuGuide()
+            },
+            onRequestStoragePermission = {
+                showModeSheet = false
+                onRequestStoragePermission()
             },
             onDismiss = { showModeSheet = false }
         )
@@ -424,16 +447,22 @@ private fun SearchField(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
+    val hasCustomBg = LocalHasCustomBg.current
+    val cardAlpha = LocalCardOpacity.current
+    val lowOpacityHairline = hasCustomBg && cardAlpha <= 0.20f
     val borderColor by animateColorAsState(
-        targetValue = if (focused) MaterialTheme.colorScheme.primary.copy(alpha = 0.7f) else Color.Transparent,
+        targetValue = when {
+            focused -> MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+            lowOpacityHairline -> MaterialTheme.colorScheme.outline.copy(alpha = 0.42f)
+            else -> Color.Transparent
+        },
         label = "searchBorder"
     )
 
-    val cardAlpha = LocalCardOpacity.current
     Surface(
         shape = RoundedCornerShape(24.dp),
         color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = cardAlpha),
-        border = BorderStroke(1.2.dp, borderColor),
+        border = BorderStroke(if (focused || !lowOpacityHairline) 1.2.dp else 0.5.dp, borderColor),
         modifier = modifier
             .fillMaxWidth()
             .height(44.dp)
@@ -536,7 +565,9 @@ private fun ScopePills(
     onSelect: (QuickScope) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val hasCustomBg = LocalHasCustomBg.current
     val cardAlpha = LocalCardOpacity.current
+    val lowOpacityHairline = hasCustomBg && cardAlpha <= 0.20f
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -561,10 +592,10 @@ private fun ScopePills(
                 },
                 border = BorderStroke(
                     width = if (isSelected) 0.9.dp else 0.5.dp,
-                    color = if (isSelected) {
-                        MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
-                    } else {
-                        MaterialTheme.colorScheme.outlineVariant
+                    color = when {
+                        isSelected -> MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                        lowOpacityHairline -> MaterialTheme.colorScheme.outline.copy(alpha = 0.42f)
+                        else -> MaterialTheme.colorScheme.outlineVariant
                     }
                 )
             ) {
@@ -660,31 +691,90 @@ private fun StatsRow(
 }
 
 @Composable
-private fun IndexProgressStrip(progress: IndexProgressState) {
+private fun IndexProgressStrip(
+    progress: IndexProgressState,
+    hideError: Boolean = false,
+    onCancelScan: () -> Unit,
+    onRetryScan: () -> Unit,
+    onDismissError: () -> Unit
+) {
     val active = progress.tier1Phase != Tier1Phase.IDLE || progress.tier2Phase != Tier2Phase.IDLE
-    if (!active) {
-        Spacer(Modifier.height(2.dp))
+    if (active) {
+        Column(modifier = Modifier.padding(start = 16.dp, end = 12.dp, top = 2.dp, bottom = 4.dp)) {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(2.dp)
+                    .clip(CircleShape),
+                trackColor = MaterialTheme.colorScheme.surfaceContainer
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 3.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (progress.tier1Phase != Tier1Phase.IDLE) {
+                        progress.statusMessage
+                    } else {
+                        "正文解析 · ${progress.tier2ProcessedCount} / 剩余 ${progress.tier2PendingCount}"
+                    },
+                    style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (progress.tier1Phase != Tier1Phase.IDLE) {
+                    Text(
+                        text = "取消",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable(onClick = onCancelScan)
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+        }
         return
     }
-    Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 4.dp)) {
-        LinearProgressIndicator(
+
+    val err = progress.errorMessage
+    if (!hideError && !err.isNullOrBlank()) {
+        Surface(
+            color = MaterialTheme.colorScheme.secondaryContainer,
+            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            shape = RoundedCornerShape(10.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .height(2.dp)
-                .clip(CircleShape),
-            trackColor = MaterialTheme.colorScheme.surfaceContainer
-        )
-        Text(
-            text = if (progress.tier1Phase != Tier1Phase.IDLE) {
-                progress.statusMessage
-            } else {
-                "正文解析 · ${progress.tier2ProcessedCount} / 剩余 ${progress.tier2PendingCount}"
-            },
-            style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.padding(top = 3.dp)
-        )
+                .padding(horizontal = 16.dp, vertical = 4.dp)
+        ) {
+            Row(
+                modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = err,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(
+                    onClick = onRetryScan,
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                ) { Text("重试", style = MaterialTheme.typography.labelSmall) }
+                TextButton(
+                    onClick = onDismissError,
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                ) { Text("关闭", style = MaterialTheme.typography.labelSmall) }
+            }
+        }
+        return
     }
+
+    Spacer(Modifier.height(2.dp))
 }
 
 @Composable
@@ -874,6 +964,7 @@ private fun ModeSheet(
     statuses: Map<AccessMode, ModeAvailability>,
     onSelect: (AccessMode) -> Unit,
     onOpenShizukuGuide: () -> Unit,
+    onRequestStoragePermission: () -> Unit,
     onDismiss: () -> Unit
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface) {
@@ -907,16 +998,44 @@ private fun ModeSheet(
                             )
                             Text(
                                 text = when (mode) {
-                                    AccessMode.NORMAL -> "内部与外置存储公开目录"
-                                    AccessMode.SHIZUKU -> "免 Root 穿透 /Android/data 与 /obb"
-                                    AccessMode.ROOT -> "根目录 / 全盘索引与挂载去重"
+                                    AccessMode.NORMAL -> "公开存储 /sdcard（不含 Android/data 与 /obb）"
+                                    AccessMode.SHIZUKU -> "存储全区（穿透 /Android/data 与 /obb，不含 /data）"
+                                    AccessMode.ROOT -> "根目录 /（默认跳过高噪 /data，可选勾选加入）"
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.82f) else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                         Spacer(Modifier.width(8.dp))
-                        if (mode == AccessMode.SHIZUKU) {
+                        if (mode == AccessMode.NORMAL && status is ModeAvailability.NeedsPermission) {
+                            Surface(
+                                onClick = onRequestStoragePermission,
+                                shape = CircleShape,
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.surface.copy(alpha = 0.25f)
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceContainerHigh
+                                },
+                                contentColor = if (selected) {
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.primary
+                                }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(start = 8.dp, end = 4.dp, top = 3.dp, bottom = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("去授权", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium)
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                        contentDescription = "授予存储权限",
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.width(8.dp))
+                        } else if (mode == AccessMode.SHIZUKU) {
                             Surface(
                                 onClick = onOpenShizukuGuide,
                                 shape = CircleShape,
@@ -945,23 +1064,44 @@ private fun ModeSheet(
                             }
                             Spacer(Modifier.width(8.dp))
                         }
-                        Box(
-                            Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(availabilityColor(status))
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = when (status) {
-                                is ModeAvailability.Ready -> "可用"
-                                is ModeAvailability.NeedsPermission -> "待授权"
-                                is ModeAvailability.Unavailable -> "未就绪"
-                                null -> "检测中"
-                            },
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        val (chipBg, chipFg, chipText) = when (status) {
+                            is ModeAvailability.Ready -> Triple(
+                                Emerald400.copy(alpha = 0.16f),
+                                Emerald400,
+                                "可用"
+                            )
+                            is ModeAvailability.NeedsPermission -> Triple(
+                                Amber400.copy(alpha = 0.16f),
+                                Amber400,
+                                "待授权"
+                            )
+                            is ModeAvailability.Unavailable -> Triple(
+                                MaterialTheme.colorScheme.surfaceContainerHighest,
+                                MaterialTheme.colorScheme.onSurfaceVariant,
+                                "未就绪"
+                            )
+                            null -> Triple(
+                                MaterialTheme.colorScheme.surfaceContainerHighest,
+                                MaterialTheme.colorScheme.onSurfaceVariant,
+                                "检测中"
+                            )
+                        }
+                        Surface(
+                            shape = CircleShape,
+                            color = chipBg
+                        ) {
+                            Text(
+                                text = chipText,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Medium,
+                                color = if (selected && status is ModeAvailability.Unavailable) {
+                                    MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                                } else {
+                                    chipFg
+                                },
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -973,8 +1113,7 @@ private fun ModeSheet(
 private fun availabilityColor(status: ModeAvailability?): Color = when (status) {
     is ModeAvailability.Ready -> Emerald400
     is ModeAvailability.NeedsPermission -> Amber400
-    is ModeAvailability.Unavailable -> Rose400
-    null -> MaterialTheme.colorScheme.outline
+    is ModeAvailability.Unavailable, null -> MaterialTheme.colorScheme.outlineVariant
 }
 
 private fun AccessMode.shortLabel(): String = when (this) {

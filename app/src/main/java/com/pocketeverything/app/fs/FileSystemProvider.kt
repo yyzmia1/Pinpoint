@@ -83,7 +83,31 @@ interface FileSystemProvider {
         filterEngine: FilterEngine,
         onBatch: suspend (List<ScannedFileRecord>) -> Unit
     ): Int
+    suspend fun scanDirectories(
+        roots: List<String>,
+        filterEngine: FilterEngine,
+        onDirListed: (String) -> Unit,
+        onBatch: suspend (List<ScannedFileRecord>) -> Unit
+    ): Int = scanDirectories(roots, filterEngine) { batch ->
+        for (r in batch) onDirListed(r.parentPath)
+        onBatch(batch)
+    }
+    suspend fun listDirectChildren(
+        dirs: List<String>,
+        filterEngine: FilterEngine,
+        onBatch: suspend (List<ScannedFileRecord>) -> Unit
+    ): Int
+    suspend fun listDirectChildren(
+        dirs: List<String>,
+        filterEngine: FilterEngine,
+        onDirListed: (String) -> Unit,
+        onBatch: suspend (List<ScannedFileRecord>) -> Unit
+    ): Int = listDirectChildren(dirs, filterEngine) { batch ->
+        for (r in batch) onDirListed(r.parentPath)
+        onBatch(batch)
+    }
     suspend fun statDirectories(dirPaths: List<String>): Map<String, Long>
+    suspend fun statPaths(paths: List<String>): Map<String, Long>
     suspend fun <T> openFileStream(path: String, maxBytes: Long, block: suspend (InputStream) -> T): T
     suspend fun copyFileTo(path: String, targetFile: File, maxBytes: Long): Boolean
 }
@@ -119,7 +143,36 @@ class NormalFileProvider(
         roots: List<String>,
         filterEngine: FilterEngine,
         onBatch: suspend (List<ScannedFileRecord>) -> Unit
+    ): Int = walkToPipe(roots, filterEngine, recursive = true, onDirListed = {}, onBatch = onBatch)
+
+    override suspend fun scanDirectories(
+        roots: List<String>,
+        filterEngine: FilterEngine,
+        onDirListed: (String) -> Unit,
+        onBatch: suspend (List<ScannedFileRecord>) -> Unit
+    ): Int = walkToPipe(roots, filterEngine, recursive = true, onDirListed = onDirListed, onBatch = onBatch)
+
+    override suspend fun listDirectChildren(
+        dirs: List<String>,
+        filterEngine: FilterEngine,
+        onBatch: suspend (List<ScannedFileRecord>) -> Unit
+    ): Int = walkToPipe(dirs, filterEngine, recursive = false, onDirListed = {}, onBatch = onBatch)
+
+    override suspend fun listDirectChildren(
+        dirs: List<String>,
+        filterEngine: FilterEngine,
+        onDirListed: (String) -> Unit,
+        onBatch: suspend (List<ScannedFileRecord>) -> Unit
+    ): Int = walkToPipe(dirs, filterEngine, recursive = false, onDirListed = onDirListed, onBatch = onBatch)
+
+    private suspend fun walkToPipe(
+        roots: List<String>,
+        filterEngine: FilterEngine,
+        recursive: Boolean,
+        onDirListed: (String) -> Unit,
+        onBatch: suspend (List<ScannedFileRecord>) -> Unit
     ): Int = withContext(Dispatchers.IO) {
+        if (roots.isEmpty()) return@withContext 0
         val pipe = ParcelFileDescriptor.createPipe()
         val readEnd = pipe[0]
         val writeEnd = pipe[1]
@@ -138,28 +191,49 @@ class NormalFileProvider(
                             excludedPrefixes = excludedPrefixes,
                             excludedDirNames = excludedDirNames,
                             deduplicateMounts = filterEngine.config.deduplicateMounts,
-                            writer = writer
+                            writer = writer,
+                            recursive = recursive
                         )
                     }
                 }
             }
-            var total = 0
-            ParcelFileDescriptor.AutoCloseInputStream(readEnd).use { rawIn ->
-                total = BinaryTreeStreamCodec.readStream(rawIn, AccessMode.NORMAL, onBatch = onBatch)
+            try {
+                var total = 0
+                ParcelFileDescriptor.AutoCloseInputStream(readEnd).use { rawIn ->
+                    total = BinaryTreeStreamCodec.readStream(
+                        rawIn = rawIn,
+                        accessMode = AccessMode.NORMAL,
+                        onDirListed = onDirListed,
+                        onBatch = onBatch
+                    )
+                }
+                writeJob.await()
+                total
+            } catch (t: Throwable) {
+                runCatching { readEnd.close() }
+                runCatching { writeEnd.close() }
+                writeJob.cancel()
+                throw t
             }
-            writeJob.await()
-            total
         }
     }
 
-    override suspend fun statDirectories(dirPaths: List<String>): Map<String, Long> = withContext(Dispatchers.IO) {
-        val mtimes = PrivilegedTreeWalker.statDirectories(dirPaths.toTypedArray())
-        val map = HashMap<String, Long>(dirPaths.size)
-        for (i in dirPaths.indices) {
-            if (mtimes[i] >= 0L) map[dirPaths[i]] = mtimes[i]
+    override suspend fun statDirectories(dirPaths: List<String>): Map<String, Long> =
+        statBatch(dirPaths, requireDir = true)
+
+    override suspend fun statPaths(paths: List<String>): Map<String, Long> =
+        statBatch(paths, requireDir = false)
+
+    private suspend fun statBatch(paths: List<String>, requireDir: Boolean): Map<String, Long> =
+        withContext(Dispatchers.IO) {
+            if (paths.isEmpty()) return@withContext emptyMap()
+            val mtimes = PrivilegedTreeWalker.statPaths(paths.toTypedArray(), requireDir = requireDir)
+            val map = HashMap<String, Long>(paths.size)
+            for (i in paths.indices) {
+                if (mtimes[i] >= 0L) map[paths[i]] = mtimes[i]
+            }
+            map
         }
-        map
-    }
 
     override suspend fun <T> openFileStream(
         path: String,
@@ -203,10 +277,16 @@ class PrivilegedFileProvider(
         return when (mode) {
             AccessMode.ROOT -> {
                 val hasRoot = withContext(Dispatchers.IO) {
-                    runCatching { Shell.getShell().isRoot }.getOrDefault(false)
+                    runCatching {
+                        val cached = Shell.getCachedShell()
+                        if (cached != null && !cached.isRoot) {
+                            runCatching { cached.close() }
+                        }
+                        Shell.getShell().isRoot
+                    }.getOrDefault(false)
                 }
                 if (hasRoot) ModeAvailability.Ready
-                else ModeAvailability.Unavailable("当前设备未授予 Root 权限或未 Root")
+                else ModeAvailability.Unavailable("当前设备未授予 Root 权限或未 Root（若刚在管理器放行请点重新检测）")
             }
             AccessMode.SHIZUKU -> {
                 val alive = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
@@ -326,6 +406,50 @@ class PrivilegedFileProvider(
         roots: List<String>,
         filterEngine: FilterEngine,
         onBatch: suspend (List<ScannedFileRecord>) -> Unit
+    ): Int = walkPrivilegedPipe(roots, filterEngine, recursive = true, onDirListed = {}, onBatch = onBatch)
+
+    override suspend fun scanDirectories(
+        roots: List<String>,
+        filterEngine: FilterEngine,
+        onDirListed: (String) -> Unit,
+        onBatch: suspend (List<ScannedFileRecord>) -> Unit
+    ): Int = walkPrivilegedPipe(roots, filterEngine, recursive = true, onDirListed = onDirListed, onBatch = onBatch)
+
+    override suspend fun listDirectChildren(
+        dirs: List<String>,
+        filterEngine: FilterEngine,
+        onBatch: suspend (List<ScannedFileRecord>) -> Unit
+    ): Int = walkPrivilegedPipe(dirs, filterEngine, recursive = false, onDirListed = {}, onBatch = onBatch)
+
+    override suspend fun listDirectChildren(
+        dirs: List<String>,
+        filterEngine: FilterEngine,
+        onDirListed: (String) -> Unit,
+        onBatch: suspend (List<ScannedFileRecord>) -> Unit
+    ): Int = walkPrivilegedPipe(dirs, filterEngine, recursive = false, onDirListed = onDirListed, onBatch = onBatch)
+
+    private suspend fun walkPrivilegedPipe(
+        roots: List<String>,
+        filterEngine: FilterEngine,
+        recursive: Boolean,
+        onDirListed: (String) -> Unit,
+        onBatch: suspend (List<ScannedFileRecord>) -> Unit
+    ): Int {
+        if (roots.isEmpty()) return 0
+        var total = 0
+        // Chunk large path lists so IPC transactions never exceed Binder's TransactionTooLargeException limit.
+        for (chunk in roots.chunked(500)) {
+            total += walkPrivilegedPipeChunk(chunk, filterEngine, recursive, onDirListed, onBatch)
+        }
+        return total
+    }
+
+    private suspend fun walkPrivilegedPipeChunk(
+        roots: List<String>,
+        filterEngine: FilterEngine,
+        recursive: Boolean,
+        onDirListed: (String) -> Unit,
+        onBatch: suspend (List<ScannedFileRecord>) -> Unit
     ): Int = coroutineScope {
         val svc = ensureBound()
         val pipe = ParcelFileDescriptor.createPipe()
@@ -334,9 +458,9 @@ class PrivilegedFileProvider(
         val excludedPrefixes = filterEngine.getRootExcludedPrefixes(mode)
         val excludedDirNames = filterEngine.getExcludedDirNames()
 
-        try {
-            val remoteJob = async(Dispatchers.IO) {
-                try {
+        val remoteJob = async(Dispatchers.IO) {
+            try {
+                if (recursive) {
                     svc.scanTreeToPipe(
                         roots.toTypedArray(),
                         excludedPrefixes,
@@ -344,36 +468,64 @@ class PrivilegedFileProvider(
                         filterEngine.config.deduplicateMounts,
                         writeEnd
                     )
-                } finally {
-                    runCatching { writeEnd.close() }
+                } else {
+                    svc.listDirectChildrenToPipe(
+                        roots.toTypedArray(),
+                        excludedPrefixes,
+                        excludedDirNames,
+                        filterEngine.config.deduplicateMounts,
+                        writeEnd
+                    )
                 }
+            } finally {
+                runCatching { writeEnd.close() }
             }
+        }
 
+        try {
             var total = 0
             withContext(Dispatchers.IO) {
                 ParcelFileDescriptor.AutoCloseInputStream(readEnd).use { rawIn ->
-                    total = BinaryTreeStreamCodec.readStream(rawIn, mode, batchSize = 1500, onBatch = onBatch)
+                    total = BinaryTreeStreamCodec.readStream(
+                        rawIn = rawIn,
+                        accessMode = mode,
+                        batchSize = 1500,
+                        onDirListed = onDirListed,
+                        onBatch = onBatch
+                    )
                 }
             }
             remoteJob.await()
             total
         } catch (t: Throwable) {
+            remoteJob.cancel()
             abortIpc(t, readEnd, writeEnd)
         }
     }
 
-    override suspend fun statDirectories(dirPaths: List<String>): Map<String, Long> = withContext(Dispatchers.IO) {
-        if (dirPaths.isEmpty()) return@withContext emptyMap()
+    override suspend fun statDirectories(dirPaths: List<String>): Map<String, Long> =
+        statInChunks(dirPaths) { svc, chunk -> svc.statDirectories(chunk) }
+
+    override suspend fun statPaths(paths: List<String>): Map<String, Long> =
+        statInChunks(paths) { svc, chunk -> svc.statPaths(chunk) }
+
+    private suspend fun statInChunks(
+        paths: List<String>,
+        rpc: (IPrivilegedFsService, Array<String>) -> LongArray
+    ): Map<String, Long> = withContext(Dispatchers.IO) {
+        if (paths.isEmpty()) return@withContext emptyMap()
         val svc = ensureBound()
-        val mtimes = try {
-            svc.statDirectories(dirPaths.toTypedArray())
-        } catch (t: Throwable) {
-            abortIpc(t)
-        }
-        val map = HashMap<String, Long>(dirPaths.size)
-        for (i in dirPaths.indices) {
-            if (i < mtimes.size && mtimes[i] >= 0L) {
-                map[dirPaths[i]] = mtimes[i]
+        val map = HashMap<String, Long>(paths.size)
+        for (chunk in paths.chunked(800)) {
+            val mtimes = try {
+                rpc(svc, chunk.toTypedArray())
+            } catch (t: Throwable) {
+                abortIpc(t)
+            }
+            for (i in chunk.indices) {
+                if (i < mtimes.size && mtimes[i] >= 0L) {
+                    map[chunk[i]] = mtimes[i]
+                }
             }
         }
         map

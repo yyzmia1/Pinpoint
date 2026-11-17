@@ -34,6 +34,11 @@ data class PendingTier2Task(
     val accessMode: AccessMode
 )
 
+data class CrowdedDirStat(
+    val path: String,
+    val childCount: Int
+)
+
 data class FileMetaRow(
     val id: Long,
     val path: String,
@@ -209,11 +214,15 @@ class SqliteSearchDatabase(
                 val insFilesFts = writeConn.prepare(
                     "INSERT INTO files_fts(rowid, name_bi, name_uni, path_bi, path_uni) VALUES (?, ?, ?, ?, ?)"
                 )
+                val delDocsFts = writeConn.prepare("DELETE FROM docs_fts WHERE rowid = ?")
+                val delDocsUni = writeConn.prepare("DELETE FROM docs_uni_fts WHERE rowid = ?")
+                val delDocsRaw = writeConn.prepare("DELETE FROM docs_raw WHERE file_id = ?")
 
                 try {
                     for (e in entries) {
                         var existingId = -1L
-                        var sameUnchanged = false
+                        var sameContent = false
+                        var sameMode = false
                         var oldTier2Status = 0
 
                         selectExisting.reset()
@@ -225,28 +234,20 @@ class SqliteSearchDatabase(
                             val oldIsDir = selectExisting.getLong(3) != 0L
                             val oldMode = selectExisting.getLong(4).toInt()
                             oldTier2Status = selectExisting.getLong(5).toInt()
-                            sameUnchanged = (oldSize == e.size && oldMtime == e.mtime && oldIsDir == e.isDir && oldMode == e.accessMode.code)
-                        }
-
-                        if (sameUnchanged) {
-                            val targetStatus = if (!e.needsTier2) {
-                                e.initialTier2Status.code
-                            } else if (oldTier2Status == Tier2Status.INDEXED.code) {
-                                Tier2Status.INDEXED.code
-                            } else {
-                                e.initialTier2Status.code
-                            }
-                            if (targetStatus == oldTier2Status) {
-                                continue
-                            }
+                            sameContent = (oldSize == e.size && oldMtime == e.mtime && oldIsDir == e.isDir)
+                            sameMode = (oldMode == e.accessMode.code)
                         }
 
                         val nextTier2Status = if (!e.needsTier2) {
                             e.initialTier2Status.code
-                        } else if (sameUnchanged && oldTier2Status == Tier2Status.INDEXED.code) {
+                        } else if (sameContent && oldTier2Status == Tier2Status.INDEXED.code) {
                             Tier2Status.INDEXED.code
                         } else {
                             e.initialTier2Status.code
+                        }
+
+                        if (sameContent && sameMode && nextTier2Status == oldTier2Status) {
+                            continue
                         }
 
                         val rowId: Long
@@ -281,20 +282,32 @@ class SqliteSearchDatabase(
                             updateMeta.bindLong(10, rowId)
                             updateMeta.step()
 
-                            delFilesFts.reset()
-                            delFilesFts.bindLong(1, rowId)
-                            delFilesFts.step()
+                            if (oldTier2Status == Tier2Status.INDEXED.code &&
+                                nextTier2Status != Tier2Status.INDEXED.code
+                            ) {
+                                delDocsFts.reset(); delDocsFts.bindLong(1, rowId); delDocsFts.step()
+                                delDocsUni.reset(); delDocsUni.bindLong(1, rowId); delDocsUni.step()
+                                delDocsRaw.reset(); delDocsRaw.bindLong(1, rowId); delDocsRaw.step()
+                            }
+
+                            if (!sameContent) {
+                                delFilesFts.reset()
+                                delFilesFts.bindLong(1, rowId)
+                                delFilesFts.step()
+                            }
                         }
 
-                        val nameTok = CjkTokenizer.tokenizeForIndex(e.name, dedupUnigrams = false)
-                        val pathTok = CjkTokenizer.tokenizeForIndex(e.path, dedupUnigrams = true)
-                        insFilesFts.reset()
-                        insFilesFts.bindLong(1, rowId)
-                        insFilesFts.bindText(2, nameTok.biAndAscii)
-                        insFilesFts.bindText(3, nameTok.cjkUnigrams)
-                        insFilesFts.bindText(4, pathTok.biAndAscii)
-                        insFilesFts.bindText(5, pathTok.cjkUnigrams)
-                        insFilesFts.step()
+                        if (existingId < 0 || !sameContent) {
+                            val nameTok = CjkTokenizer.tokenizeForIndex(e.name, dedupUnigrams = false)
+                            val pathTok = CjkTokenizer.tokenizeForIndex(e.path, dedupUnigrams = true)
+                            insFilesFts.reset()
+                            insFilesFts.bindLong(1, rowId)
+                            insFilesFts.bindText(2, nameTok.biAndAscii)
+                            insFilesFts.bindText(3, nameTok.cjkUnigrams)
+                            insFilesFts.bindText(4, pathTok.biAndAscii)
+                            insFilesFts.bindText(5, pathTok.cjkUnigrams)
+                            insFilesFts.step()
+                        }
 
                         changedCount++
                     }
@@ -305,6 +318,9 @@ class SqliteSearchDatabase(
                     lastIdStmt.close()
                     delFilesFts.close()
                     insFilesFts.close()
+                    delDocsFts.close()
+                    delDocsUni.close()
+                    delDocsRaw.close()
                 }
                 writeConn.execSQL("COMMIT;")
             } catch (t: Throwable) {
@@ -341,29 +357,8 @@ class SqliteSearchDatabase(
     }
 
     fun pruneDirectorySubtree(dirPrefix: String, seenUnderDir: Set<String>): Int {
-        val normalizedPrefix = if (dirPrefix == "/") "/" else dirPrefix.trimEnd('/') + "/"
-        val upperBound = normalizedPrefix.dropLast(1) + '0'
-        val sql = if (dirPrefix == "/") {
-            "SELECT id, path FROM files_meta WHERE path > ? AND path < ?"
-        } else {
-            "SELECT id, path FROM files_meta WHERE path >= ? AND path < ?"
-        }
         return writeLock.withLock {
-            val staleIds = ArrayList<Long>()
-            writeConn.prepare(sql).use { stmt ->
-                stmt.bindText(1, normalizedPrefix)
-                stmt.bindText(2, upperBound)
-                while (stmt.step()) {
-                    val id = stmt.getLong(0)
-                    val p = stmt.getText(1)
-                    if (p !in seenUnderDir) {
-                        staleIds.add(id)
-                    }
-                }
-            }
-            if (staleIds.isEmpty()) return@withLock 0
-            deleteEntriesByIdsLocked(staleIds)
-            staleIds.size
+            pruneDirectorySubtreeLocked(dirPrefix, seenUnderDir)
         }
     }
 
@@ -569,6 +564,226 @@ class SqliteSearchDatabase(
             }
             out
         }
+    }
+
+    /**
+     * Returns tracked mutable directories (`path -> mtime`) from `files_meta` for incremental sync,
+     * covering all user storage dirs (and `/data/adb`, `/data/local` when [includeDataAdb] is true),
+     * while skipping immutable ROM partitions and high-churn `/data/data` app private internals.
+     */
+    fun getTrackedMutableDirectories(includeDataAdb: Boolean): Map<String, Long> {
+        return readLock.withLock {
+            val out = HashMap<String, Long>(1024)
+            readConn.prepare("SELECT path, mtime FROM files_meta WHERE is_dir = 1").use { stmt ->
+                while (stmt.step()) {
+                    val p = stmt.getText(0)
+                    val isContainerDir = p == "/storage/emulated" || p == "/storage/self" || p == "/storage/enc_emulated"
+                    val isMutableStorage = p.startsWith("/storage/") && !isContainerDir
+                    val isPrivilegedUserDir = includeDataAdb && (
+                        p == "/data/adb" || p.startsWith("/data/adb/") ||
+                            p == "/data/local" || p.startsWith("/data/local/")
+                        )
+                    if (isMutableStorage || isPrivilegedUserDir) {
+                        out[p] = stmt.getLong(1)
+                    }
+                }
+            }
+            out
+        }
+    }
+
+    fun getTrackedDocFiles(limit: Int = 15000): List<PendingTier2Task> {
+        return readLock.withLock {
+            val out = ArrayList<PendingTier2Task>()
+            readConn.prepare(
+                """
+                SELECT id, path, name, ext, size, mtime, access_mode
+                FROM files_meta
+                WHERE is_dir = 0 AND tier2_status IN (1, 2)
+                ORDER BY mtime DESC
+                LIMIT ?
+                """.trimIndent()
+            ).use { stmt ->
+                stmt.bindLong(1, limit.toLong())
+                while (stmt.step()) {
+                    out.add(
+                        PendingTier2Task(
+                            fileId = stmt.getLong(0),
+                            path = stmt.getText(1),
+                            name = stmt.getText(2),
+                            ext = stmt.getText(3),
+                            size = stmt.getLong(4),
+                            mtime = stmt.getLong(5),
+                            accessMode = AccessMode.fromCode(stmt.getLong(6).toInt())
+                        )
+                    )
+                }
+            }
+            out
+        }
+    }
+
+    fun markTier2Stale(updates: List<Pair<Long, Long>>) {
+        if (updates.isEmpty()) return
+        writeLock.withLock {
+            writeConn.execSQL("BEGIN IMMEDIATE;")
+            try {
+                val updMeta = writeConn.prepare("UPDATE files_meta SET mtime = ?, tier2_status = 1, tier2_error = NULL WHERE id = ?")
+                val delDocsFts = writeConn.prepare("DELETE FROM docs_fts WHERE rowid = ?")
+                val delDocsUni = writeConn.prepare("DELETE FROM docs_uni_fts WHERE rowid = ?")
+                val delDocsRaw = writeConn.prepare("DELETE FROM docs_raw WHERE file_id = ?")
+                try {
+                    for ((id, newMtime) in updates) {
+                        updMeta.reset(); updMeta.bindLong(1, newMtime); updMeta.bindLong(2, id); updMeta.step()
+                        delDocsFts.reset(); delDocsFts.bindLong(1, id); delDocsFts.step()
+                        delDocsUni.reset(); delDocsUni.bindLong(1, id); delDocsUni.step()
+                        delDocsRaw.reset(); delDocsRaw.bindLong(1, id); delDocsRaw.step()
+                    }
+                } finally {
+                    updMeta.close()
+                    delDocsFts.close()
+                    delDocsUni.close()
+                    delDocsRaw.close()
+                }
+                writeConn.execSQL("COMMIT;")
+            } catch (t: Throwable) {
+                runCatching { writeConn.execSQL("ROLLBACK;") }
+                throw t
+            }
+        }
+    }
+
+    fun updateDirectoryMtimes(updates: Map<String, Long>) {
+        if (updates.isEmpty()) return
+        writeLock.withLock {
+            writeConn.execSQL("BEGIN IMMEDIATE;")
+            try {
+                writeConn.prepare("UPDATE files_meta SET mtime = ? WHERE path = ? AND is_dir = 1").use { stmt ->
+                    for ((p, mtime) in updates) {
+                        stmt.reset()
+                        stmt.bindLong(1, mtime)
+                        stmt.bindText(2, p)
+                        stmt.step()
+                    }
+                }
+                writeConn.execSQL("COMMIT;")
+            } catch (t: Throwable) {
+                runCatching { writeConn.execSQL("ROLLBACK;") }
+                throw t
+            }
+        }
+    }
+
+    fun pruneDirectChildren(parentPath: String, seenDirectPaths: Set<String>): Int {
+        return writeLock.withLock {
+            val staleFileIds = ArrayList<Long>()
+            val staleDirPaths = ArrayList<String>()
+            writeConn.prepare("SELECT id, path, is_dir FROM files_meta WHERE parent_path = ?").use { stmt ->
+                stmt.bindText(1, parentPath)
+                while (stmt.step()) {
+                    val id = stmt.getLong(0)
+                    val p = stmt.getText(1)
+                    val isDir = stmt.getLong(2) != 0L
+                    if (p !in seenDirectPaths) {
+                        staleFileIds.add(id)
+                        if (isDir) staleDirPaths.add(p)
+                    }
+                }
+            }
+            if (staleFileIds.isEmpty()) return@withLock 0
+            deleteEntriesByIdsLocked(staleFileIds)
+            var removed = staleFileIds.size
+            for (dir in staleDirPaths) {
+                removed += pruneDirectorySubtreeLocked(dir, emptySet())
+            }
+            removed
+        }
+    }
+
+    fun deleteSubtree(dirPath: String): Int {
+        val clean = if (dirPath.length > 1) dirPath.trimEnd('/') else dirPath
+        return writeLock.withLock {
+            var count = pruneDirectorySubtreeLocked(clean, emptySet())
+            val selfIds = ArrayList<Long>(1)
+            writeConn.prepare("SELECT id FROM files_meta WHERE path = ?").use { stmt ->
+                stmt.bindText(1, clean)
+                if (stmt.step()) selfIds.add(stmt.getLong(0))
+            }
+            if (selfIds.isNotEmpty()) {
+                deleteEntriesByIdsLocked(selfIds)
+                count += selfIds.size
+            }
+            count
+        }
+    }
+
+    fun pruneMatchingFilter(filter: com.pocketeverything.app.filter.FilterEngine, mode: AccessMode): Int {
+        return writeLock.withLock {
+            val staleIds = ArrayList<Long>()
+            writeConn.prepare("SELECT id, path, name, is_dir FROM files_meta").use { stmt ->
+                while (stmt.step()) {
+                    val id = stmt.getLong(0)
+                    val path = stmt.getText(1)
+                    val name = stmt.getText(2)
+                    val isDir = stmt.getLong(3) != 0L
+                    if (filter.shouldSkipTier1Path(path, name, isDir, mode)) {
+                        staleIds.add(id)
+                    }
+                }
+            }
+            if (staleIds.isEmpty()) return@withLock 0
+            deleteEntriesByIdsLocked(staleIds)
+            staleIds.size
+        }
+    }
+
+    fun getTopCrowdedDirectories(limit: Int = 5): List<CrowdedDirStat> {
+        return readLock.withLock {
+            val out = ArrayList<CrowdedDirStat>(limit)
+            readConn.prepare(
+                """
+                SELECT parent_path, COUNT(*) AS cnt
+                FROM files_meta
+                WHERE (parent_path LIKE '/storage/%/%' OR parent_path LIKE '/data/%')
+                  AND parent_path NOT IN ('/', '/data', '/sdcard', '/storage', '/storage/emulated', '/storage/emulated/0', '/storage/self', '/storage/self/primary')
+                  AND NOT (parent_path GLOB '/storage/emulated/[0-9]*' AND parent_path NOT LIKE '/storage/emulated/%/%')
+                GROUP BY parent_path
+                ORDER BY cnt DESC, parent_path ASC
+                LIMIT ?
+                """.trimIndent()
+            ).use { stmt ->
+                stmt.bindLong(1, limit.coerceIn(1, 20).toLong())
+                while (stmt.step()) {
+                    out.add(CrowdedDirStat(stmt.getText(0), stmt.getLong(1).toInt()))
+                }
+            }
+            out
+        }
+    }
+
+    private fun pruneDirectorySubtreeLocked(dirPrefix: String, seenUnderDir: Set<String>): Int {
+        val normalizedPrefix = if (dirPrefix == "/") "/" else dirPrefix.trimEnd('/') + "/"
+        val upperBound = normalizedPrefix.dropLast(1) + '0'
+        val sql = if (dirPrefix == "/") {
+            "SELECT id, path FROM files_meta WHERE path > ? AND path < ?"
+        } else {
+            "SELECT id, path FROM files_meta WHERE path >= ? AND path < ?"
+        }
+        val staleIds = ArrayList<Long>()
+        writeConn.prepare(sql).use { stmt ->
+            stmt.bindText(1, normalizedPrefix)
+            stmt.bindText(2, upperBound)
+            while (stmt.step()) {
+                val id = stmt.getLong(0)
+                val p = stmt.getText(1)
+                if (p !in seenUnderDir) {
+                    staleIds.add(id)
+                }
+            }
+        }
+        if (staleIds.isEmpty()) return 0
+        deleteEntriesByIdsLocked(staleIds)
+        return staleIds.size
     }
 
     fun saveDirSnapshots(snapshots: Map<String, Long>, mode: AccessMode) {

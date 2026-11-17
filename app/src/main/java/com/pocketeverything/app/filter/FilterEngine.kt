@@ -13,9 +13,17 @@ class FilterEngine(
         .map { it.trim().trimEnd('/') }
         .filter { it.isNotEmpty() }
 
-    private val normalizedTier2Allowed = config.tier2AllowedPrefixes
-        .map { it.trim().let { p -> if (p == "/") "/" else p.trimEnd('/') } }
-        .filter { it.isNotEmpty() }
+    private val excludedDirNameSet: Set<String> = buildSet {
+        if (config.skipNoiseCaches) {
+            addAll(FilterConfig.DEFAULT_NOISE_DIR_NAMES)
+        }
+        config.customExcludedDirNames
+            .map { it.trim().lowercase() }
+            .filter { it.isNotEmpty() }
+            .forEach { add(it) }
+    }
+
+    private val normalizedTier2Allowed = FilterConfig.normalizeTier2AllowedPrefixes(config.tier2AllowedPrefixes)
 
     private val normalizedTier2Blocked = config.tier2BlockedPrefixes
         .map { it.trim().trimEnd('/') }
@@ -28,39 +36,55 @@ class FilterEngine(
             if (config.deduplicateMounts) {
                 list.addAll(FilterConfig.BIND_MOUNT_DUPLICATE_PREFIXES)
             }
+            if (!config.rootIncludeData) {
+                list.add("/data")
+            }
         }
         list.addAll(normalizedCustomExcludes)
         return list.distinct().toTypedArray()
     }
 
-    fun getExcludedDirNames(): Array<String> {
-        return if (config.skipNoiseCaches) {
-            FilterConfig.DEFAULT_NOISE_DIR_NAMES.toTypedArray()
-        } else {
-            emptyArray()
-        }
-    }
+    fun getExcludedDirNames(): Array<String> = excludedDirNameSet.toTypedArray()
 
     fun shouldSkipTier1Path(path: String, name: String, isDir: Boolean, mode: AccessMode): Boolean {
         val clean = if (path.length > 1) path.trimEnd('/') else path
         if (mode == AccessMode.ROOT) {
             for (prefix in FilterConfig.VIRTUAL_FS_EXCLUSIONS) {
-                if (clean == prefix || clean.startsWith("$prefix/")) return true
+                if (matchesPathPrefix(clean, prefix)) return true
             }
             if (config.deduplicateMounts) {
                 for (dup in FilterConfig.BIND_MOUNT_DUPLICATE_PREFIXES) {
-                    if (clean == dup || clean.startsWith("$dup/")) return true
+                    if (matchesPathPrefix(clean, dup)) return true
                 }
+            }
+            if (!config.rootIncludeData && matchesPathPrefix(clean, "/data")) {
+                return true
             }
         }
 
         for (custom in normalizedCustomExcludes) {
-            if (clean == custom || clean.startsWith("$custom/")) return true
+            if (matchesPathPrefix(clean, custom)) return true
         }
 
-        if (config.skipNoiseCaches && isDir) {
-            if (name.lowercase() in FilterConfig.DEFAULT_NOISE_DIR_NAMES) {
-                return true
+        if (excludedDirNameSet.isNotEmpty()) {
+            val endBound = if (isDir) clean.length else clean.lastIndexOf('/').coerceAtLeast(0)
+            var pos = 0
+            while (pos < endBound) {
+                if (clean[pos] == '/') {
+                    pos++
+                    continue
+                }
+                var nextSlash = clean.indexOf('/', pos)
+                if (nextSlash < 0 || nextSlash > endBound) nextSlash = endBound
+                if (nextSlash > pos) {
+                    val seg = clean.substring(pos, nextSlash).lowercase()
+                    if (seg in excludedDirNameSet &&
+                        !(nextSlash == DATA_LOCAL_TMP.length && clean.regionMatches(0, DATA_LOCAL_TMP, 0, DATA_LOCAL_TMP.length))
+                    ) {
+                        return true
+                    }
+                }
+                pos = nextSlash + 1
             }
         }
 
@@ -73,18 +97,16 @@ class FilterEngine(
         if (lowerExt == "doc") return Tier2Status.UNSUPPORTED_LEGACY_DOC
         if (lowerExt !in FilterConfig.SUPPORTED_DOC_EXTENSIONS) return Tier2Status.NOT_APPLICABLE
 
-        val clean = path.trimEnd('/')
+        val clean = if (path.length > 1) path.trimEnd('/') else path
         for (custom in normalizedCustomExcludes) {
-            if (clean == custom || clean.startsWith("$custom/")) return Tier2Status.SKIPPED_FILTER
+            if (matchesPathPrefix(clean, custom)) return Tier2Status.SKIPPED_FILTER
         }
         for (blocked in normalizedTier2Blocked) {
-            if (clean == blocked || clean.startsWith("$blocked/")) return Tier2Status.SKIPPED_FILTER
+            if (matchesPathPrefix(clean, blocked)) return Tier2Status.SKIPPED_FILTER
         }
+        // Empty tier2AllowedPrefixes means unrestricted (only blocked/custom exclusions apply).
         if (normalizedTier2Allowed.isNotEmpty()) {
-            val allowed = normalizedTier2Allowed.any { prefix ->
-                prefix == "/" || clean == prefix || clean.startsWith("$prefix/") ||
-                    (prefix.endsWith("/") && clean.startsWith(prefix))
-            }
+            val allowed = normalizedTier2Allowed.any { prefix -> matchesPathPrefix(clean, prefix) }
             if (!allowed) return Tier2Status.SKIPPED_FILTER
         }
 
@@ -103,5 +125,14 @@ class FilterEngine(
             "pdf" -> config.maxPdfBytes
             else -> 0L
         }
+    }
+
+    private fun matchesPathPrefix(clean: String, prefix: String): Boolean {
+        if (prefix == "/") return clean.startsWith("/")
+        return clean.startsWith(prefix) && (clean.length == prefix.length || clean[prefix.length] == '/')
+    }
+
+    private companion object {
+        const val DATA_LOCAL_TMP = "/data/local/tmp"
     }
 }

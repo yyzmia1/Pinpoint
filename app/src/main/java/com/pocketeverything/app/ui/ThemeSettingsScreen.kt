@@ -63,6 +63,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -91,6 +92,7 @@ import com.pocketeverything.app.ui.theme.LocalHasCustomBg
 import com.pocketeverything.app.ui.theme.Slate950
 import com.pocketeverything.app.ui.theme.groupedBackdrop
 import com.pocketeverything.app.ui.theme.groupedCard
+import com.pocketeverything.app.ui.theme.lowOpacityCardBorder
 import com.pocketeverything.app.ui.theme.previewColors
 import com.pocketeverything.app.ui.theme.rememberAppHaptics
 import com.pocketeverything.app.ui.theme.seedColorScheme
@@ -183,6 +185,7 @@ fun ThemeSettingsScreen(
             // 0. Live Preview Card
             ThemeLivePreviewCard(
                 cardColor = cardColor,
+                cardAlpha = cardAlpha,
                 sourceLabel = activeColorSourceLabel,
                 useMonospace = settings.useMonospaceFont,
                 compactMode = settings.compactListMode
@@ -192,6 +195,7 @@ fun ThemeSettingsScreen(
             ThemeGroupCard(
                 title = "外观与色彩方案",
                 cardColor = cardColor,
+                cardAlpha = cardAlpha,
                 hasCustomBg = hasCustomBg
             ) {
                 // Theme Mode Row
@@ -383,6 +387,7 @@ fun ThemeSettingsScreen(
             ThemeGroupCard(
                 title = "自定义背景与毛玻璃",
                 cardColor = cardColor,
+                cardAlpha = cardAlpha,
                 hasCustomBg = hasCustomBg
             ) {
                 ThemeSwitchRow(
@@ -465,16 +470,20 @@ fun ThemeSettingsScreen(
 
                         ThemeItemDivider()
 
-                        // Card Opacity Slider
-                        var lastOpacityStep by remember { mutableIntStateOf((settings.customBgOpacity * 50).roundToInt()) }
+                        // Card Opacity Slider (0% - 100% with 10% snap nodes)
+                        var lastOpacityStep by remember { mutableIntStateOf((settings.customBgOpacity * 10).roundToInt()) }
+                        LaunchedEffect(settings.customBgOpacity) {
+                            lastOpacityStep = (settings.customBgOpacity * 10).roundToInt()
+                        }
                         ThemeSliderRow(
                             icon = Icons.Default.Opacity,
                             title = "卡片不透明度",
                             valueText = "${(settings.customBgOpacity * 100).roundToInt()}%",
                             value = settings.customBgOpacity,
-                            valueRange = 0.30f..1.00f,
+                            valueRange = 0.00f..1.00f,
+                            steps = 9,
                             onValueChange = { v ->
-                                val step = (v * 50).roundToInt()
+                                val step = (v * 10).roundToInt()
                                 if (step != lastOpacityStep) {
                                     lastOpacityStep = step
                                     haptics.tick()
@@ -485,16 +494,20 @@ fun ThemeSettingsScreen(
 
                         ThemeItemDivider()
 
-                        // Background Dim Slider
-                        var lastDimStep by remember { mutableIntStateOf((settings.customBgDim * 50).roundToInt()) }
+                        // Background Dim Slider (0% - 80% with 10% snap nodes)
+                        var lastDimStep by remember { mutableIntStateOf((settings.customBgDim * 10).roundToInt()) }
+                        LaunchedEffect(settings.customBgDim) {
+                            lastDimStep = (settings.customBgDim * 10).roundToInt()
+                        }
                         ThemeSliderRow(
                             icon = Icons.Default.Brightness6,
                             title = "背景暗度调节",
                             valueText = "${(settings.customBgDim * 100).roundToInt()}%",
                             value = settings.customBgDim,
                             valueRange = 0.00f..0.80f,
+                            steps = 7,
                             onValueChange = { v ->
-                                val step = (v * 50).roundToInt()
+                                val step = (v * 10).roundToInt()
                                 if (step != lastDimStep) {
                                     lastDimStep = step
                                     haptics.tick()
@@ -524,9 +537,13 @@ fun ThemeSettingsScreen(
             ThemeGroupCard(
                 title = "触感与排版细节",
                 cardColor = cardColor,
+                cardAlpha = cardAlpha,
                 hasCustomBg = hasCustomBg
             ) {
-                var lastHapticStep by remember { mutableIntStateOf((settings.hapticStrength * 25).roundToInt()) }
+                var lastHapticStep by remember { mutableIntStateOf((settings.hapticStrength * 10).roundToInt()) }
+                LaunchedEffect(settings.hapticStrength) {
+                    lastHapticStep = (settings.hapticStrength * 10).roundToInt()
+                }
                 val pct = (settings.hapticStrength * 100).roundToInt()
                 ThemeSliderRow(
                     icon = Icons.Default.Vibration,
@@ -534,8 +551,9 @@ fun ThemeSettingsScreen(
                     valueText = if (pct <= 1) "关闭 (0%)" else "$pct%",
                     value = settings.hapticStrength,
                     valueRange = 0f..1f,
+                    steps = 9,
                     onValueChange = { v ->
-                        val step = (v * 25).roundToInt()
+                        val step = (v * 10).roundToInt()
                         if (step != lastHapticStep) {
                             lastHapticStep = step
                             haptics.click(forceEvenIfDisabled = true, overrideStrength = v)
@@ -579,6 +597,7 @@ fun ThemeSettingsScreen(
 @Composable
 private fun ThemeLivePreviewCard(
     cardColor: Color,
+    cardAlpha: Float,
     sourceLabel: String,
     useMonospace: Boolean,
     compactMode: Boolean
@@ -626,7 +645,7 @@ private fun ThemeLivePreviewCard(
             ) {
                 Surface(
                     shape = RoundedCornerShape(20.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = cardAlpha),
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.65f)),
                     modifier = Modifier
                         .weight(1f)
@@ -751,6 +770,7 @@ private fun ThemeLivePreviewCard(
 private fun ThemeGroupCard(
     title: String,
     cardColor: Color,
+    cardAlpha: Float,
     hasCustomBg: Boolean,
     content: @Composable () -> Unit
 ) {
@@ -769,6 +789,7 @@ private fun ThemeGroupCard(
         Surface(
             shape = RoundedCornerShape(18.dp),
             color = cardColor,
+            border = lowOpacityCardBorder(hasCustomBg = hasCustomBg, cardAlpha = cardAlpha),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
@@ -825,6 +846,7 @@ private fun ThemeSliderRow(
     valueText: String,
     value: Float,
     valueRange: ClosedFloatingPointRange<Float>,
+    steps: Int = 0,
     onValueChange: (Float) -> Unit
 ) {
     Column(
@@ -860,6 +882,7 @@ private fun ThemeSliderRow(
             value = value,
             onValueChange = onValueChange,
             valueRange = valueRange,
+            steps = steps,
             modifier = Modifier.padding(start = 28.dp)
         )
     }
@@ -872,12 +895,14 @@ private fun ThemeSliderRow(
 fun ThumbSwitch(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
 ) {
     Switch(
         checked = checked,
         onCheckedChange = onCheckedChange,
         modifier = modifier,
+        enabled = enabled,
         thumbContent = {
             Icon(
                 imageVector = if (checked) Icons.Default.Check else Icons.Default.Close,

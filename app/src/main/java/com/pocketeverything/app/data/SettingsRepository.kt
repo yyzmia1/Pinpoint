@@ -44,18 +44,20 @@ data class AppSettings(
     val pureBlackDark: Boolean = false,
     val customBgEnabled: Boolean = false,
     val customBgPath: String = "",
-    val customBgOpacity: Float = 0.82f,
-    val customBgDim: Float = 0.25f,
+    val customBgOpacity: Float = 0.80f,
+    val customBgDim: Float = 0.20f,
     val customBgBlur: Boolean = false,
     val extractColorFromBg: Boolean = true,
     val customBgSeedArgb: Int = 0,
     val hapticFeedbackEnabled: Boolean = true,
-    val hapticStrength: Float = 0.25f,
+    val hapticStrength: Float = 0.20f,
     val useMonospaceFont: Boolean = false,
     val compactListMode: Boolean = false,
     val lastFullScanAtMillis: Long = 0L,
     val lastUpdateCheckAtMillis: Long = 0L,
-    val ignoredUpdateTag: String = ""
+    val ignoredUpdateTag: String = "",
+    val receiveStableUpdates: Boolean = true,
+    val receiveBetaUpdates: Boolean = false
 )
 
 class SettingsRepository(context: Context) {
@@ -71,6 +73,12 @@ class SettingsRepository(context: Context) {
         val dedupMounts = prefs.getBoolean(KEY_DEDUP_MOUNTS, true)
         val customExcludes = prefs.getString(KEY_CUSTOM_EXCLUDES, "")
             ?.lines()?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()
+        val customExcludedDirs = prefs.getString(KEY_CUSTOM_EXCLUDED_DIRS, "")
+            ?.split('\n', ',', ';')
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?: emptyList()
+        val rootIncludeData = prefs.getBoolean(KEY_ROOT_INCLUDE_DATA, false)
         val allowedPrefixes = prefs.getString(KEY_TIER2_ALLOWED, null)
             ?.lines()?.map { it.trim() }?.filter { it.isNotEmpty() }
             ?: FilterConfig.DEFAULT_TIER2_ALLOWED_PREFIXES
@@ -86,7 +94,9 @@ class SettingsRepository(context: Context) {
             filterConfig = FilterConfig(
                 skipNoiseCaches = skipNoise,
                 deduplicateMounts = dedupMounts,
+                rootIncludeData = rootIncludeData,
                 customExcludedPaths = customExcludes,
+                customExcludedDirNames = customExcludedDirs,
                 tier2AllowedPrefixes = allowedPrefixes,
                 tier2BlockedPrefixes = blockedPrefixes,
                 maxTxtMdBytes = maxTxtMb * 1024L * 1024L,
@@ -103,21 +113,23 @@ class SettingsRepository(context: Context) {
             pureBlackDark = prefs.getBoolean(KEY_PURE_BLACK_DARK, false),
             customBgEnabled = prefs.getBoolean(KEY_CUSTOM_BG_ENABLED, false),
             customBgPath = prefs.getString(KEY_CUSTOM_BG_PATH, "").orEmpty(),
-            customBgOpacity = prefs.getFloat(KEY_CUSTOM_BG_OPACITY, 0.82f).coerceIn(0.30f, 1.0f),
-            customBgDim = prefs.getFloat(KEY_CUSTOM_BG_DIM, 0.25f).coerceIn(0.0f, 0.85f),
+            customBgOpacity = prefs.getFloat(KEY_CUSTOM_BG_OPACITY, 0.80f).coerceIn(0.0f, 1.0f),
+            customBgDim = prefs.getFloat(KEY_CUSTOM_BG_DIM, 0.20f).coerceIn(0.0f, 0.80f),
             customBgBlur = prefs.getBoolean(KEY_CUSTOM_BG_BLUR, false),
             extractColorFromBg = prefs.getBoolean(KEY_EXTRACT_COLOR_FROM_BG, true),
             customBgSeedArgb = prefs.getInt(KEY_CUSTOM_BG_SEED_ARGB, 0),
             hapticFeedbackEnabled = prefs.getBoolean(KEY_HAPTIC_FEEDBACK, true),
             hapticStrength = prefs.getFloat(
                 KEY_HAPTIC_STRENGTH,
-                if (prefs.getBoolean(KEY_HAPTIC_FEEDBACK, true)) 0.25f else 0f
+                if (prefs.getBoolean(KEY_HAPTIC_FEEDBACK, true)) 0.20f else 0f
             ).coerceIn(0f, 1f),
             useMonospaceFont = prefs.getBoolean(KEY_USE_MONOSPACE_FONT, false),
             compactListMode = prefs.getBoolean(KEY_COMPACT_LIST_MODE, false),
             lastFullScanAtMillis = prefs.getLong(KEY_LAST_FULL_SCAN, 0L),
             lastUpdateCheckAtMillis = prefs.getLong(KEY_LAST_UPDATE_CHECK, 0L),
-            ignoredUpdateTag = prefs.getString(KEY_IGNORED_UPDATE_TAG, "").orEmpty()
+            ignoredUpdateTag = prefs.getString(KEY_IGNORED_UPDATE_TAG, "").orEmpty(),
+            receiveStableUpdates = prefs.getBoolean(KEY_RECEIVE_STABLE_UPDATES, true),
+            receiveBetaUpdates = prefs.getBoolean(KEY_RECEIVE_BETA_UPDATES, false)
         )
     }
 
@@ -130,7 +142,9 @@ class SettingsRepository(context: Context) {
         prefs.edit()
             .putBoolean(KEY_SKIP_NOISE, config.skipNoiseCaches)
             .putBoolean(KEY_DEDUP_MOUNTS, config.deduplicateMounts)
+            .putBoolean(KEY_ROOT_INCLUDE_DATA, config.rootIncludeData)
             .putString(KEY_CUSTOM_EXCLUDES, config.customExcludedPaths.joinToString("\n"))
+            .putString(KEY_CUSTOM_EXCLUDED_DIRS, config.customExcludedDirNames.joinToString("\n"))
             .putString(KEY_TIER2_ALLOWED, config.tier2AllowedPrefixes.joinToString("\n"))
             .putString(KEY_TIER2_BLOCKED, config.tier2BlockedPrefixes.joinToString("\n"))
             .putInt(KEY_MAX_TXT_MB, (config.maxTxtMdBytes / (1024L * 1024L)).toInt())
@@ -208,13 +222,13 @@ class SettingsRepository(context: Context) {
     }
 
     fun setCustomBgOpacity(opacity: Float) {
-        val v = opacity.coerceIn(0.30f, 1.0f)
+        val v = opacity.coerceIn(0.0f, 1.0f)
         prefs.edit().putFloat(KEY_CUSTOM_BG_OPACITY, v).apply()
         _settings.value = _settings.value.copy(customBgOpacity = v)
     }
 
     fun setCustomBgDim(dim: Float) {
-        val v = dim.coerceIn(0.0f, 0.85f)
+        val v = dim.coerceIn(0.0f, 0.80f)
         prefs.edit().putFloat(KEY_CUSTOM_BG_DIM, v).apply()
         _settings.value = _settings.value.copy(customBgDim = v)
     }
@@ -230,7 +244,7 @@ class SettingsRepository(context: Context) {
     }
 
     fun setHapticFeedbackEnabled(enabled: Boolean) {
-        val strength = if (enabled) (_settings.value.hapticStrength.takeIf { it > 0.02f } ?: 0.25f) else 0f
+        val strength = if (enabled) (_settings.value.hapticStrength.takeIf { it > 0.02f } ?: 0.20f) else 0f
         setHapticStrength(strength)
     }
 
@@ -264,12 +278,12 @@ class SettingsRepository(context: Context) {
             .putInt(KEY_THEME_ACCENT, ThemeAccent.SKY.code)
             .putBoolean(KEY_PURE_BLACK_DARK, false)
             .putBoolean(KEY_CUSTOM_BG_ENABLED, false)
-            .putFloat(KEY_CUSTOM_BG_OPACITY, 0.82f)
-            .putFloat(KEY_CUSTOM_BG_DIM, 0.25f)
+            .putFloat(KEY_CUSTOM_BG_OPACITY, 0.80f)
+            .putFloat(KEY_CUSTOM_BG_DIM, 0.20f)
             .putBoolean(KEY_CUSTOM_BG_BLUR, false)
             .putBoolean(KEY_EXTRACT_COLOR_FROM_BG, true)
             .putBoolean(KEY_HAPTIC_FEEDBACK, true)
-            .putFloat(KEY_HAPTIC_STRENGTH, 0.25f)
+            .putFloat(KEY_HAPTIC_STRENGTH, 0.20f)
             .putBoolean(KEY_USE_MONOSPACE_FONT, false)
             .putBoolean(KEY_COMPACT_LIST_MODE, false)
             .apply()
@@ -279,12 +293,12 @@ class SettingsRepository(context: Context) {
             themeAccent = ThemeAccent.SKY,
             pureBlackDark = false,
             customBgEnabled = false,
-            customBgOpacity = 0.82f,
-            customBgDim = 0.25f,
+            customBgOpacity = 0.80f,
+            customBgDim = 0.20f,
             customBgBlur = false,
             extractColorFromBg = true,
             hapticFeedbackEnabled = true,
-            hapticStrength = 0.25f,
+            hapticStrength = 0.20f,
             useMonospaceFont = false,
             compactListMode = false
         )
@@ -305,11 +319,29 @@ class SettingsRepository(context: Context) {
         _settings.value = _settings.value.copy(ignoredUpdateTag = tagName)
     }
 
+    fun setReceiveStableUpdates(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_RECEIVE_STABLE_UPDATES, enabled).apply()
+        _settings.value = _settings.value.copy(receiveStableUpdates = enabled)
+    }
+
+    fun setReceiveBetaUpdates(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_RECEIVE_BETA_UPDATES, enabled).apply()
+        _settings.value = _settings.value.copy(receiveBetaUpdates = enabled)
+    }
+
+    fun getActiveDownloadId(): Long = prefs.getLong(KEY_ACTIVE_DOWNLOAD_ID, -1L)
+
+    fun setActiveDownloadId(id: Long) {
+        prefs.edit().putLong(KEY_ACTIVE_DOWNLOAD_ID, id).apply()
+    }
+
     companion object {
         private const val KEY_MODE = "access_mode"
         private const val KEY_SKIP_NOISE = "skip_noise_caches"
         private const val KEY_DEDUP_MOUNTS = "dedup_mounts"
+        private const val KEY_ROOT_INCLUDE_DATA = "root_include_data"
         private const val KEY_CUSTOM_EXCLUDES = "custom_excludes"
+        private const val KEY_CUSTOM_EXCLUDED_DIRS = "custom_excluded_dirs"
         private const val KEY_TIER2_ALLOWED = "tier2_allowed"
         private const val KEY_TIER2_BLOCKED = "tier2_blocked"
         private const val KEY_MAX_TXT_MB = "max_txt_mb"
@@ -337,5 +369,8 @@ class SettingsRepository(context: Context) {
         private const val KEY_LAST_FULL_SCAN = "last_full_scan"
         private const val KEY_LAST_UPDATE_CHECK = "last_update_check_at"
         private const val KEY_IGNORED_UPDATE_TAG = "ignored_update_tag"
+        private const val KEY_RECEIVE_STABLE_UPDATES = "receive_stable_updates"
+        private const val KEY_RECEIVE_BETA_UPDATES = "receive_beta_updates"
+        private const val KEY_ACTIVE_DOWNLOAD_ID = "active_download_id"
     }
 }

@@ -28,6 +28,7 @@ import com.pocketeverything.app.fs.ModeAvailability
 import com.pocketeverything.app.indexer.IndexProgressState
 import com.pocketeverything.app.indexer.RealtimeMonitorService
 import com.pocketeverything.app.search.AccessMode
+import com.pocketeverything.app.search.CrowdedDirStat
 import com.pocketeverything.app.search.QuerySyntaxParser
 import com.pocketeverything.app.search.QuickScope
 import com.pocketeverything.app.search.SearchResponse
@@ -59,6 +60,18 @@ data class ShizukuLiveStatus(
     val isInstalled: Boolean = false,
     val isServiceRunning: Boolean = false,
     val isPermissionGranted: Boolean = false
+)
+
+data class PendingModeSwitch(
+    val targetMode: AccessMode,
+    val includeDataForRoot: Boolean,
+    val syncRulesToPreset: Boolean,
+    val hasCustomRules: Boolean
+)
+
+data class UiNotice(
+    val text: String,
+    val jumpToSearch: Boolean = false
 )
 
 @OptIn(FlowPreview::class)
@@ -105,8 +118,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var updateCheckJob: Job? = null
 
     @Volatile
-    var activeDownloadId: Long = -1L
+    var activeDownloadId: Long = settingsRepo.getActiveDownloadId()
         private set
+
+    fun clearActiveDownloadId() {
+        activeDownloadId = -1L
+        settingsRepo.setActiveDownloadId(-1L)
+    }
 
     private val _previewPayload = MutableStateFlow<PreviewPayload?>(null)
     val previewPayload: StateFlow<PreviewPayload?> = _previewPayload.asStateFlow()
@@ -120,19 +138,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _detailItem = MutableStateFlow<SearchResultItem?>(null)
     val detailItem: StateFlow<SearchResultItem?> = _detailItem.asStateFlow()
 
-    private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 8)
-    val messages: SharedFlow<String> = _messages.asSharedFlow()
+    private val _pendingModeSwitch = MutableStateFlow<PendingModeSwitch?>(null)
+    val pendingModeSwitch: StateFlow<PendingModeSwitch?> = _pendingModeSwitch.asStateFlow()
+
+    private val _crowdedDirs = MutableStateFlow<List<CrowdedDirStat>>(emptyList())
+    val crowdedDirs: StateFlow<List<CrowdedDirStat>> = _crowdedDirs.asStateFlow()
+
+    private val _messages = MutableSharedFlow<UiNotice>(extraBufferCapacity = 8)
+    val messages: SharedFlow<UiNotice> = _messages.asSharedFlow()
+
+    private fun emitMessage(text: String, jumpToSearch: Boolean = false) {
+        _messages.tryEmit(UiNotice(text, jumpToSearch))
+    }
 
     private val shizukuPermissionListener = Shizuku.OnRequestPermissionResultListener { _, grantResult ->
         viewModelScope.launch {
             refreshModeStatuses()
             if (grantResult == PackageManager.PERMISSION_GRANTED) {
+                emitMessage("Shizuku 授权成功")
                 if (settings.value.accessMode == AccessMode.SHIZUKU) {
                     indexManager.startFullScan(clearExisting = false)
+                } else {
+                    switchMode(AccessMode.SHIZUKU)
                 }
-                _messages.tryEmit("Shizuku 授权成功")
             } else {
-                _messages.tryEmit("未授予 Shizuku 权限")
+                emitMessage("未授予 Shizuku 权限")
             }
         }
     }
@@ -154,6 +184,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         refreshModeStatuses()
         indexManager.triggerStartupSync()
+
+        viewModelScope.launch {
+            indexManager.progress
+                .map { it.stats.totalEntries }
+                .distinctUntilChanged()
+                .debounce(400)
+                .collectLatest {
+                    refreshCrowdedDirs()
+                }
+        }
 
         viewModelScope.launch {
             delay(1500L)
@@ -214,11 +254,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _sortOrder.value = order
     }
 
-    fun refreshModeStatuses() {
+    fun refreshModeStatuses(probeRoot: Boolean = settings.value.accessMode == AccessMode.ROOT) {
         viewModelScope.launch(Dispatchers.IO) {
+            val prevRoot = _modeStatuses.value[AccessMode.ROOT]
             val map = linkedMapOf<AccessMode, ModeAvailability>()
             for (mode in AccessMode.entries) {
-                map[mode] = container.providerFor(mode).checkAvailability()
+                map[mode] = if (mode == AccessMode.ROOT && !probeRoot) {
+                    prevRoot ?: ModeAvailability.Unavailable("点击检测或切换至 Root 模式")
+                } else {
+                    container.providerFor(mode).checkAvailability()
+                }
             }
             _modeStatuses.value = map
 
@@ -234,54 +279,123 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun retryCurrentModeAndScan() {
+        viewModelScope.launch {
+            val mode = settings.value.accessMode
+            val availability = withContext(Dispatchers.IO) {
+                container.providerFor(mode).checkAvailability()
+            }
+            refreshModeStatuses(probeRoot = mode == AccessMode.ROOT)
+            when (availability) {
+                is ModeAvailability.Ready -> {
+                    if (indexManager.isTier1Busy()) {
+                        emitMessage("索引任务正在执行中（已扫描 ${indexProgress.value.tier1ScannedCount} 项）")
+                    } else if (indexProgress.value.stats.totalEntries == 0L || settings.value.lastFullScanAtMillis == 0L) {
+                        indexManager.startFullScan(clearExisting = false)
+                        emitMessage("${mode.label} 已就绪，正在后台扫描建库")
+                    } else {
+                        indexManager.startQuickHotDirsRefresh()
+                        emitMessage("${mode.label} 已就绪，正在增量同步")
+                    }
+                }
+                is ModeAvailability.NeedsPermission -> emitMessage(availability.reason)
+                is ModeAvailability.Unavailable -> emitMessage(availability.reason)
+            }
+        }
+    }
+
     fun switchMode(mode: AccessMode) {
         viewModelScope.launch {
             val availability = withContext(Dispatchers.IO) {
                 container.providerFor(mode).checkAvailability()
             }
-            refreshModeStatuses()
+            refreshModeStatuses(probeRoot = mode == AccessMode.ROOT || settings.value.accessMode == AccessMode.ROOT)
             when (availability) {
                 is ModeAvailability.Ready -> {
-                    settingsRepo.updateAccessMode(mode)
-                    _messages.tryEmit("已切换至 ${mode.label}")
-                    indexManager.startFullScan(clearExisting = false)
+                    val curSettings = settings.value
+                    if (mode == curSettings.accessMode) {
+                        if (indexProgress.value.stats.totalEntries == 0L) {
+                            indexManager.startFullScan(clearExisting = false)
+                            emitMessage("${mode.label} 已就绪，正在扫描建库")
+                        } else {
+                            emitMessage("当前已处于 ${mode.label}")
+                        }
+                        return@launch
+                    }
+                    val hasCustom = curSettings.filterConfig.differsFromPreset(mode)
+                    _pendingModeSwitch.value = PendingModeSwitch(
+                        targetMode = mode,
+                        includeDataForRoot = if (mode == AccessMode.ROOT) curSettings.filterConfig.rootIncludeData else false,
+                        syncRulesToPreset = false,
+                        hasCustomRules = hasCustom
+                    )
                 }
                 is ModeAvailability.NeedsPermission -> {
-                    settingsRepo.updateAccessMode(mode)
                     if (mode == AccessMode.SHIZUKU) {
                         requestShizukuPermission()
                     } else {
-                        _messages.tryEmit(availability.reason)
+                        emitMessage(availability.reason)
                     }
                 }
                 is ModeAvailability.Unavailable -> {
-                    _messages.tryEmit(availability.reason)
+                    emitMessage(availability.reason)
                 }
             }
         }
     }
 
+    fun updatePendingModeSwitch(includeDataForRoot: Boolean? = null, syncRulesToPreset: Boolean? = null) {
+        val current = _pendingModeSwitch.value ?: return
+        _pendingModeSwitch.value = current.copy(
+            includeDataForRoot = includeDataForRoot ?: current.includeDataForRoot,
+            syncRulesToPreset = syncRulesToPreset ?: current.syncRulesToPreset
+        )
+    }
+
+    fun dismissPendingModeSwitch() {
+        _pendingModeSwitch.value = null
+    }
+
+    fun confirmPendingModeSwitch() {
+        val pending = _pendingModeSwitch.value ?: return
+        _pendingModeSwitch.value = null
+        val curCfg = settings.value.filterConfig
+        val nextCfg = if (pending.syncRulesToPreset) {
+            curCfg.recommendedForMode(pending.targetMode, includeData = pending.includeDataForRoot)
+        } else {
+            curCfg.copy(rootIncludeData = if (pending.targetMode == AccessMode.ROOT) pending.includeDataForRoot else false)
+        }
+        settingsRepo.updateFilterConfig(nextCfg)
+        settingsRepo.updateAccessMode(pending.targetMode)
+        indexManager.startFullScan(clearExisting = false)
+        emitMessage("已切换至 ${pending.targetMode.label}，正在后台全盘重建索引", jumpToSearch = true)
+    }
+
     fun requestShizukuPermission() {
         runCatching {
             if (!Shizuku.pingBinder()) {
-                _messages.tryEmit("Shizuku 服务未运行，请先启动 Shizuku")
+                emitMessage("Shizuku 服务未运行，请先启动 Shizuku")
                 return
             }
             if (Shizuku.isPreV11()) {
-                _messages.tryEmit("Shizuku 版本过低（需 v11+），请更新后再试")
+                emitMessage("Shizuku 版本过低（需 v11+），请更新后再试")
                 return
             }
             if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
                 refreshModeStatuses()
-                indexManager.startFullScan(clearExisting = false)
+                if (settings.value.accessMode == AccessMode.SHIZUKU) {
+                    retryCurrentModeAndScan()
+                } else {
+                    switchMode(AccessMode.SHIZUKU)
+                }
             } else if (Shizuku.shouldShowRequestPermissionRationale()) {
-                _messages.tryEmit("请在 Shizuku 应用的授权管理中手动允许 Pinpoint")
+                emitMessage("请在 Shizuku 应用的授权管理中手动允许 Pinpoint")
                 openShizukuOrDownload()
             } else {
                 Shizuku.requestPermission(SHIZUKU_REQ_CODE)
             }
         }.onFailure {
-            _messages.tryEmit("调用 Shizuku 失败：${it.message}")
+            emitMessage("调用 Shizuku 失败：${it.message}")
         }
     }
 
@@ -302,14 +416,56 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             app.startActivity(intent)
         }.onFailure {
-            _messages.tryEmit("无法打开链接：$url")
+            emitMessage("无法打开链接：$url")
+        }
+    }
+
+    fun setReceiveStableUpdates(enabled: Boolean) {
+        settingsRepo.setReceiveStableUpdates(enabled)
+        val curState = _updateState.value
+        if (!enabled) {
+            if ((curState is UpdateCheckState.Available && !curState.info.isPrerelease) ||
+                (!settings.value.receiveBetaUpdates && (curState is UpdateCheckState.UpToDate || curState is UpdateCheckState.Error))
+            ) {
+                _updateState.value = UpdateCheckState.Idle
+            }
+            if (_updateDialogInfo.value?.isPrerelease == false) {
+                _updateDialogInfo.value = null
+            }
+        } else if (curState is UpdateCheckState.UpToDate || curState is UpdateCheckState.Error) {
+            _updateState.value = UpdateCheckState.Idle
+        }
+    }
+
+    fun setReceiveBetaUpdates(enabled: Boolean) {
+        settingsRepo.setReceiveBetaUpdates(enabled)
+        val curState = _updateState.value
+        if (!enabled) {
+            if ((curState is UpdateCheckState.Available && curState.info.isPrerelease) ||
+                (!settings.value.receiveStableUpdates && (curState is UpdateCheckState.UpToDate || curState is UpdateCheckState.Error))
+            ) {
+                _updateState.value = UpdateCheckState.Idle
+            }
+            if (_updateDialogInfo.value?.isPrerelease == true) {
+                _updateDialogInfo.value = null
+            }
+        } else if (curState is UpdateCheckState.UpToDate || curState is UpdateCheckState.Error) {
+            _updateState.value = UpdateCheckState.Idle
         }
     }
 
     fun checkForUpdates(silent: Boolean = false) {
+        val cur = settings.value
+        if (!cur.receiveStableUpdates && !cur.receiveBetaUpdates) {
+            if (!silent) {
+                _updateState.value = UpdateCheckState.Idle
+                emitMessage("已关闭正式版与测试版更新接收，请先开启至少一项")
+            }
+            return
+        }
         if (!silent && _updateState.value is UpdateCheckState.Checking) return
         val now = System.currentTimeMillis()
-        if (silent && !UpdateChecker.shouldRunSilentCheck(settings.value.lastUpdateCheckAtMillis, now)) {
+        if (silent && !UpdateChecker.shouldRunSilentCheck(cur.lastUpdateCheckAtMillis, now)) {
             return
         }
         if (!silent) {
@@ -323,28 +479,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val result = withContext(Dispatchers.IO) {
                 UpdateChecker.checkLatestRelease(
                     repoSlug = BuildConfig.GITHUB_REPO,
-                    currentVersion = BuildConfig.VERSION_NAME
+                    currentVersion = BuildConfig.VERSION_NAME,
+                    receiveStable = cur.receiveStableUpdates,
+                    receiveBeta = cur.receiveBetaUpdates
                 )
             }
             val reachedServer = result !is UpdateCheckState.Error || result.httpStatusCode != null
             if (reachedServer) {
                 settingsRepo.markUpdateChecked()
             }
+            val latestSettings = settings.value
+            val stillEligible = result is UpdateCheckState.Available &&
+                ((!result.info.isPrerelease && latestSettings.receiveStableUpdates) ||
+                    (result.info.isPrerelease && latestSettings.receiveBetaUpdates))
             if (silent) {
-                if (result is UpdateCheckState.Available &&
+                if (stillEligible &&
                     UpdateChecker.shouldPromptSilentUpdate(
-                        latestTag = result.info.tagName,
+                        latestTag = (result as UpdateCheckState.Available).info.tagName,
                         currentVersion = BuildConfig.VERSION_NAME,
-                        ignoredTag = settings.value.ignoredUpdateTag
+                        ignoredTag = latestSettings.ignoredUpdateTag
                     )
                 ) {
                     _updateState.value = result
                     _updateDialogInfo.value = result.info
                 }
             } else {
-                _updateState.value = result
-                if (result is UpdateCheckState.Available) {
-                    _updateDialogInfo.value = result.info
+                _updateState.value = if (result is UpdateCheckState.Available && !stillEligible) {
+                    UpdateCheckState.UpToDate(BuildConfig.VERSION_NAME)
+                } else {
+                    result
+                }
+                if (stillEligible) {
+                    _updateDialogInfo.value = (result as UpdateCheckState.Available).info
                 }
             }
         }
@@ -357,7 +523,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun ignoreUpdateVersion(tagName: String) {
         settingsRepo.setIgnoredUpdateTag(tagName)
         _updateDialogInfo.value = null
-        _messages.tryEmit("已忽略 $tagName，后续不再自动弹出提醒")
+        emitMessage("已忽略 $tagName，后续不再自动弹出提醒")
     }
 
     fun downloadUpdateApk(info: ReleaseUpdateInfo) {
@@ -380,15 +546,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                 .setDestinationInExternalFilesDir(app, Environment.DIRECTORY_DOWNLOADS, safeFileName)
             activeDownloadId = dm.enqueue(request)
-            _messages.tryEmit("已调用系统下载器下载，可在通知栏查看进度")
+            settingsRepo.setActiveDownloadId(activeDownloadId)
+            emitMessage("已调用系统下载器下载，可在通知栏查看进度")
         }.onFailure {
-            _messages.tryEmit("系统下载器不可用，已转为浏览器打开")
+            emitMessage("系统下载器不可用，已转为浏览器打开")
             openUrl(info.releaseUrl)
         }
     }
 
     fun notifyMessage(message: String) {
-        _messages.tryEmit(message)
+        emitMessage(message)
     }
 
     fun openChangelog() {
@@ -425,22 +592,66 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun triggerQuickSync() {
+        if (indexManager.isTier1Busy()) {
+            emitMessage("索引任务正在执行中（已扫描 ${indexProgress.value.tier1ScannedCount} 项）", jumpToSearch = true)
+            return
+        }
         indexManager.startQuickHotDirsRefresh()
-        _messages.tryEmit("正在增量校验目录")
+        emitMessage("正在全范围增量校验目录变更…")
     }
 
     fun triggerFullRebuild(clearFirst: Boolean = false) {
+        if (indexManager.isTier1Busy()) {
+            emitMessage("全盘建库正在进行中（已扫 ${indexProgress.value.tier1ScannedCount} 项），可回首页查看", jumpToSearch = true)
+            return
+        }
         indexManager.startFullScan(clearExisting = clearFirst)
+        emitMessage("已开始全盘重建索引，可返回首页查看实时进度", jumpToSearch = true)
+    }
+
+    fun cancelScan() {
+        indexManager.cancelCurrentScan()
+        emitMessage("已取消当前扫描")
+    }
+
+    fun dismissScanError() {
+        indexManager.clearErrorMessage()
+    }
+
+    fun refreshCrowdedDirs() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _crowdedDirs.value = runCatching { db.getTopCrowdedDirectories(5) }.getOrDefault(emptyList())
+        }
     }
 
     fun refreshDirectory(dirPath: String) {
         indexManager.startDirectoryRefresh(dirPath)
-        _messages.tryEmit("正在刷新目录：$dirPath")
+        emitMessage("正在刷新目录：$dirPath")
     }
 
     fun updateFilterConfig(config: FilterConfig) {
+        val old = settings.value.filterConfig
         settingsRepo.updateFilterConfig(config)
-        _messages.tryEmit("过滤规则已保存，重建索引后全面生效")
+        viewModelScope.launch(Dispatchers.IO) {
+            val pruned = indexManager.pruneByCurrentFilter()
+            _crowdedDirs.value = runCatching { db.getTopCrowdedDirectories(5) }.getOrDefault(emptyList())
+            val msg = when {
+                !old.rootIncludeData && config.rootIncludeData && settings.value.accessMode == AccessMode.ROOT ->
+                    "已允许扫描 /data（体积与耗时将明显增加），请点击「重建全库」纳入索引"
+                pruned > 0 ->
+                    "规则已保存并清理 $pruned 条已过滤项目"
+                else ->
+                    "过滤规则已保存，后续同步生效（扩大范围建议重建一次）"
+            }
+            emitMessage(msg)
+        }
+    }
+
+    fun excludeCrowdedPath(path: String) {
+        val cfg = settings.value.filterConfig
+        val clean = path.trimEnd('/')
+        if (clean.isEmpty() || clean in cfg.customExcludedPaths) return
+        updateFilterConfig(cfg.copy(customExcludedPaths = cfg.customExcludedPaths + clean))
     }
 
     fun setOpenContentHitsInPreview(enabled: Boolean) {
@@ -509,7 +720,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun resetThemeSettings() {
         settingsRepo.resetThemeSettings()
-        _messages.tryEmit("已恢复默认主题与外观设置")
+        emitMessage("已恢复默认主题与外观设置")
     }
 
     fun applyCustomBgUri(uri: Uri) {
@@ -551,10 +762,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             result.fold(
                 onSuccess = { (path, seed) ->
                     settingsRepo.setCustomBgImage(path, seed)
-                    _messages.tryEmit("已应用自定义背景图片")
+                    emitMessage("已应用自定义背景图片")
                 },
                 onFailure = { err ->
-                    _messages.tryEmit("设置背景失败：${err.message ?: "文件不可读"}")
+                    emitMessage("设置背景失败：${err.message ?: "文件不可读"}")
                 }
             )
         }
@@ -570,7 +781,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             settingsRepo.setCustomBgImage("", 0)
-            _messages.tryEmit("已清除自定义背景图片")
+            emitMessage("已清除自定义背景图片")
         }
     }
 
@@ -578,10 +789,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         settingsRepo.setRealtimeMonitorEnabled(enabled)
         if (enabled) {
             runCatching { RealtimeMonitorService.start(app) }
-            _messages.tryEmit("已开启常驻实时监听")
+            emitMessage("已开启常驻实时监听")
         } else {
             runCatching { RealtimeMonitorService.stop(app) }
-            _messages.tryEmit("已关闭常驻实时监听")
+            emitMessage("已关闭常驻实时监听")
         }
     }
 
@@ -650,10 +861,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val res = container.fileOpener.openWithSystemApp(item)
             res.onFailure {
-                _messages.tryEmit(it.message ?: "无法打开文件")
+                emitMessage(it.message ?: "无法打开文件")
                 if (item.isDir) {
                     container.fileOpener.copyToClipboard("目录路径", item.path)
-                    _messages.tryEmit("已复制目录路径：${item.path}")
+                    emitMessage("已复制目录路径：${item.path}")
                 }
             }
         }
@@ -662,14 +873,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun shareItem(item: SearchResultItem) {
         viewModelScope.launch {
             container.fileOpener.shareFile(item).onFailure {
-                _messages.tryEmit(it.message ?: "分享失败")
+                emitMessage(it.message ?: "分享失败")
             }
         }
     }
 
     fun copyText(label: String, text: String) {
         container.fileOpener.copyToClipboard(label, text)
-        _messages.tryEmit("已复制：$text")
+        emitMessage("已复制：$text")
     }
 
     override fun onCleared() {

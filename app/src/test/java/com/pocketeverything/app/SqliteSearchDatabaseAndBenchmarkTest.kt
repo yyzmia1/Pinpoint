@@ -1,11 +1,15 @@
 package com.pocketeverything.app
 
+import com.pocketeverything.app.filter.FilterConfig
+import com.pocketeverything.app.filter.FilterEngine
 import com.pocketeverything.app.search.AccessMode
 import com.pocketeverything.app.search.FileUpsertEntry
 import com.pocketeverything.app.search.QuickScope
 import com.pocketeverything.app.search.SqliteSearchDatabase
 import com.pocketeverything.app.search.Tier2Status
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.file.Files
@@ -357,6 +361,158 @@ class SqliteSearchDatabaseAndBenchmarkTest {
 
             // Corrupt zlib blob must return empty string safely without looping or throwing
             assertEquals("", SqliteSearchDatabase.decompressUtf8(byteArrayOf(1, 2, 3, 4, 5)))
+        }
+    }
+
+    @Test
+    fun `incremental dir tracking crowded stats and filter pruning work cleanly across modes`() {
+        val now = System.currentTimeMillis()
+        SqliteSearchDatabase(":memory:").use { db ->
+            db.upsertFileBatch(
+                listOf(
+                    FileUpsertEntry("/system/bin", "/system", "bin", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/data/data/com.example", "/data/data", "com.example", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/data/adb", "/data", "adb", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/11aa", "/storage/emulated/0", "11aa", "", 0L, now, true, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/11aa/a.txt", "/storage/emulated/0/11aa", "a.txt", "txt", 10L, now, false, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/11aa/b.txt", "/storage/emulated/0/11aa", "b.txt", "txt", 10L, now, false, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/temp_dir", "/storage/emulated/0", "temp_dir", "", 0L, now, true, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/temp_dir/sub.txt", "/storage/emulated/0/temp_dir", "sub.txt", "txt", 10L, now, false, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE)
+                )
+            )
+
+            // Incremental dir query skips /system and /data/data, keeps /storage and optionally /data/adb
+            assertEquals(setOf("/storage/emulated/0/11aa", "/storage/emulated/0/temp_dir"), db.getTrackedMutableDirectories(includeDataAdb = false).keys)
+            assertTrue("/data/adb" in db.getTrackedMutableDirectories(includeDataAdb = true).keys)
+
+            // Top crowded directory should rank 11aa first (2 children)
+            val top = db.getTopCrowdedDirectories(5)
+            assertEquals("/storage/emulated/0/11aa", top.first().path)
+            assertEquals(2, top.first().childCount)
+
+            // pruneDirectChildren on /storage/emulated/0 keeping only 11aa drops temp_dir AND its subtree
+            db.pruneDirectChildren("/storage/emulated/0", setOf("/storage/emulated/0/11aa"))
+            assertEquals(0, db.search("name:sub.txt").items.size)
+            assertEquals(0, db.search("name:temp_dir").items.size)
+
+            // Cross-mode prune (scopeMode = null) clears privileged entries when downgraded to Normal
+            val pruned = db.pruneMissingEntries(
+                setOf("/storage/emulated/0/11aa", "/storage/emulated/0/11aa/a.txt", "/storage/emulated/0/11aa/b.txt"),
+                scopeMode = null
+            )
+            assertEquals(3, pruned)
+            assertEquals(0, db.search("name:adb").items.size)
+        }
+    }
+
+    @Test
+    fun `pruneMatchingFilter removes full subtree while preserving sibling prefix and data local tmp`() {
+        val now = System.currentTimeMillis()
+        SqliteSearchDatabase(":memory:").use { db ->
+            db.upsertFileBatch(
+                listOf(
+                    FileUpsertEntry("/storage/emulated/0/logs", "/storage/emulated/0", "logs", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/logs/nested", "/storage/emulated/0/logs", "nested", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/logs/nested/app.log", "/storage/emulated/0/logs/nested", "app.log", "log", 128L, now, false, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/logs2", "/storage/emulated/0", "logs2", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/logs2/keep.txt", "/storage/emulated/0/logs2", "keep.txt", "txt", 128L, now, false, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/data/local/tmp", "/data/local", "tmp", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/data/local/tmp/debug.txt", "/data/local/tmp", "debug.txt", "txt", 64L, now, false, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/data/local/tmp/cache", "/data/local/tmp", "cache", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/data/local/tmp/cache/trash.bin", "/data/local/tmp/cache", "trash.bin", "bin", 64L, now, false, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE)
+                )
+            )
+            val filter = FilterEngine(
+                FilterConfig(
+                    skipNoiseCaches = true,
+                    rootIncludeData = true,
+                    customExcludedDirNames = listOf("logs")
+                )
+            )
+            val removed = db.pruneMatchingFilter(filter, AccessMode.ROOT)
+            assertEquals(5, removed)
+            assertEquals(0, db.search("name:app.log").items.size)
+            assertEquals(0, db.search("name:nested").items.size)
+            assertEquals(0, db.search("name:trash.bin").items.size)
+            assertEquals(1, db.search("name:keep.txt").items.size)
+            assertEquals(1, db.search("name:debug.txt").items.size)
+        }
+    }
+
+    @Test
+    fun `top crowded directories excludes root and container paths and getTrackedMutableDirectories skips emulated container`() {
+        val now = System.currentTimeMillis()
+        SqliteSearchDatabase(":memory:").use { db ->
+            db.upsertFileBatch(
+                listOf(
+                    FileUpsertEntry("/storage", "/", "storage", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated", "/storage", "emulated", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0", "/storage/emulated", "0", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/10", "/storage/emulated", "10", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/a.txt", "/storage/emulated/0", "a.txt", "txt", 10L, now, false, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/b.txt", "/storage/emulated/0", "b.txt", "txt", 10L, now, false, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/10/c.txt", "/storage/emulated/10", "c.txt", "txt", 10L, now, false, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/Download", "/storage/emulated/0", "Download", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/Download/d.txt", "/storage/emulated/0/Download", "d.txt", "txt", 10L, now, false, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE)
+                )
+            )
+            val tracked = db.getTrackedMutableDirectories(includeDataAdb = false)
+            assertFalse("/storage/emulated" in tracked.keys)
+            assertTrue("/storage/emulated/0/Download" in tracked.keys)
+
+            val top = db.getTopCrowdedDirectories(5)
+            assertEquals(listOf("/storage/emulated/0/Download"), top.map { it.path })
+        }
+    }
+
+    @Test
+    fun `upsertFileBatch cleans stale docs FTS when transitioning from INDEXED to SKIPPED and preserves across mode change`() {
+        val now = System.currentTimeMillis()
+        val path = "/storage/emulated/0/Download/secret.pdf"
+        SqliteSearchDatabase(":memory:").use { db ->
+            db.upsertFileBatch(
+                listOf(
+                    FileUpsertEntry(path, "/storage/emulated/0/Download", "secret.pdf", "pdf", 4096L, now, false, AccessMode.NORMAL, true, Tier2Status.PENDING)
+                )
+            )
+            val id = db.fetchPendingTier2Tasks(5).single().fileId
+            db.saveTier2Result(id, now, Tier2Status.INDEXED, "绝密合同违约金条款")
+            assertEquals(1, db.search("content:违约金").items.size)
+
+            // Same (path, size, mtime), different AccessMode -> INDEXED cache and raw body stay intact
+            db.upsertFileBatch(
+                listOf(
+                    FileUpsertEntry(path, "/storage/emulated/0/Download", "secret.pdf", "pdf", 4096L, now, false, AccessMode.ROOT, true, Tier2Status.PENDING)
+                )
+            )
+            assertEquals(1, db.search("content:违约金").items.size)
+            assertTrue(db.getRawDocumentText(id)?.contains("违约金") == true)
+
+            // Filter/size rule changed -> SKIPPED_FILTER -> stale docs_fts/docs_uni_fts/docs_raw must be purged
+            db.upsertFileBatch(
+                listOf(
+                    FileUpsertEntry(path, "/storage/emulated/0/Download", "secret.pdf", "pdf", 4096L, now, false, AccessMode.ROOT, false, Tier2Status.SKIPPED_FILTER)
+                )
+            )
+            assertEquals(0, db.search("content:违约金").items.size)
+            assertNull(db.getRawDocumentText(id))
+
+            // Re-enabled and re-indexed, then becomes SKIPPED_SIZE
+            db.upsertFileBatch(
+                listOf(
+                    FileUpsertEntry(path, "/storage/emulated/0/Download", "secret.pdf", "pdf", 4096L, now, false, AccessMode.ROOT, true, Tier2Status.PENDING)
+                )
+            )
+            db.saveTier2Result(id, now, Tier2Status.INDEXED, "机密报价明细")
+            assertEquals(1, db.search("content:报价").items.size)
+
+            db.upsertFileBatch(
+                listOf(
+                    FileUpsertEntry(path, "/storage/emulated/0/Download", "secret.pdf", "pdf", 99_000_000L, now + 1000L, false, AccessMode.ROOT, false, Tier2Status.SKIPPED_SIZE)
+                )
+            )
+            assertEquals(0, db.search("content:报价").items.size)
+            assertNull(db.getRawDocumentText(id))
         }
     }
 }

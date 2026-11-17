@@ -20,6 +20,23 @@ class PrivilegedFsBinderImpl(
         excludedDirNames: Array<String>,
         deduplicateMounts: Boolean,
         outputFd: ParcelFileDescriptor
+    ): Int = walkToPipe(roots, excludedPrefixes, excludedDirNames, deduplicateMounts, outputFd, recursive = true)
+
+    override fun listDirectChildrenToPipe(
+        dirs: Array<String>,
+        excludedPrefixes: Array<String>,
+        excludedDirNames: Array<String>,
+        deduplicateMounts: Boolean,
+        outputFd: ParcelFileDescriptor
+    ): Int = walkToPipe(dirs, excludedPrefixes, excludedDirNames, deduplicateMounts, outputFd, recursive = false)
+
+    private fun walkToPipe(
+        roots: Array<String>,
+        excludedPrefixes: Array<String>,
+        excludedDirNames: Array<String>,
+        deduplicateMounts: Boolean,
+        outputFd: ParcelFileDescriptor,
+        recursive: Boolean
     ): Int {
         return outputFd.use { pfd ->
             ParcelFileDescriptor.AutoCloseOutputStream(pfd).use { rawOut ->
@@ -29,7 +46,8 @@ class PrivilegedFsBinderImpl(
                         excludedPrefixes = excludedPrefixes,
                         excludedDirNames = excludedDirNames,
                         deduplicateMounts = deduplicateMounts,
-                        writer = writer
+                        writer = writer,
+                        recursive = recursive
                     )
                 }
             }
@@ -38,6 +56,10 @@ class PrivilegedFsBinderImpl(
 
     override fun statDirectories(dirPaths: Array<String>): LongArray {
         return PrivilegedTreeWalker.statDirectories(dirPaths)
+    }
+
+    override fun statPaths(paths: Array<String>): LongArray {
+        return PrivilegedTreeWalker.statPaths(paths, requireDir = false)
     }
 
     override fun copyFileToFd(

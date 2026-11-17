@@ -36,4 +36,20 @@ interface IPrivilegedFsService {
      * Transaction code 16777115 == FIRST_CALL_TRANSACTION + 16777114 per Shizuku-API spec.
      */
     void destroy() = 16777114;
+
+    /**
+     * Stats files or directories in batch; returns parallel long[] mtimes (-1 if missing/inaccessible).
+     */
+    long[] statPaths(in String[] paths) = 4;
+
+    /**
+     * Lists only direct children of [dirs] (non-recursive) for fast incremental refresh.
+     */
+    int listDirectChildrenToPipe(
+        in String[] dirs,
+        in String[] excludedPrefixes,
+        in String[] excludedDirNames,
+        boolean deduplicateMounts,
+        in ParcelFileDescriptor outputFd
+    ) = 5;
 }

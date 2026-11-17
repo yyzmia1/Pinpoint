@@ -4,9 +4,12 @@ import android.content.Context
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import androidx.work.workDataOf
 import com.pocketeverything.app.PocketEverythingApp
 import java.util.concurrent.TimeUnit
 
@@ -17,12 +20,14 @@ class IncrementalSyncWorker(
 
     override suspend fun doWork(): Result {
         val app = applicationContext as? PocketEverythingApp ?: return Result.success()
-        app.container.indexManager.startQuickHotDirsRefresh().join()
+        val silent = inputData.getBoolean(KEY_SILENT_IF_UNREADY, false)
+        app.container.indexManager.startQuickHotDirsRefresh(silentIfUnavailable = silent).join()
         return Result.success()
     }
 
     companion object {
         private const val WORK_NAME = "pocket_everything_incremental_sync"
+        private const val KEY_SILENT_IF_UNREADY = "silent_if_unready"
 
         fun schedule(context: Context) {
             val constraints = Constraints.Builder()
@@ -34,6 +39,17 @@ class IncrementalSyncWorker(
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 WORK_NAME,
                 ExistingPeriodicWorkPolicy.KEEP,
+                req
+            )
+        }
+
+        fun enqueueBootSync(context: Context) {
+            val req = OneTimeWorkRequestBuilder<IncrementalSyncWorker>()
+                .setInputData(workDataOf(KEY_SILENT_IF_UNREADY to true))
+                .build()
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                "${WORK_NAME}_boot",
+                ExistingWorkPolicy.REPLACE,
                 req
             )
         }

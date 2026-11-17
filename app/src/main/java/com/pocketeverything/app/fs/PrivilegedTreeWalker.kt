@@ -18,7 +18,8 @@ object PrivilegedTreeWalker {
         excludedPrefixes: Array<String>,
         excludedDirNames: Array<String>,
         deduplicateMounts: Boolean,
-        writer: BinaryTreeStreamCodec.Writer
+        writer: BinaryTreeStreamCodec.Writer,
+        recursive: Boolean = true
     ): Int {
         val excludedPrefixSet = excludedPrefixes.map { normalizePrefix(it) }.toHashSet()
         val excludedDirSet = excludedDirNames.map { it.lowercase() }.toHashSet()
@@ -26,10 +27,12 @@ object PrivilegedTreeWalker {
         var count = 0
 
         val stack = ArrayDeque<String>()
+        val rootSet = HashSet<String>(roots.size)
         for (rawRoot in roots) {
             val root = normalizePrefix(rawRoot)
             if (!isExcludedPrefix(root, excludedPrefixSet)) {
                 stack.addLast(root)
+                rootSet.add(root)
             }
         }
 
@@ -45,6 +48,9 @@ object PrivilegedTreeWalker {
             }
 
             val children = runCatching { File(currentPath).list() }.getOrNull() ?: continue
+            if (!recursive || currentPath in rootSet) {
+                writer.writeDirListed(currentPath)
+            }
             for (childName in children) {
                 if (childName == "." || childName == "..") continue
                 val childPath = if (currentPath == "/") "/$childName" else "$currentPath/$childName"
@@ -55,7 +61,7 @@ object PrivilegedTreeWalker {
                 if (OsConstants.S_ISLNK(st.st_mode)) continue
 
                 val isDir = OsConstants.S_ISDIR(st.st_mode)
-                if (isDir && childName.lowercase() in excludedDirSet) continue
+                if (isDir && childName.lowercase() in excludedDirSet && childPath != "/data/local/tmp") continue
 
                 val ext = if (!isDir) {
                     val dot = childName.lastIndexOf('.')
@@ -77,7 +83,7 @@ object PrivilegedTreeWalker {
                 )
                 count++
 
-                if (isDir) {
+                if (isDir && recursive) {
                     stack.addLast(childPath)
                 }
             }
@@ -85,16 +91,18 @@ object PrivilegedTreeWalker {
         return count
     }
 
-    fun statDirectories(dirPaths: Array<String>): LongArray {
-        val result = LongArray(dirPaths.size) { -1L }
-        for (i in dirPaths.indices) {
-            val st = runCatching { Os.lstat(dirPaths[i]) }.getOrNull()
-            if (st != null && OsConstants.S_ISDIR(st.st_mode)) {
+    fun statPaths(paths: Array<String>, requireDir: Boolean = false): LongArray {
+        val result = LongArray(paths.size) { -1L }
+        for (i in paths.indices) {
+            val st = runCatching { Os.lstat(paths[i]) }.getOrNull() ?: continue
+            if (!requireDir || OsConstants.S_ISDIR(st.st_mode)) {
                 result[i] = st.st_mtime * 1000L
             }
         }
         return result
     }
+
+    fun statDirectories(dirPaths: Array<String>): LongArray = statPaths(dirPaths, requireDir = true)
 
     private fun normalizePrefix(p: String): String {
         val trimmed = p.trim()

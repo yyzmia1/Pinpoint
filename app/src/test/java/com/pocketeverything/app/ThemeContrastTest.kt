@@ -9,12 +9,15 @@ import com.pocketeverything.app.ui.components.fileIconAccentColor
 import com.pocketeverything.app.ui.components.fileIconPaperColor
 import com.pocketeverything.app.ui.components.folderPalette
 import com.pocketeverything.app.ui.theme.Amber200
+import com.pocketeverything.app.ui.theme.AppHaptics
 import com.pocketeverything.app.ui.theme.DarkColors
 import com.pocketeverything.app.ui.theme.LightColors
 import com.pocketeverything.app.ui.theme.Slate950
 import com.pocketeverything.app.ui.theme.accentColorScheme
+import com.pocketeverything.app.ui.theme.effectiveCardOpacity
 import com.pocketeverything.app.ui.theme.seedColorScheme
 import com.pocketeverything.app.ui.theme.withPureBlackIfEnabled
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.max
@@ -112,5 +115,22 @@ class ThemeContrastTest {
                 )
             }
         }
+    }
+
+    @Test
+    fun `card opacity unlocks 0 to 100 range and haptics stays silent at explicit zero`() {
+        assertEquals(0f, effectiveCardOpacity(hasCustomBg = true, rawOpacity = 0f), 0.0001f)
+        assertEquals(0.15f, effectiveCardOpacity(hasCustomBg = true, rawOpacity = 0.15f), 0.0001f)
+        assertEquals(0.80f, effectiveCardOpacity(hasCustomBg = true, rawOpacity = 0.80f), 0.0001f)
+        assertEquals(1f, effectiveCardOpacity(hasCustomBg = false, rawOpacity = 0f), 0.0001f)
+
+        val disabledHaptics = AppHaptics(view = null, vibrator = null, strength = 0f)
+        // Explicit 0% slider drag must remain 0f (silent) even with forceEvenIfDisabled = true
+        assertEquals(0f, disabledHaptics.resolveClickStrength(forceEvenIfDisabled = true, overrideStrength = 0f), 0.0001f)
+        disabledHaptics.click(forceEvenIfDisabled = true, overrideStrength = 0f)
+        // Explicit non-zero drag previews at requested strength
+        assertEquals(0.4f, disabledHaptics.resolveClickStrength(forceEvenIfDisabled = true, overrideStrength = 0.4f), 0.0001f)
+        // Toggle-on without override falls back to 20% feedback
+        assertEquals(0.20f, disabledHaptics.resolveClickStrength(forceEvenIfDisabled = true), 0.0001f)
     }
 }

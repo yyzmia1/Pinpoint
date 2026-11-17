@@ -51,28 +51,69 @@ object UpdateChecker {
     fun checkLatestRelease(
         repoSlug: String,
         currentVersion: String,
+        receiveStable: Boolean = true,
+        receiveBeta: Boolean = false,
         timeoutMs: Int = 8000
     ): UpdateCheckState {
+        if (!receiveStable && !receiveBeta) {
+            return UpdateCheckState.UpToDate(currentVersion)
+        }
         return try {
-            val (code, body) = fetchJson("https://api.github.com/repos/$repoSlug/releases/latest", timeoutMs)
-            if (code == 404) {
-                return UpdateCheckState.UpToDate(currentVersion)
-            }
-            if (code !in 200..299) {
-                return UpdateCheckState.Error("GitHub 返回状态码 $code", httpStatusCode = code)
-            }
+            if (!receiveBeta) {
+                val (code, body) = fetchJson("https://api.github.com/repos/$repoSlug/releases/latest", timeoutMs)
+                if (code == 404) {
+                    return UpdateCheckState.UpToDate(currentVersion)
+                }
+                if (code !in 200..299) {
+                    return UpdateCheckState.Error("GitHub 返回状态码 $code", httpStatusCode = code)
+                }
 
-            val info = parseReleaseJson(body)
-                ?: return UpdateCheckState.Error("无法解析版本信息", httpStatusCode = code)
+                val info = parseReleaseJson(body)
+                    ?: return UpdateCheckState.Error("无法解析版本信息", httpStatusCode = code)
 
-            if (isNewerVersion(currentVersion, info.tagName)) {
-                UpdateCheckState.Available(info)
+                if (!info.isPrerelease && isNewerVersion(currentVersion, info.tagName)) {
+                    UpdateCheckState.Available(info)
+                } else {
+                    UpdateCheckState.UpToDate(currentVersion)
+                }
             } else {
-                UpdateCheckState.UpToDate(currentVersion)
+                val (code, body) = fetchJson("https://api.github.com/repos/$repoSlug/releases?per_page=15", timeoutMs)
+                if (code == 404) {
+                    return UpdateCheckState.UpToDate(currentVersion)
+                }
+                if (code !in 200..299) {
+                    return UpdateCheckState.Error("GitHub 返回状态码 $code", httpStatusCode = code)
+                }
+                val list = parseReleaseListJson(body)
+                val match = selectEligibleUpdate(list, currentVersion, receiveStable = receiveStable, receiveBeta = true)
+                if (match != null) {
+                    UpdateCheckState.Available(match)
+                } else {
+                    UpdateCheckState.UpToDate(currentVersion)
+                }
             }
         } catch (t: Throwable) {
             UpdateCheckState.Error(t.message ?: "网络连接失败")
         }
+    }
+
+    fun selectEligibleUpdate(
+        releases: List<ReleaseUpdateInfo>,
+        currentVersion: String,
+        receiveStable: Boolean,
+        receiveBeta: Boolean
+    ): ReleaseUpdateInfo? {
+        if (!receiveStable && !receiveBeta) return null
+        var best: ReleaseUpdateInfo? = null
+        for (rel in releases) {
+            val channelAllowed = (!rel.isPrerelease && receiveStable) || (rel.isPrerelease && receiveBeta)
+            if (!channelAllowed) continue
+            if (!isNewerVersion(currentVersion, rel.tagName)) continue
+            if (best == null || isNewerVersion(best.tagName, rel.tagName)) {
+                best = rel
+            }
+        }
+        return best
     }
 
     fun fetchReleaseHistory(
@@ -158,6 +199,16 @@ object UpdateChecker {
         )
     }
 
+    fun isSameVersion(currentVersion: String, releaseTag: String): Boolean {
+        val cur = parseSemVer(currentVersion)
+        val rem = parseSemVer(releaseTag)
+        val maxLen = maxOf(cur.parts.size, rem.parts.size)
+        for (i in 0 until maxLen) {
+            if (cur.parts.getOrElse(i) { 0 } != rem.parts.getOrElse(i) { 0 }) return false
+        }
+        return cur.preLabel == rem.preLabel && cur.preNum == rem.preNum
+    }
+
     fun isNewerVersion(currentVersion: String, remoteTag: String): Boolean {
         val cur = parseSemVer(currentVersion)
         val rem = parseSemVer(remoteTag)
@@ -167,19 +218,51 @@ object UpdateChecker {
             val r = rem.parts.getOrElse(i) { 0 }
             if (r != c) return r > c
         }
-        // Same numeric base (e.g. current is 1.0.0-2-g1234 vs tag v1.0.0 -> local is ahead or equal)
-        return false
+        // Same numeric base: pre-release (dev/nightly/canary/snapshot < alpha < beta/pre < rc) < stable
+        return when {
+            cur.preLabel != null && rem.preLabel == null -> true
+            cur.preLabel == null && rem.preLabel != null -> false
+            cur.preLabel != null && rem.preLabel != null -> {
+                val curRank = preReleaseRank(cur.preLabel)
+                val remRank = preReleaseRank(rem.preLabel)
+                if (curRank != remRank) remRank > curRank else rem.preNum > cur.preNum
+            }
+            else -> false
+        }
     }
 
-    private data class ParsedVersion(val parts: List<Int>)
+    private fun preReleaseRank(label: String): Int = when (label) {
+        "dev", "nightly", "canary", "snapshot" -> 1
+        "alpha" -> 2
+        "beta", "pre" -> 3
+        "rc" -> 4
+        else -> 0
+    }
+
+    private data class ParsedVersion(
+        val parts: List<Int>,
+        val preLabel: String? = null,
+        val preNum: Long = 0L
+    )
+
+    private val PRE_RELEASE_LABELS = setOf(
+        "dev", "nightly", "canary", "snapshot", "alpha", "beta", "pre", "rc"
+    )
 
     private fun parseSemVer(raw: String): ParsedVersion {
         val clean = raw.trim().removePrefix("v").removePrefix("V")
-        val base = clean.substringBefore('-').substringBefore('+')
+        val withoutBuild = clean.substringBefore('+')
+        val dashIdx = withoutBuild.indexOf('-')
+        val base = if (dashIdx >= 0) withoutBuild.substring(0, dashIdx) else withoutBuild
+        val suffix = if (dashIdx >= 0) withoutBuild.substring(dashIdx + 1).lowercase() else ""
         val nums = base.split('.').map { seg ->
             seg.takeWhile { it.isDigit() }.toIntOrNull() ?: 0
         }
-        return ParsedVersion(nums)
+        // Only treat known pre-release suffixes as pre-release; git-describe (`-3-g12345`) or `-debug` counts as base tag
+        val label = suffix.takeWhile { it.isLetter() }
+        if (label !in PRE_RELEASE_LABELS) return ParsedVersion(nums)
+        val preNum = suffix.dropWhile { !it.isDigit() }.takeWhile { it.isDigit() }.toLongOrNull() ?: 0L
+        return ParsedVersion(nums, label, preNum)
     }
 
     /**

@@ -1,6 +1,8 @@
 package com.pocketeverything.app.fs
 
 import com.pocketeverything.app.search.AccessMode
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
@@ -27,6 +29,7 @@ data class ScannedFileRecord(
 object BinaryTreeStreamCodec {
     private const val MAGIC = 0x504B4556 // "PKEV"
     private const val RECORD_TAG: Byte = 1
+    private const val DIR_LISTED_TAG: Byte = 2
     private const val EOF_TAG: Byte = 0
 
     class Writer(rawOut: OutputStream) : AutoCloseable {
@@ -55,6 +58,11 @@ object BinaryTreeStreamCodec {
             out.writeUTF(ext)
         }
 
+        fun writeDirListed(path: String) {
+            out.writeByte(DIR_LISTED_TAG.toInt())
+            out.writeUTF(path)
+        }
+
         fun finish() {
             out.writeByte(EOF_TAG.toInt())
             out.flush()
@@ -70,6 +78,7 @@ object BinaryTreeStreamCodec {
         rawIn: InputStream,
         accessMode: AccessMode,
         batchSize: Int = 1500,
+        onDirListed: (String) -> Unit = {},
         onBatch: suspend (List<ScannedFileRecord>) -> Unit
     ): Int {
         val inp = DataInputStream(BufferedInputStream(rawIn, 65536))
@@ -83,13 +92,19 @@ object BinaryTreeStreamCodec {
             if (magic != MAGIC) return 0
 
             val batch = ArrayList<ScannedFileRecord>(batchSize)
+            val ctx = currentCoroutineContext()
             while (true) {
+                ctx.ensureActive()
                 val tag = try {
                     stream.readByte()
                 } catch (_: EOFException) {
                     break
                 }
                 if (tag == EOF_TAG) break
+                if (tag == DIR_LISTED_TAG) {
+                    onDirListed(stream.readUTF())
+                    continue
+                }
                 val isDir = stream.readBoolean()
                 val size = stream.readLong()
                 val mtime = stream.readLong()

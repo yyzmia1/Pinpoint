@@ -6,6 +6,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.view.HapticFeedbackConstants
 import android.view.View
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
@@ -24,6 +25,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketeverything.app.data.ThemeAccent
 import kotlin.math.abs
@@ -107,7 +109,20 @@ val ColorScheme.groupedCard: Color
 val LocalHasCustomBg = compositionLocalOf { false }
 val LocalCardOpacity = compositionLocalOf { 1f }
 val LocalHapticsEnabled = compositionLocalOf { true }
-val LocalHapticStrength = compositionLocalOf { 0.25f }
+val LocalHapticStrength = compositionLocalOf { 0.20f }
+
+internal fun effectiveCardOpacity(hasCustomBg: Boolean, rawOpacity: Float): Float =
+    if (hasCustomBg) rawOpacity.coerceIn(0f, 1f) else 1f
+
+@Composable
+fun lowOpacityCardBorder(
+    hasCustomBg: Boolean = LocalHasCustomBg.current,
+    cardAlpha: Float = LocalCardOpacity.current
+): BorderStroke? = if (hasCustomBg && cardAlpha <= 0.20f) {
+    BorderStroke(0.5.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.42f))
+} else {
+    null
+}
 
 /**
  * Lightweight wrapper around Android's native linear-motor Vibrator with continuous 0..1 amplitude scaling.
@@ -123,9 +138,17 @@ class AppHaptics(
         vibrateScaled(overrideStrength, isClick = false)
     }
 
-    fun click(forceEvenIfDisabled: Boolean = false, overrideStrength: Float = strength) {
-        val s = if (forceEvenIfDisabled && overrideStrength <= 0.01f) 0.25f else overrideStrength
+    fun click(forceEvenIfDisabled: Boolean = false, overrideStrength: Float? = null) {
+        val s = resolveClickStrength(forceEvenIfDisabled, overrideStrength)
         vibrateScaled(s, isClick = true)
+    }
+
+    internal fun resolveClickStrength(
+        forceEvenIfDisabled: Boolean = false,
+        overrideStrength: Float? = null
+    ): Float {
+        val raw = overrideStrength ?: if (forceEvenIfDisabled && strength <= 0.01f) 0.20f else strength
+        return raw.coerceIn(0f, 1f)
     }
 
     private fun vibrateScaled(rawStrength: Float, isClick: Boolean) {
@@ -500,7 +523,7 @@ fun PocketEverythingTheme(
     extractColorFromBg: Boolean = false,
     customBgSeedArgb: Int = 0,
     hapticsEnabled: Boolean = true,
-    hapticStrength: Float = 0.25f,
+    hapticStrength: Float = 0.20f,
     content: @Composable () -> Unit
 ) {
     val baseScheme = when {
@@ -520,7 +543,7 @@ fun PocketEverythingTheme(
 
     CompositionLocalProvider(
         LocalHasCustomBg provides hasCustomBg,
-        LocalCardOpacity provides if (hasCustomBg) cardOpacity.coerceIn(0.30f, 1f) else 1f,
+        LocalCardOpacity provides effectiveCardOpacity(hasCustomBg, cardOpacity),
         LocalHapticsEnabled provides (effectiveStrength > 0.01f),
         LocalHapticStrength provides effectiveStrength
     ) {

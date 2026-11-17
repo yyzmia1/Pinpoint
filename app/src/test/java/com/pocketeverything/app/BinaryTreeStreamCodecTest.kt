@@ -48,4 +48,39 @@ class BinaryTreeStreamCodecTest {
         assertEquals(true, collected[0].isDir)
         assertEquals(false, collected[1].isDir)
     }
+
+    @Test
+    fun `streams listed directory markers independently of child file records`() {
+        val pipedIn = PipedInputStream(4096)
+        val pipedOut = PipedOutputStream(pipedIn)
+
+        val writerThread = thread {
+            BinaryTreeStreamCodec.Writer(pipedOut).use { writer ->
+                writer.writeDirListed("/storage/emulated/0/EmptyDir")
+                writer.writeDirListed("/storage/emulated/0/WithFile")
+                writer.writeRecord(
+                    path = "/storage/emulated/0/WithFile/doc.txt",
+                    parentPath = "/storage/emulated/0/WithFile",
+                    name = "doc.txt",
+                    ext = "txt",
+                    size = 42L,
+                    mtime = 1234L,
+                    isDir = false
+                )
+            }
+        }
+
+        val listed = mutableListOf<String>()
+        val records = mutableListOf<ScannedFileRecord>()
+        val count = runBlocking {
+            BinaryTreeStreamCodec.readStream(pipedIn, AccessMode.NORMAL, onDirListed = { listed.add(it) }) {
+                records.addAll(it)
+            }
+        }
+        writerThread.join()
+
+        assertEquals(1, count)
+        assertEquals(listOf("/storage/emulated/0/EmptyDir", "/storage/emulated/0/WithFile"), listed)
+        assertEquals(1, records.size)
+    }
 }

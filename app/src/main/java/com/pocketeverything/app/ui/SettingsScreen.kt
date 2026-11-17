@@ -11,6 +11,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -47,6 +49,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -62,6 +65,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -86,7 +90,10 @@ import com.pocketeverything.app.data.UpdateChecker
 import com.pocketeverything.app.filter.FilterConfig
 import com.pocketeverything.app.fs.ModeAvailability
 import com.pocketeverything.app.indexer.IndexProgressState
+import com.pocketeverything.app.indexer.Tier1Phase
+import com.pocketeverything.app.indexer.Tier2Phase
 import com.pocketeverything.app.search.AccessMode
+import com.pocketeverything.app.search.CrowdedDirStat
 import com.pocketeverything.app.ui.components.BrandMarkIcon
 import com.pocketeverything.app.ui.theme.Amber400
 import com.pocketeverything.app.ui.theme.Emerald400
@@ -95,15 +102,17 @@ import com.pocketeverything.app.ui.theme.LocalHasCustomBg
 import com.pocketeverything.app.ui.theme.Rose400
 import com.pocketeverything.app.ui.theme.groupedBackdrop
 import com.pocketeverything.app.ui.theme.groupedCard
+import com.pocketeverything.app.ui.theme.lowOpacityCardBorder
 import com.pocketeverything.app.ui.theme.rememberAppHaptics
 import kotlin.math.roundToInt
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     settings: AppSettings,
     modeStatuses: Map<AccessMode, ModeAvailability>,
     indexProgress: IndexProgressState,
+    crowdedDirs: List<CrowdedDirStat>,
     updateState: UpdateCheckState,
     onBack: () -> Unit,
     onSelectMode: (AccessMode) -> Unit,
@@ -112,11 +121,16 @@ fun SettingsScreen(
     onOpenShizukuGuide: () -> Unit,
     onRefreshModes: () -> Unit,
     onUpdateFilterConfig: (FilterConfig) -> Unit,
+    onExcludeCrowdedPath: (String) -> Unit,
     onSetShowRecentOnEmpty: (Boolean) -> Unit,
     onSetPreviewPreference: (Boolean) -> Unit,
     onSetRealtimeMonitor: (Boolean) -> Unit,
     onQuickSync: () -> Unit,
     onFullRebuild: () -> Unit,
+    onCancelScan: () -> Unit,
+    onDismissScanError: () -> Unit,
+    onSetReceiveStableUpdates: (Boolean) -> Unit,
+    onSetReceiveBetaUpdates: (Boolean) -> Unit,
     onCheckUpdates: () -> Unit,
     onOpenChangelog: () -> Unit,
     onOpenUrl: (String) -> Unit,
@@ -124,14 +138,63 @@ fun SettingsScreen(
     onReplayOnboarding: () -> Unit
 ) {
     val cfg = settings.filterConfig
-    var skipNoise by remember(cfg) { mutableStateOf(cfg.skipNoiseCaches) }
-    var dedupMounts by remember(cfg) { mutableStateOf(cfg.deduplicateMounts) }
-    var maxTxtMb by remember(cfg) { mutableFloatStateOf((cfg.maxTxtMdBytes / (1024f * 1024f)).coerceIn(1f, 100f)) }
-    var maxDocxMb by remember(cfg) { mutableFloatStateOf((cfg.maxDocxBytes / (1024f * 1024f)).coerceIn(1f, 100f)) }
-    var maxPdfMb by remember(cfg) { mutableFloatStateOf((cfg.maxPdfBytes / (1024f * 1024f)).coerceIn(1f, 150f)) }
-    var customExcludeText by remember(cfg) { mutableStateOf(cfg.customExcludedPaths.joinToString("\n")) }
-    var tier2AllowedText by remember(cfg) { mutableStateOf(cfg.tier2AllowedPrefixes.joinToString("\n")) }
+    var lastAppliedCfg by remember { mutableStateOf(cfg) }
+    var skipNoise by remember { mutableStateOf(cfg.skipNoiseCaches) }
+    var dedupMounts by remember { mutableStateOf(cfg.deduplicateMounts) }
+    var rootIncludeData by remember { mutableStateOf(cfg.rootIncludeData) }
+    var maxTxtMb by remember { mutableFloatStateOf((cfg.maxTxtMdBytes / (1024f * 1024f)).coerceIn(1f, 100f)) }
+    var maxDocxMb by remember { mutableFloatStateOf((cfg.maxDocxBytes / (1024f * 1024f)).coerceIn(1f, 100f)) }
+    var maxPdfMb by remember { mutableFloatStateOf((cfg.maxPdfBytes / (1024f * 1024f)).coerceIn(1f, 150f)) }
+    var customExcludeText by remember { mutableStateOf(cfg.customExcludedPaths.joinToString("\n")) }
+    var customExcludeDirNamesText by remember { mutableStateOf(cfg.customExcludedDirNames.joinToString("\n")) }
+    var tier2AllowedText by remember { mutableStateOf(cfg.tier2AllowedPrefixes.joinToString("\n")) }
+    var expandModes by remember { mutableStateOf(false) }
     var expandAdvancedFilters by remember { mutableStateOf(false) }
+
+    // Sync only fields that changed in saved config without clobbering unsaved text/slider drafts.
+    LaunchedEffect(cfg) {
+        val prev = lastAppliedCfg
+        if (cfg != prev) {
+            if (cfg.skipNoiseCaches != prev.skipNoiseCaches) skipNoise = cfg.skipNoiseCaches
+            if (cfg.deduplicateMounts != prev.deduplicateMounts) dedupMounts = cfg.deduplicateMounts
+            if (cfg.rootIncludeData != prev.rootIncludeData) rootIncludeData = cfg.rootIncludeData
+            if (cfg.maxTxtMdBytes != prev.maxTxtMdBytes) {
+                maxTxtMb = (cfg.maxTxtMdBytes / (1024f * 1024f)).coerceIn(1f, 100f)
+            }
+            if (cfg.maxDocxBytes != prev.maxDocxBytes) {
+                maxDocxMb = (cfg.maxDocxBytes / (1024f * 1024f)).coerceIn(1f, 100f)
+            }
+            if (cfg.maxPdfBytes != prev.maxPdfBytes) {
+                maxPdfMb = (cfg.maxPdfBytes / (1024f * 1024f)).coerceIn(1f, 150f)
+            }
+            if (cfg.customExcludedPaths != prev.customExcludedPaths) {
+                val added = cfg.customExcludedPaths - prev.customExcludedPaths.toSet()
+                if (cfg.customExcludedPaths.isEmpty()) {
+                    customExcludeText = ""
+                } else if (added.isNotEmpty()) {
+                    val existingLines = customExcludeText.lines()
+                        .map { it.trim().trimEnd('/') }
+                        .filter { it.isNotEmpty() }
+                        .toSet()
+                    val toAppend = added.filter { it.trim().trimEnd('/') !in existingLines }
+                    if (toAppend.isNotEmpty()) {
+                        customExcludeText = if (customExcludeText.isBlank()) {
+                            toAppend.joinToString("\n")
+                        } else {
+                            customExcludeText.trimEnd() + "\n" + toAppend.joinToString("\n")
+                        }
+                    }
+                }
+            }
+            if (cfg.customExcludedDirNames != prev.customExcludedDirNames) {
+                customExcludeDirNamesText = cfg.customExcludedDirNames.joinToString("\n")
+            }
+            if (cfg.tier2AllowedPrefixes != prev.tier2AllowedPrefixes) {
+                tier2AllowedText = cfg.tier2AllowedPrefixes.joinToString("\n")
+            }
+            lastAppliedCfg = cfg
+        }
+    }
 
     val notifLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -178,6 +241,7 @@ fun SettingsScreen(
             Surface(
                 shape = RoundedCornerShape(18.dp),
                 color = cardColor,
+                border = lowOpacityCardBorder(hasCustomBg = hasCustomBg, cardAlpha = cardAlpha),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.fillMaxWidth()) {
@@ -262,102 +326,166 @@ fun SettingsScreen(
                             modifier = Modifier.size(18.dp)
                         )
                     }
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)
+                    )
+                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                        ToggleRow(
+                            title = "接收正式版更新",
+                            subtitle = "关闭后不再自动检查或推送正式版更新",
+                            checked = settings.receiveStableUpdates,
+                            onCheckedChange = onSetReceiveStableUpdates
+                        )
+                        SettingsDivider()
+                        ToggleRow(
+                            title = "接收测试版更新",
+                            subtitle = "抢先体验 GitHub Pre-release 预览版本（默认关闭）",
+                            checked = settings.receiveBetaUpdates,
+                            onCheckedChange = onSetReceiveBetaUpdates
+                        )
+                    }
                 }
             }
 
-            // 2. Access Mode & Permissions
+            // 2. Access Mode & Permissions (collapsed by default; shows current active mode only)
             SettingsSection(title = "访问模式与权限", cardColor = cardColor) {
-                AccessMode.entries.forEachIndexed { idx, mode ->
-                    if (idx > 0) SettingsDivider()
-                    val status = modeStatuses[mode]
-                    val selected = settings.accessMode == mode
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onSelectMode(mode) }
-                            .padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(
-                            selected = selected,
-                            onClick = { onSelectMode(mode) }
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(mode.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                            Text(
-                                text = when (mode) {
-                                    AccessMode.NORMAL -> "扫描内部与外置公开存储"
-                                    AccessMode.SHIZUKU -> "免 Root 穿透 /Android/data 与 /obb"
-                                    AccessMode.ROOT -> "根目录 / 全盘扫描与挂载去重"
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        when {
-                            mode == AccessMode.NORMAL && status !is ModeAvailability.Ready -> {
-                                TextButton(
-                                    onClick = onRequestStoragePermission,
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                                ) {
-                                    Text("去授权", style = MaterialTheme.typography.labelMedium)
-                                }
-                            }
-                            mode == AccessMode.SHIZUKU -> {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Surface(
-                                        onClick = onOpenShizukuGuide,
-                                        shape = CircleShape,
-                                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                        contentColor = MaterialTheme.colorScheme.primary
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.padding(start = 8.dp, end = 4.dp, top = 3.dp, bottom = 3.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text("指引", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium)
-                                            Icon(
-                                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                                contentDescription = "Shizuku 指引",
-                                                modifier = Modifier.size(14.dp)
-                                            )
-                                        }
-                                    }
-                                    ModeDotBadge(status)
-                                }
-                            }
-                            else -> ModeDotBadge(status)
-                        }
-                    }
-                }
-
-                SettingsDivider()
+                val activeMode = settings.accessMode
+                val activeStatus = modeStatuses[activeMode]
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onRefreshModes() }
-                        .padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                        .clickable {
+                            haptics.tick()
+                            expandModes = !expandModes
+                            if (expandModes) onRefreshModes()
+                        }
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("重新检测模式与权限状态", style = MaterialTheme.typography.bodyMedium)
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = activeMode.label,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = modeScopeDescription(activeMode, rootIncludeData),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    ModeStatusChip(activeStatus)
+                    Spacer(Modifier.width(6.dp))
                     Icon(
-                        Icons.Default.Refresh,
-                        contentDescription = null,
+                        imageVector = if (expandModes) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = if (expandModes) "收起模式选择" else "切换访问模式",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(20.dp)
                     )
+                }
+
+                AnimatedVisibility(visible = expandModes) {
+                    Column(modifier = Modifier.padding(top = 4.dp)) {
+                        AccessMode.entries.forEach { mode ->
+                            SettingsDivider()
+                            val status = modeStatuses[mode]
+                            val selected = settings.accessMode == mode
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        haptics.tick()
+                                        onSelectMode(mode)
+                                    }
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = selected,
+                                    onClick = {
+                                        haptics.tick()
+                                        onSelectMode(mode)
+                                    }
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(mode.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                                    Text(
+                                        text = modeScopeDescription(mode, rootIncludeData),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                when {
+                                    mode == AccessMode.NORMAL && status is ModeAvailability.NeedsPermission -> {
+                                        TextButton(
+                                            onClick = onRequestStoragePermission,
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                        ) {
+                                            Text("去授权", style = MaterialTheme.typography.labelMedium)
+                                        }
+                                    }
+                                    mode == AccessMode.SHIZUKU -> {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Surface(
+                                                onClick = onOpenShizukuGuide,
+                                                shape = CircleShape,
+                                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                                contentColor = MaterialTheme.colorScheme.primary
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(start = 8.dp, end = 4.dp, top = 3.dp, bottom = 3.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Text("指引", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium)
+                                                    Icon(
+                                                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                                        contentDescription = "Shizuku 指引",
+                                                        modifier = Modifier.size(14.dp)
+                                                    )
+                                                }
+                                            }
+                                            ModeStatusChip(status)
+                                        }
+                                    }
+                                    else -> ModeStatusChip(status)
+                                }
+                            }
+                        }
+
+                        SettingsDivider()
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onRefreshModes() }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("重新检测模式与权限状态", style = MaterialTheme.typography.bodyMedium)
+                            Icon(
+                                Icons.Default.Refresh,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
                 }
             }
 
-            // 3. Index & Sync Management
+            // 3. Index & Sync Management (with live progress, go-home shortcut & explicit errors)
             SettingsSection(title = "索引与同步", cardColor = cardColor) {
                 val stats = indexProgress.stats
+                val tier1Busy = indexProgress.tier1Phase != Tier1Phase.IDLE
+                val tier2Busy = indexProgress.tier2Phase != Tier2Phase.IDLE
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -373,6 +501,73 @@ fun SettingsScreen(
                     MetricColumn(label = "库体积", value = FormatUtils.formatBytes(stats.dbSizeBytes), modifier = Modifier.weight(1f))
                 }
 
+                if (tier1Busy || tier2Busy) {
+                    Spacer(Modifier.height(6.dp))
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(3.dp)
+                            .clip(CircleShape),
+                        trackColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (tier1Busy) {
+                                indexProgress.statusMessage
+                            } else {
+                                "正在后台提取正文 · 已处理 ${indexProgress.tier2ProcessedCount} / 剩余 ${indexProgress.tier2PendingCount}"
+                            },
+                            style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(
+                            onClick = onBack,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) { Text("去首页看进度", style = MaterialTheme.typography.labelSmall) }
+                        if (tier1Busy) {
+                            TextButton(
+                                onClick = onCancelScan,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) { Text("取消", style = MaterialTheme.typography.labelSmall) }
+                        }
+                    }
+                } else if (!indexProgress.errorMessage.isNullOrBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = indexProgress.errorMessage,
+                                style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(
+                                onClick = onDismissScanError,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) { Text("知道了", style = MaterialTheme.typography.labelSmall) }
+                        }
+                    }
+                } else {
+                    Text(
+                        text = "${indexProgress.statusMessage} · 启动与开机将自动对全部用户目录增量同步",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+
                 Spacer(Modifier.height(10.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -380,6 +575,7 @@ fun SettingsScreen(
                 ) {
                     OutlinedButton(
                         onClick = onQuickSync,
+                        enabled = !tier1Busy,
                         modifier = Modifier.weight(1f)
                     ) {
                         Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(17.dp))
@@ -388,11 +584,12 @@ fun SettingsScreen(
                     }
                     Button(
                         onClick = onFullRebuild,
+                        enabled = !tier1Busy,
                         modifier = Modifier.weight(1f)
                     ) {
                         Icon(Icons.Default.DeleteSweep, contentDescription = null, modifier = Modifier.size(17.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("重建全库")
+                        Text(if (tier1Busy) "重建中…" else "重建全库")
                     }
                 }
 
@@ -479,14 +676,30 @@ fun SettingsScreen(
                 )
             }
 
-            // 5. Filtering & Extraction Rules (with Progressive Disclosure for Sliders/Path Lists)
+            // 5. Filtering & Extraction Rules (with Root /data toggle, non-user noise dir exclusion & top crowded dirs)
             SettingsSection(title = "过滤与提取规则", cardColor = cardColor) {
                 ToggleRow(
-                    title = "屏蔽缓存与缩略图目录",
+                    title = "Root 扫描包含 /data 目录",
+                    subtitle = if (settings.accessMode == AccessMode.ROOT) {
+                        "包含 /data 会显著增加索引体积和扫描时间（开启后日常增量只跟进存储与 /data/adb，应用私有 /data/data 需重建）"
+                    } else {
+                        "仅 Root 全盘模式生效（Shizuku 与普通模式无法访问系统 /data 全盘）"
+                    },
+                    checked = rootIncludeData,
+                    enabled = settings.accessMode == AccessMode.ROOT,
+                    onCheckedChange = {
+                        rootIncludeData = it
+                        onUpdateFilterConfig(cfg.copy(rootIncludeData = it))
+                    }
+                )
+                SettingsDivider()
+                ToggleRow(
+                    title = "屏蔽临时文件、预览图与缓存目录",
+                    subtitle = "自动跳过 .thumbnails、previews、temp、webview、回收站等高噪目录（保留 /data/local/tmp）",
                     checked = skipNoise,
                     onCheckedChange = {
                         skipNoise = it
-                        onUpdateFilterConfig(cfg.copy(skipNoiseCaches = it, deduplicateMounts = dedupMounts))
+                        onUpdateFilterConfig(cfg.copy(skipNoiseCaches = it, deduplicateMounts = dedupMounts, rootIncludeData = rootIncludeData))
                     }
                 )
                 SettingsDivider()
@@ -495,7 +708,7 @@ fun SettingsScreen(
                     checked = dedupMounts,
                     onCheckedChange = {
                         dedupMounts = it
-                        onUpdateFilterConfig(cfg.copy(skipNoiseCaches = skipNoise, deduplicateMounts = it))
+                        onUpdateFilterConfig(cfg.copy(skipNoiseCaches = skipNoise, deduplicateMounts = it, rootIncludeData = rootIncludeData))
                     }
                 )
                 SettingsDivider()
@@ -507,9 +720,9 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("正文体积上限与目录黑白名单", style = MaterialTheme.typography.bodyMedium)
+                        Text("目录过滤、大目录快排与正文上限", style = MaterialTheme.typography.bodyMedium)
                         Text(
-                            text = "TXT ${maxTxtMb.roundToInt()}M · DOCX ${maxDocxMb.roundToInt()}M · PDF ${maxPdfMb.roundToInt()}M",
+                            text = "TXT ${cfg.maxTxtMdBytes / (1024L * 1024L)}M · DOCX ${cfg.maxDocxBytes / (1024L * 1024L)}M · PDF ${cfg.maxPdfBytes / (1024L * 1024L)}M · 已自定义 ${cfg.customExcludedPaths.size + cfg.customExcludedDirNames.size} 项",
                             style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -534,6 +747,48 @@ fun SettingsScreen(
 
                         Spacer(Modifier.height(6.dp))
                         OutlinedTextField(
+                            value = customExcludeDirNamesText,
+                            onValueChange = { customExcludeDirNamesText = it },
+                            label = { Text("按文件夹名全局跳过（每行或逗号分隔）") },
+                            placeholder = { Text("preview\nlogs\nbackup") },
+                            minLines = 2,
+                            maxLines = 4,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            FilterConfig.SUGGESTED_CUSTOM_DIR_NAMES.forEach { preset ->
+                                val already = customExcludeDirNamesText
+                                    .split('\n', ',', ';')
+                                    .any { it.trim().equals(preset, ignoreCase = true) }
+                                Surface(
+                                    onClick = {
+                                        if (!already) {
+                                            customExcludeDirNamesText = if (customExcludeDirNamesText.isBlank()) {
+                                                preset
+                                            } else {
+                                                customExcludeDirNamesText.trimEnd() + "\n" + preset
+                                            }
+                                        }
+                                    },
+                                    shape = CircleShape,
+                                    color = if (already) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh
+                                ) {
+                                    Text(
+                                        text = if (already) "✓ $preset" else "+ $preset",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (already) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(10.dp))
+                        OutlinedTextField(
                             value = customExcludeText,
                             onValueChange = { customExcludeText = it },
                             label = { Text("自定义排除目录前缀（每行一条）") },
@@ -542,11 +797,75 @@ fun SettingsScreen(
                             maxLines = 4,
                             modifier = Modifier.fillMaxWidth()
                         )
-                        Spacer(Modifier.height(8.dp))
+
+                        if (crowdedDirs.isNotEmpty()) {
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                text = "库内文件最多目录 Top ${crowdedDirs.size}（可一键排除并清理）",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = cardAlpha),
+                                border = lowOpacityCardBorder(hasCustomBg = hasCustomBg, cardAlpha = cardAlpha),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                                    crowdedDirs.forEachIndexed { idx, stat ->
+                                        if (idx > 0) SettingsDivider()
+                                        val isExcluded = cfg.customExcludedPaths.any { ex ->
+                                            val cleanEx = ex.trimEnd('/')
+                                            stat.path == cleanEx || stat.path.startsWith("$cleanEx/")
+                                        }
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = FormatUtils.shortenPath(stat.path, emptyList()).first,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    maxLines = 2,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                Text(
+                                                    text = "${stat.childCount} 个直属条目",
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            Spacer(Modifier.width(8.dp))
+                                            TextButton(
+                                                enabled = !isExcluded,
+                                                onClick = {
+                                                    val clean = stat.path.trimEnd('/')
+                                                    val existing = customExcludeText.lines()
+                                                        .map { it.trim().trimEnd('/') }
+                                                        .filter { it.isNotEmpty() }
+                                                    if (clean.isNotEmpty() && clean !in existing) {
+                                                        customExcludeText = if (customExcludeText.isBlank()) clean else customExcludeText.trimEnd() + "\n" + clean
+                                                    }
+                                                    onExcludeCrowdedPath(stat.path)
+                                                },
+                                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                            ) {
+                                                Text(if (isExcluded) "已排除" else "排除", style = MaterialTheme.typography.labelSmall)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(10.dp))
                         OutlinedTextField(
                             value = tier2AllowedText,
                             onValueChange = { tier2AllowedText = it },
                             label = { Text("正文解析白名单前缀（每行一条）") },
+                            placeholder = { Text("留空或填 * / / 表示不限路径") },
+                            supportingText = { Text("默认仅解析 /storage 下文档；留空、填 * 或 / 则放开所有非系统路径") },
                             minLines = 2,
                             maxLines = 4,
                             modifier = Modifier.fillMaxWidth()
@@ -559,13 +878,15 @@ fun SettingsScreen(
                         ) {
                             OutlinedButton(
                                 onClick = {
-                                    val def = FilterConfig()
+                                    val def = FilterConfig().recommendedForMode(settings.accessMode, includeData = false)
                                     skipNoise = def.skipNoiseCaches
                                     dedupMounts = def.deduplicateMounts
+                                    rootIncludeData = def.rootIncludeData
                                     maxTxtMb = 10f
                                     maxDocxMb = 30f
                                     maxPdfMb = 50f
                                     customExcludeText = ""
+                                    customExcludeDirNamesText = ""
                                     tier2AllowedText = def.tier2AllowedPrefixes.joinToString("\n")
                                     onUpdateFilterConfig(def)
                                 },
@@ -576,10 +897,13 @@ fun SettingsScreen(
                                     val newConfig = cfg.copy(
                                         skipNoiseCaches = skipNoise,
                                         deduplicateMounts = dedupMounts,
+                                        rootIncludeData = rootIncludeData,
                                         maxTxtMdBytes = maxTxtMb.roundToInt() * 1024L * 1024L,
                                         maxDocxBytes = maxDocxMb.roundToInt() * 1024L * 1024L,
                                         maxPdfBytes = maxPdfMb.roundToInt() * 1024L * 1024L,
                                         customExcludedPaths = customExcludeText.lines().map { it.trim() }.filter { it.isNotEmpty() },
+                                        customExcludedDirNames = customExcludeDirNamesText.split('\n', ',', ';')
+                                            .map { it.trim() }.filter { it.isNotEmpty() },
                                         tier2AllowedPrefixes = tier2AllowedText.lines().map { it.trim() }.filter { it.isNotEmpty() }
                                     )
                                     onUpdateFilterConfig(newConfig)
@@ -651,6 +975,7 @@ fun SettingsScreen(
 @Composable
 fun UpdateAvailableDialog(
     info: ReleaseUpdateInfo,
+    includeBetaUpdates: Boolean = true,
     onDownloadApk: () -> Unit,
     onOpenBrowser: () -> Unit,
     onIgnoreVersion: () -> Unit,
@@ -669,19 +994,29 @@ fun UpdateAvailableDialog(
         )
     }
 
+    val canOfferApk = info.apkDownloadUrl != null && (!info.isPrerelease || includeBetaUpdates)
+
     AlertDialog(
         onDismissRequest = onDismissLater,
         title = {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Text(
                     text = "发现新版本 ${info.tagName}",
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f)
                 )
+                if (info.isPrerelease) {
+                    ChangelogBadge(
+                        text = "测试版",
+                        bg = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        fg = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 if (info.apkSizeBytes > 0L) {
                     Surface(
                         shape = CircleShape,
@@ -773,13 +1108,17 @@ fun UpdateAvailableDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    if (ignoreChecked) onIgnoreVersion() else onDownloadApk()
+                    when {
+                        ignoreChecked -> onIgnoreVersion()
+                        canOfferApk -> onDownloadApk()
+                        else -> onOpenBrowser()
+                    }
                 }
             ) {
                 Text(
                     when {
                         ignoreChecked -> "确认忽略"
-                        info.apkDownloadUrl != null -> "立即更新"
+                        canOfferApk -> "立即更新"
                         else -> "前往下载"
                     }
                 )
@@ -796,6 +1135,8 @@ fun ChangelogSheet(
     currentVersionCode: Int,
     buildDate: String,
     gitHash: String,
+    receiveStableUpdates: Boolean = true,
+    receiveBetaUpdates: Boolean = false,
     onRefresh: () -> Unit,
     onDownloadApk: (ReleaseUpdateInfo) -> Unit,
     onOpenUrl: (String) -> Unit,
@@ -904,11 +1245,11 @@ fun ChangelogSheet(
                             contentPadding = PaddingValues(bottom = 24.dp)
                         ) {
                             items(list, key = { it.tagName }) { rel ->
-                                val cleanRel = rel.tagName.trim().removePrefix("v").removePrefix("V")
-                                val cleanCur = currentVersionName.trim().removePrefix("v").removePrefix("V")
-                                    .substringBefore('-').substringBefore('+')
-                                val isCurrent = cleanRel == cleanCur
+                                val isCurrent = UpdateChecker.isSameVersion(currentVersionName, rel.tagName)
                                 val isNewer = UpdateChecker.isNewerVersion(currentVersionName, rel.tagName)
+                                val channelAllowed = (!rel.isPrerelease && receiveStableUpdates) ||
+                                    (rel.isPrerelease && receiveBetaUpdates)
+                                val canUpgrade = isNewer && channelAllowed
                                 val notes = remember(rel.releaseNotes, headingColor, codeBg, codeFg) {
                                     FormatUtils.renderMarkdown(
                                         markdown = rel.releaseNotes.ifBlank { "常规版本更新与问题修复。" },
@@ -932,7 +1273,10 @@ fun ChangelogSheet(
                                         modifier = Modifier.padding(14.dp),
                                         verticalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
                                             Text(
                                                 text = rel.tagName,
                                                 style = MaterialTheme.typography.titleMedium,
@@ -945,12 +1289,13 @@ fun ChangelogSheet(
                                                     style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
-                                                Spacer(Modifier.width(6.dp))
+                                            }
+                                            if (rel.isPrerelease) {
+                                                ChangelogBadge("测试版", MaterialTheme.colorScheme.surfaceContainerHigh, MaterialTheme.colorScheme.onSurfaceVariant)
                                             }
                                             when {
                                                 isCurrent -> ChangelogBadge("当前版本", MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.onPrimaryContainer)
-                                                isNewer -> ChangelogBadge("可升级", MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.onSecondaryContainer)
-                                                rel.isPrerelease -> ChangelogBadge("测试版", MaterialTheme.colorScheme.surfaceContainerHigh, MaterialTheme.colorScheme.onSurfaceVariant)
+                                                canUpgrade -> ChangelogBadge("可升级", MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.onSecondaryContainer)
                                             }
                                         }
                                         Text(
@@ -967,7 +1312,7 @@ fun ChangelogSheet(
                                             ) {
                                                 Text("Release 页面", style = MaterialTheme.typography.labelMedium)
                                             }
-                                            if (isNewer && rel.apkDownloadUrl != null) {
+                                            if (canUpgrade && rel.apkDownloadUrl != null) {
                                                 Spacer(Modifier.width(6.dp))
                                                 FilledTonalButton(
                                                     onClick = { onDownloadApk(rel) },
@@ -1083,6 +1428,7 @@ private fun SettingsSection(
         Surface(
             shape = RoundedCornerShape(16.dp),
             color = cardColor,
+            border = lowOpacityCardBorder(hasCustomBg = hasCustomBg),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
@@ -1120,23 +1466,40 @@ private fun MetricColumn(
 private fun ToggleRow(
     title: String,
     checked: Boolean,
+    subtitle: String? = null,
+    enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit
 ) {
     val haptics = rememberAppHaptics()
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable {
+            .clickable(enabled = enabled) {
                 haptics.click()
                 onCheckedChange(!checked)
             }
-            .padding(vertical = 2.dp),
+            .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(title, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+            if (!subtitle.isNullOrBlank()) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (enabled) 0.85f else 0.55f),
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+        }
         Spacer(Modifier.width(12.dp))
         ThumbSwitch(
             checked = checked,
+            enabled = enabled,
             onCheckedChange = {
                 haptics.click()
                 onCheckedChange(it)
@@ -1145,22 +1508,166 @@ private fun ToggleRow(
     }
 }
 
-@Composable
-private fun ModeDotBadge(status: ModeAvailability?) {
-    val (label, color) = when (status) {
-        is ModeAvailability.Ready -> "可用" to Emerald400
-        is ModeAvailability.NeedsPermission -> "需授权" to Amber400
-        is ModeAvailability.Unavailable -> "未就绪" to Rose400
-        null -> "检测中" to Color.Gray
+private fun modeScopeDescription(mode: AccessMode, rootIncludeData: Boolean): String = when (mode) {
+    AccessMode.NORMAL -> "仅扫描公开存储 /sdcard（不含 Android/data 与 /obb）"
+    AccessMode.SHIZUKU -> "扫描存储目录并穿透 /Android/data 与 /obb（不扫系统 /data）"
+    AccessMode.ROOT -> if (rootIncludeData) {
+        "扫描根目录 /（已包含 /data；日常增量仅盯存储与 /data/adb）"
+    } else {
+        "扫描根目录 /（默认跳过 /data 防体积暴涨，可在下方按需开启）"
     }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            modifier = Modifier
-                .size(7.dp)
-                .clip(CircleShape)
-                .background(color)
+}
+
+@Composable
+fun ModeSwitchConfirmDialog(
+    pending: PendingModeSwitch,
+    onToggleIncludeData: (Boolean) -> Unit,
+    onToggleSyncRules: (Boolean) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "切换至 ${pending.targetMode.label}",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = when (pending.targetMode) {
+                        AccessMode.NORMAL -> "仅扫描公开存储 /sdcard（不含 Android/data 与 /obb）。跨模式切换后将自动全盘重建索引（未变更文件保留正文缓存），之后日常和开机自动增量同步。"
+                        AccessMode.SHIZUKU -> "通过 Shizuku 扫描存储全区并穿透 /Android/data 与 /obb（无法访问系统 /data）。切换后将自动全盘重建索引，之后日常和开机自动增量同步。"
+                        AccessMode.ROOT -> "通过 Root 从根目录 / 扫描系统与存储目录。切换后将自动全盘重建索引（未变更文件保留正文缓存），之后日常和开机自动增量同步。"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                if (pending.targetMode == AccessMode.ROOT) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onToggleIncludeData(!pending.includeDataForRoot) }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Checkbox(
+                                checked = pending.includeDataForRoot,
+                                onCheckedChange = null,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "扫描包含 /data 目录（默认不勾选）",
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                                Text(
+                                    text = "包含 /data 会显著增加索引体积和扫描时间（内含海量应用私有数据与缓存；开启后日常增量仅跟踪存储与 /data/adb，/data/data 需手动重建）。",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onToggleSyncRules(!pending.syncRulesToPreset) }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Checkbox(
+                            checked = pending.syncRulesToPreset,
+                            onCheckedChange = null,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (pending.hasCustomRules) {
+                                    "同步重置下方过滤与正文规则为当前模式推荐值"
+                                } else {
+                                    "同步使用「${pending.targetMode.label}」推荐过滤与白名单规则"
+                                },
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                            Text(
+                                text = if (pending.syncRulesToPreset) {
+                                    "将恢复默认目录排除项与正文白名单（保留文件体积上限）"
+                                } else {
+                                    "保留你当前在「过滤与提取规则」中已配置的规则"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onConfirm) {
+                Text("切换并重建")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
+}
+
+@Composable
+private fun ModeStatusChip(status: ModeAvailability?) {
+    val (bg, fg, label) = when (status) {
+        is ModeAvailability.Ready -> Triple(
+            Emerald400.copy(alpha = 0.14f),
+            Emerald400,
+            "可用"
         )
-        Spacer(Modifier.width(5.dp))
-        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        is ModeAvailability.NeedsPermission -> Triple(
+            Amber400.copy(alpha = 0.14f),
+            Amber400,
+            "需授权"
+        )
+        is ModeAvailability.Unavailable -> Triple(
+            MaterialTheme.colorScheme.surfaceContainerHighest,
+            MaterialTheme.colorScheme.onSurfaceVariant,
+            "未就绪"
+        )
+        null -> Triple(
+            MaterialTheme.colorScheme.surfaceContainerHighest,
+            MaterialTheme.colorScheme.onSurfaceVariant,
+            "检测中"
+        )
+    }
+    Surface(shape = CircleShape, color = bg) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Medium,
+            color = fg,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+        )
     }
 }

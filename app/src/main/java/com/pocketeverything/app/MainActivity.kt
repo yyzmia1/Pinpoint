@@ -12,6 +12,7 @@ import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.core.content.ContextCompat
@@ -30,8 +31,10 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
@@ -53,6 +56,7 @@ import com.pocketeverything.app.search.AccessMode
 import com.pocketeverything.app.ui.ChangelogSheet
 import com.pocketeverything.app.ui.FileDetailDialog
 import com.pocketeverything.app.ui.MainViewModel
+import com.pocketeverything.app.ui.ModeSwitchConfirmDialog
 import com.pocketeverything.app.ui.OnboardingTargets
 import com.pocketeverything.app.ui.ReaderPreviewSheet
 import com.pocketeverything.app.ui.SearchScreen
@@ -77,17 +81,24 @@ class MainActivity : ComponentActivity() {
     private val legacyStorageLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        viewModel.refreshModeStatuses()
-        if (granted) {
-            viewModel.triggerFullRebuild(clearFirst = false)
-        }
+        onStoragePermissionResult(granted)
     }
 
     private val allFilesLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) {
+        val granted = Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
+        onStoragePermissionResult(granted)
+    }
+
+    private fun onStoragePermissionResult(granted: Boolean) {
         viewModel.refreshModeStatuses()
-        viewModel.triggerFullRebuild(clearFirst = false)
+        if (!granted) return
+        if (viewModel.settings.value.accessMode == AccessMode.NORMAL) {
+            viewModel.triggerFullRebuild(clearFirst = false)
+        } else {
+            viewModel.notifyMessage("已授予存储访问权限")
+        }
     }
 
     private val apkDownloadReceiver = object : BroadcastReceiver() {
@@ -105,6 +116,10 @@ class MainActivity : ComponentActivity() {
         val app = application as PocketEverythingApp
         if (app.container.settingsRepository.settings.value.realtimeMonitorEnabled) {
             runCatching { RealtimeMonitorService.start(this) }
+        }
+        val pendingDownloadId = viewModel.activeDownloadId
+        if (pendingDownloadId > 0L) {
+            handleDownloadCompleted(pendingDownloadId)
         }
     }
 
@@ -185,6 +200,8 @@ class MainActivity : ComponentActivity() {
                 val modeStatuses by viewModel.modeStatuses.collectAsState()
                 val shizukuStatus by viewModel.shizukuLiveStatus.collectAsState()
                 val indexProgress by viewModel.indexProgress.collectAsState()
+                val crowdedDirs by viewModel.crowdedDirs.collectAsState()
+                val pendingModeSwitch by viewModel.pendingModeSwitch.collectAsState()
                 val updateState by viewModel.updateState.collectAsState()
                 val updateDialogInfo by viewModel.updateDialogInfo.collectAsState()
                 val showChangelog by viewModel.showChangelog.collectAsState()
@@ -208,8 +225,15 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(Unit) {
-                    viewModel.messages.collect { msg ->
-                        snackbarHostState.showSnackbar(msg)
+                    viewModel.messages.collect { notice ->
+                        val res = snackbarHostState.showSnackbar(
+                            message = notice.text,
+                            actionLabel = if (notice.jumpToSearch && currentPage != AppPage.SEARCH) "去首页" else null,
+                            duration = SnackbarDuration.Short
+                        )
+                        if (res == SnackbarResult.ActionPerformed) {
+                            currentPage = AppPage.SEARCH
+                        }
                     }
                 }
 
@@ -237,7 +261,7 @@ class MainActivity : ComponentActivity() {
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .background(Color.Black.copy(alpha = settings.customBgDim.coerceIn(0f, 0.85f)))
+                                    .background(Color.Black.copy(alpha = settings.customBgDim.coerceIn(0f, 0.80f)))
                             )
                         }
                     }
@@ -267,13 +291,17 @@ class MainActivity : ComponentActivity() {
                                     previousPage = AppPage.SEARCH
                                     currentPage = AppPage.SHIZUKU_GUIDE
                                 },
+                                onRefreshModes = { viewModel.refreshModeStatuses(probeRoot = true) },
+                                onRequestStoragePermission = { requestAllFilesPermission() },
                                 onRequestPermissionForCurrentMode = {
                                     when (settings.accessMode) {
                                         AccessMode.NORMAL -> requestAllFilesPermission()
                                         AccessMode.SHIZUKU -> viewModel.requestShizukuPermission()
-                                        AccessMode.ROOT -> viewModel.switchMode(AccessMode.ROOT)
+                                        AccessMode.ROOT -> viewModel.retryCurrentModeAndScan()
                                     }
                                 },
+                                onCancelScan = { viewModel.cancelScan() },
+                                onDismissScanError = { viewModel.dismissScanError() },
                                 onTargetsMeasured = { onboardingTargets = it }
                             )
                         }
@@ -282,6 +310,7 @@ class MainActivity : ComponentActivity() {
                                 settings = settings,
                                 modeStatuses = modeStatuses,
                                 indexProgress = indexProgress,
+                                crowdedDirs = crowdedDirs,
                                 updateState = updateState,
                                 onBack = { currentPage = AppPage.SEARCH },
                                 onSelectMode = { viewModel.switchMode(it) },
@@ -291,13 +320,18 @@ class MainActivity : ComponentActivity() {
                                     previousPage = AppPage.SETTINGS
                                     currentPage = AppPage.SHIZUKU_GUIDE
                                 },
-                                onRefreshModes = { viewModel.refreshModeStatuses() },
+                                onRefreshModes = { viewModel.refreshModeStatuses(probeRoot = true) },
                                 onUpdateFilterConfig = { viewModel.updateFilterConfig(it) },
+                                onExcludeCrowdedPath = { viewModel.excludeCrowdedPath(it) },
                                 onSetShowRecentOnEmpty = { viewModel.setShowRecentOnEmptyQuery(it) },
                                 onSetPreviewPreference = { viewModel.setOpenContentHitsInPreview(it) },
                                 onSetRealtimeMonitor = { viewModel.setRealtimeMonitorEnabled(it) },
                                 onQuickSync = { viewModel.triggerQuickSync() },
-                                onFullRebuild = { viewModel.triggerFullRebuild(clearFirst = true) },
+                                onFullRebuild = { viewModel.triggerFullRebuild(clearFirst = false) },
+                                onCancelScan = { viewModel.cancelScan() },
+                                onDismissScanError = { viewModel.dismissScanError() },
+                                onSetReceiveStableUpdates = { viewModel.setReceiveStableUpdates(it) },
+                                onSetReceiveBetaUpdates = { viewModel.setReceiveBetaUpdates(it) },
                                 onCheckUpdates = { viewModel.checkForUpdates(silent = false) },
                                 onOpenChangelog = { viewModel.openChangelog() },
                                 onOpenUrl = { viewModel.openUrl(it) },
@@ -391,20 +425,23 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
-                updateDialogInfo?.let { info ->
-                    UpdateAvailableDialog(
-                        info = info,
-                        onDownloadApk = {
-                            viewModel.dismissUpdateDialog()
-                            viewModel.downloadUpdateApk(info)
-                        },
-                        onOpenBrowser = {
-                            viewModel.dismissUpdateDialog()
-                            viewModel.openUrl(info.releaseUrl)
-                        },
-                        onIgnoreVersion = { viewModel.ignoreUpdateVersion(info.tagName) },
-                        onDismissLater = { viewModel.dismissUpdateDialog() }
-                    )
+                if (settings.hasSeenOnboarding) {
+                    updateDialogInfo?.let { info ->
+                        UpdateAvailableDialog(
+                            info = info,
+                            includeBetaUpdates = settings.receiveBetaUpdates,
+                            onDownloadApk = {
+                                viewModel.dismissUpdateDialog()
+                                viewModel.downloadUpdateApk(info)
+                            },
+                            onOpenBrowser = {
+                                viewModel.dismissUpdateDialog()
+                                viewModel.openUrl(info.releaseUrl)
+                            },
+                            onIgnoreVersion = { viewModel.ignoreUpdateVersion(info.tagName) },
+                            onDismissLater = { viewModel.dismissUpdateDialog() }
+                        )
+                    }
                 }
 
                 if (showChangelog) {
@@ -414,10 +451,22 @@ class MainActivity : ComponentActivity() {
                         currentVersionCode = BuildConfig.VERSION_CODE,
                         buildDate = BuildConfig.BUILD_DATE,
                         gitHash = BuildConfig.GIT_HASH,
+                        receiveStableUpdates = settings.receiveStableUpdates,
+                        receiveBetaUpdates = settings.receiveBetaUpdates,
                         onRefresh = { viewModel.refreshChangelog() },
                         onDownloadApk = { info -> viewModel.downloadUpdateApk(info) },
                         onOpenUrl = { viewModel.openUrl(it) },
                         onDismiss = { viewModel.closeChangelog() }
+                    )
+                }
+
+                pendingModeSwitch?.let { pending ->
+                    ModeSwitchConfirmDialog(
+                        pending = pending,
+                        onToggleIncludeData = { viewModel.updatePendingModeSwitch(includeDataForRoot = it) },
+                        onToggleSyncRules = { viewModel.updatePendingModeSwitch(syncRulesToPreset = it) },
+                        onConfirm = { viewModel.confirmPendingModeSwitch() },
+                        onDismiss = { viewModel.dismissPendingModeSwitch() }
                     )
                 }
             }
@@ -430,15 +479,19 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleDownloadCompleted(downloadId: Long) {
-        if (isFinishing || isDestroyed) return
+        if (isFinishing || isDestroyed || viewModel.activeDownloadId != downloadId) return
         val dm = getSystemService(DownloadManager::class.java) ?: return
         val query = DownloadManager.Query().setFilterById(downloadId)
         dm.query(query)?.use { cursor ->
-            if (!cursor.moveToFirst()) return
+            if (!cursor.moveToFirst()) {
+                viewModel.clearActiveDownloadId()
+                return
+            }
             val statusCol = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
             if (statusCol < 0) return
             when (cursor.getInt(statusCol)) {
                 DownloadManager.STATUS_SUCCESSFUL -> {
+                    viewModel.clearActiveDownloadId()
                     val uri = dm.getUriForDownloadedFile(downloadId)
                     if (uri == null) {
                         viewModel.notifyMessage("安装包已下载，请从系统“下载”应用打开安装")
@@ -455,6 +508,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 DownloadManager.STATUS_FAILED -> {
+                    viewModel.clearActiveDownloadId()
                     viewModel.notifyMessage("安装包下载失败，建议点击“浏览器打开”手动下载")
                 }
             }

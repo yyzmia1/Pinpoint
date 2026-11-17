@@ -106,4 +106,66 @@ class UpdateCheckerTest {
         assertEquals("2026-11-16", list[1].publishedDate)
         assertEquals(10485760L, list[1].apkSizeBytes)
     }
+
+    @Test
+    fun `respects stable and beta channel switches and compares prerelease versions`() {
+        val releases = UpdateChecker.parseReleaseListJson(
+            """
+            [
+              {
+                "tag_name": "v1.4.0-beta2",
+                "prerelease": true,
+                "published_at": "2026-11-18T00:00:00Z",
+                "html_url": "https://example.com/beta2",
+                "body": "Beta 2",
+                "assets": []
+              },
+              {
+                "tag_name": "v1.3.5",
+                "prerelease": false,
+                "published_at": "2026-11-17T12:00:00Z",
+                "html_url": "https://example.com/stable",
+                "body": "Stable",
+                "assets": []
+              }
+            ]
+            """.trimIndent()
+        )
+
+        // Default: stable ON, beta OFF -> picks v1.3.5
+        assertEquals("v1.3.5", UpdateChecker.selectEligibleUpdate(releases, "1.3.3", receiveStable = true, receiveBeta = false)?.tagName)
+        // Both closed -> pushes nothing
+        assertEquals(null, UpdateChecker.selectEligibleUpdate(releases, "1.3.3", receiveStable = false, receiveBeta = false))
+        // Stable OFF, beta ON -> ignores v1.3.5, picks v1.4.0-beta2
+        assertEquals("v1.4.0-beta2", UpdateChecker.selectEligibleUpdate(releases, "1.3.3", receiveStable = false, receiveBeta = true)?.tagName)
+        // Both ON -> picks newer v1.4.0-beta2
+        assertEquals("v1.4.0-beta2", UpdateChecker.selectEligibleUpdate(releases, "1.3.3", receiveStable = true, receiveBeta = true)?.tagName)
+
+        // Pre-release SemVer ordering
+        assertTrue(UpdateChecker.isNewerVersion("1.4.0-beta1", "v1.4.0-beta2"))
+        assertTrue(UpdateChecker.isNewerVersion("1.4.0-beta2", "v1.4.0-rc1"))
+        assertTrue(UpdateChecker.isNewerVersion("1.4.0-rc1", "v1.4.0"))
+        assertFalse(UpdateChecker.isNewerVersion("1.4.0", "v1.4.0-rc1"))
+    }
+
+    @Test
+    fun `ranks dev canary nightly snapshot below alpha below beta below rc and checks exact version identity`() {
+        assertTrue(UpdateChecker.isNewerVersion("1.4.0-nightly.1", "v1.4.0-alpha1"))
+        assertTrue(UpdateChecker.isNewerVersion("1.4.0-canary", "v1.4.0-alpha1"))
+        assertTrue(UpdateChecker.isNewerVersion("1.4.0-dev.1", "v1.4.0-alpha1"))
+        assertTrue(UpdateChecker.isNewerVersion("1.4.0-snapshot", "v1.4.0-beta1"))
+        assertTrue(UpdateChecker.isNewerVersion("1.4.0-alpha2", "v1.4.0-beta1"))
+        assertTrue(UpdateChecker.isNewerVersion("1.4.0-beta2", "v1.4.0-rc1"))
+        assertFalse(UpdateChecker.isNewerVersion("1.4.0-beta1", "v1.4.0-nightly"))
+        assertFalse(UpdateChecker.isNewerVersion("1.4.0-alpha1", "v1.4.0-dev"))
+        assertTrue(UpdateChecker.isNewerVersion("1.4.0-nightly.20261117", "v1.4.0-nightly.20261118"))
+
+        // Exact identity must NOT treat 1.4.0-beta1 as 1.4.0
+        assertFalse(UpdateChecker.isSameVersion("1.4.0-beta1", "v1.4.0"))
+        assertTrue(UpdateChecker.isSameVersion("1.4.0-beta1", "v1.4.0-beta1"))
+        assertTrue(UpdateChecker.isSameVersion("1.4.0-beta1-debug", "v1.4.0-beta1"))
+        assertTrue(UpdateChecker.isSameVersion("1.4.0-debug", "v1.4.0"))
+        assertTrue(UpdateChecker.isSameVersion("1.4.0-3-g1234567", "v1.4.0"))
+        assertTrue(UpdateChecker.isSameVersion("1.4.0-alpha.1+build9", "v1.4.0-alpha1"))
+    }
 }
