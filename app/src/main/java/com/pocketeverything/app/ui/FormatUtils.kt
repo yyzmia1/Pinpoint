@@ -124,20 +124,33 @@ object FormatUtils {
         codeBg: Color = Color(0x22888888),
         codeFg: Color = Color.Unspecified
     ): AnnotatedString {
-        if (markdown.isBlank()) return AnnotatedString("")
-        val lines = markdown.replace("\r\n", "\n").trim().split('\n')
+        val cleaned = markdown.replace("\uFEFF", "").replace("\r\n", "\n").trim()
+        if (cleaned.isBlank()) return AnnotatedString("")
+        val rawLines = cleaned.split('\n')
+        val lines = rawLines.filter { line ->
+            val t = line.trim()
+            t != "---" && t != "***"
+        }
         return buildAnnotatedString {
-            lines.forEachIndexed { idx, rawLine ->
-                if (idx > 0) append('\n')
-                val trimmed = rawLine.trimStart()
+            var firstEmitted = true
+            lines.forEach { rawLine ->
+                val trimmed = rawLine.replace("\uFEFF", "").trimStart()
+                if (trimmed.isEmpty() && firstEmitted) return@forEach
+                if (!firstEmitted) append('\n')
+                firstEmitted = false
+
                 val indentLevel = ((rawLine.length - trimmed.length) / 2).coerceIn(0, 3)
+                val hashCount = trimmed.takeWhile { it == '#' }.length
                 when {
-                    trimmed.startsWith("### ") || trimmed.startsWith("## ") || trimmed.startsWith("# ") -> {
-                        val content = trimmed.dropWhile { it == '#' }.trimStart()
+                    hashCount in 1..6 && (trimmed.length == hashCount || trimmed[hashCount] == ' ') -> {
+                        val content = trimmed.drop(hashCount).trimStart()
                         withStyle(
                             SpanStyle(
                                 fontWeight = FontWeight.SemiBold,
-                                fontSize = if (trimmed.startsWith("### ")) 14.sp else 15.sp,
+                                fontSize = when (hashCount) {
+                                    1, 2 -> 14.5.sp
+                                    else -> 13.5.sp
+                                },
                                 color = headingColor
                             )
                         ) {

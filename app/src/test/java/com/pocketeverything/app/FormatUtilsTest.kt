@@ -41,15 +41,18 @@ class FormatUtilsTest {
 
     @Test
     fun `renders release note markdown headings bullets bold and inline code`() {
-        val md = """
-            ### Pinpoint v1.2.6 更新说明
+        val md = "\uFEFF" + """
+            ## Pinpoint v1.3.1
+            #### 核心升级
             * **修复同步崩溃**：优化 `TwoTierIndexManager` 与 [说明](https://example.com)
             - 支持 **Markdown** 渲染
         """.trimIndent()
         val rendered = FormatUtils.renderMarkdown(md)
         val plain = rendered.text
-        assertTrue(plain.contains("Pinpoint v1.2.6 更新说明"))
-        assertTrue(!plain.contains("###"))
+        assertTrue(plain.contains("Pinpoint v1.3.1"))
+        assertTrue(plain.contains("核心升级"))
+        assertTrue(!plain.contains("#"))
+        assertTrue(!plain.contains("\uFEFF"))
         assertTrue(!plain.contains("**"))
         assertTrue(!plain.contains("`"))
         assertTrue(plain.contains("• 修复同步崩溃：优化 TwoTierIndexManager 与 说明"))

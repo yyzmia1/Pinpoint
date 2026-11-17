@@ -357,7 +357,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun ignoreUpdateVersion(tagName: String) {
         settingsRepo.setIgnoredUpdateTag(tagName)
         _updateDialogInfo.value = null
-        _messages.tryEmit("已忽略 $tagName 的自动弹窗提醒")
+        _messages.tryEmit("已忽略 $tagName，后续不再自动弹出提醒")
     }
 
     fun downloadUpdateApk(info: ReleaseUpdateInfo) {

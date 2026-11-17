@@ -671,21 +671,39 @@ fun UpdateAvailableDialog(
 
     AlertDialog(
         onDismissRequest = onDismissLater,
-        title = { Text("发现新版本：${info.tagName}") },
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "发现新版本 ${info.tagName}",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                if (info.apkSizeBytes > 0L) {
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                    ) {
+                        Text(
+                            text = FormatUtils.formatBytes(info.apkSizeBytes),
+                            style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+            }
+        },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
-                if (info.apkSizeBytes > 0L) {
-                    Text(
-                        text = "安装包大小：${FormatUtils.formatBytes(info.apkSizeBytes)}",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(Modifier.height(6.dp))
-                }
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 300.dp)
+                        .heightIn(max = 240.dp)
                         .verticalScroll(rememberScrollState())
                 ) {
                     Text(
@@ -693,53 +711,78 @@ fun UpdateAvailableDialog(
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
+                Spacer(Modifier.height(10.dp))
+                HorizontalDivider(
+                    thickness = 0.5.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)
+                )
                 Spacer(Modifier.height(8.dp))
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { ignoreChecked = !ignoreChecked },
-                    verticalAlignment = Alignment.CenterVertically
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Checkbox(
-                        checked = ignoreChecked,
-                        onCheckedChange = { ignoreChecked = it }
-                    )
-                    Text(
-                        text = "忽略此版本（不再静默提醒）",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable { ignoreChecked = !ignoreChecked }
+                            .padding(vertical = 3.dp, horizontal = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = ignoreChecked,
+                            onCheckedChange = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(7.dp))
+                        Text(
+                            text = "忽略此版本",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable(onClick = onOpenBrowser)
+                            .padding(vertical = 3.dp, horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "浏览器打开",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(Modifier.width(3.dp))
+                        Icon(
+                            Icons.AutoMirrored.Filled.OpenInNew,
+                            contentDescription = "浏览器打开",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(13.dp)
+                        )
+                    }
                 }
             }
         },
+        dismissButton = {
+            TextButton(onClick = onDismissLater) {
+                Text("暂不更新")
+            }
+        },
         confirmButton = {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+            Button(
+                onClick = {
+                    if (ignoreChecked) onIgnoreVersion() else onDownloadApk()
+                }
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = onOpenBrowser,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("浏览器打开", maxLines = 1)
+                Text(
+                    when {
+                        ignoreChecked -> "确认忽略"
+                        info.apkDownloadUrl != null -> "立即更新"
+                        else -> "前往下载"
                     }
-                    Button(
-                        onClick = onDownloadApk,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(if (info.apkDownloadUrl != null) "立即更新" else "前往下载", maxLines = 1)
-                    }
-                }
-                TextButton(
-                    onClick = { if (ignoreChecked) onIgnoreVersion() else onDismissLater() },
-                    modifier = Modifier.align(Alignment.End)
-                ) {
-                    Text(if (ignoreChecked) "确认忽略" else "暂不更新")
-                }
+                )
             }
         }
     )
