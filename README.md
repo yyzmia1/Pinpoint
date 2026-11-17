@@ -37,15 +37,9 @@ Desktop *Everything*-style query syntax · Sub-10 ms CJK substring retrieval ove
 
 ## Screenshots & Demo
 
-> Real-device full-disk indexing & instant search recording (`docs/media/pinpoint-demo.webp`) is ready to be dropped in directly from an ADB capture:
->
-> ```bash
-> adb shell screenrecord --time-limit 15 /sdcard/pinpoint-demo.mp4
-> adb pull /sdcard/pinpoint-demo.mp4
-> ffmpeg -i pinpoint-demo.mp4 -vf "fps=15,scale=420:-1:flags=lanczos" -loop 0 docs/media/pinpoint-demo.webp
-> ```
->
-> *(Once added at `docs/media/pinpoint-demo.webp`, embed with `![Pinpoint Real-Device Demo](docs/media/pinpoint-demo.webp)`.)*
+![Pinpoint Motion Demo — Offline CJK Search, Shizuku Penetration & QuickLook](docs/media/pinpoint-demo.webp)
+
+*11s loop rendered from synthetic sample files (zero real user data): `CjkTokenizer` cross-word & body search -> cursor click & QuickLook PDF excerpt preview -> live Android 12+ Material You Monet theme transition.*
 
 ---
 

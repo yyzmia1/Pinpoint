@@ -37,15 +37,9 @@
 
 ## 效果展示
 
-> 真机全盘索引与毫秒级检索动图预留位置（`docs/media/pinpoint-demo.webp`）。连接手机后可直接通过以下命令录制并压缩上传：
->
-> ```bash
-> adb shell screenrecord --time-limit 15 /sdcard/pinpoint-demo.mp4
-> adb pull /sdcard/pinpoint-demo.mp4
-> ffmpeg -i pinpoint-demo.mp4 -vf "fps=15,scale=420:-1:flags=lanczos" -loop 0 docs/media/pinpoint-demo.webp
-> ```
->
-> 补充文件后在此嵌入：`![Pinpoint 真机演示](docs/media/pinpoint-demo.webp)`。
+![Pinpoint 功能动态演示 — 离线中文检索、Shizuku 穿透与 QuickLook 预览](docs/media/pinpoint-demo.webp)
+
+*基于完全脱敏的合成样本文件渲染（零真机隐私数据）：演示中文跨词/正文毫秒级命中 → 悬停点击拉起 QuickLook 内建预览 → Android 12+ 莫奈动态取色实时切换。*
 
 ---
 
