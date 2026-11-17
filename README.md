@@ -39,7 +39,7 @@ Desktop *Everything*-style query syntax · Sub-10 ms CJK substring retrieval ove
 
 ![Pinpoint Motion Demo — Offline CJK Search, Shizuku Penetration & QuickLook](docs/media/pinpoint-demo.webp)
 
-*11s loop rendered from synthetic sample files (zero real user data): `CjkTokenizer` cross-word & body search -> cursor click & QuickLook PDF excerpt preview -> live Android 12+ Material You Monet theme transition.*
+
 
 ---
 
