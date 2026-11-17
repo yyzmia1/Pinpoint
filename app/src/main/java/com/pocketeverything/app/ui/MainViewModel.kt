@@ -495,6 +495,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         settingsRepo.setHapticFeedbackEnabled(enabled)
     }
 
+    fun setHapticStrength(strength: Float) {
+        settingsRepo.setHapticStrength(strength)
+    }
+
     fun setUseMonospaceFont(enabled: Boolean) {
         settingsRepo.setUseMonospaceFont(enabled)
     }

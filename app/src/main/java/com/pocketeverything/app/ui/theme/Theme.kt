@@ -2,6 +2,8 @@ package com.pocketeverything.app.ui.theme
 
 import android.graphics.Bitmap
 import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.view.HapticFeedbackConstants
 import android.view.View
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -105,35 +107,88 @@ val ColorScheme.groupedCard: Color
 val LocalHasCustomBg = compositionLocalOf { false }
 val LocalCardOpacity = compositionLocalOf { 1f }
 val LocalHapticsEnabled = compositionLocalOf { true }
+val LocalHapticStrength = compositionLocalOf { 0.25f }
 
 /**
- * Lightweight wrapper around Android's native linear-motor haptic constants.
+ * Lightweight wrapper around Android's native linear-motor Vibrator with continuous 0..1 amplitude scaling.
  */
 class AppHaptics(
     private val view: View?,
-    val enabled: Boolean
+    private val vibrator: Vibrator?,
+    val strength: Float
 ) {
-    fun tick() {
-        if (!enabled || view == null) return
-        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+    val enabled: Boolean get() = strength > 0.01f
+
+    fun tick(overrideStrength: Float = strength) {
+        vibrateScaled(overrideStrength, isClick = false)
     }
 
-    fun click(forceEvenIfDisabled: Boolean = false) {
-        if ((!enabled && !forceEvenIfDisabled) || view == null) return
-        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            HapticFeedbackConstants.CONFIRM
-        } else {
-            HapticFeedbackConstants.KEYBOARD_TAP
+    fun click(forceEvenIfDisabled: Boolean = false, overrideStrength: Float = strength) {
+        val s = if (forceEvenIfDisabled && overrideStrength <= 0.01f) 0.25f else overrideStrength
+        vibrateScaled(s, isClick = true)
+    }
+
+    private fun vibrateScaled(rawStrength: Float, isClick: Boolean) {
+        val s = rawStrength.coerceIn(0f, 1f)
+        if (s <= 0.01f) return
+
+        val vib = vibrator
+        if (vib != null && vib.hasVibrator()) {
+            val handled = runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val prim = if (s < 0.35f && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        VibrationEffect.Composition.PRIMITIVE_LOW_TICK
+                    } else {
+                        VibrationEffect.Composition.PRIMITIVE_TICK
+                    }
+                    if (vib.areAllPrimitivesSupported(prim)) {
+                        val scale = if (isClick) {
+                            (s * 0.72f).coerceIn(0.05f, 1.0f)
+                        } else {
+                            (s * 0.50f).coerceIn(0.04f, 0.85f)
+                        }
+                        val effect = VibrationEffect.startComposition()
+                            .addPrimitive(prim, scale)
+                            .compose()
+                        vib.vibrate(effect)
+                        return@runCatching true
+                    }
+                }
+                val durationMs = if (isClick) {
+                    (3L + (s * 7f).roundToInt()).coerceIn(3L, 10L)
+                } else {
+                    (2L + (s * 5f).roundToInt()).coerceIn(2L, 7L)
+                }
+                val amplitude = if (isClick) {
+                    (s * 165f).roundToInt().coerceIn(1, 255)
+                } else {
+                    (s * 115f).roundToInt().coerceIn(1, 200)
+                }
+                vib.vibrate(VibrationEffect.createOneShot(durationMs, amplitude))
+                true
+            }.getOrDefault(false)
+            if (handled) return
         }
-        view.performHapticFeedback(code)
+
+        // Fallback if Vibrator service is unavailable
+        if (view != null) {
+            val code = if (s < 0.45f && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                HapticFeedbackConstants.TEXT_HANDLE_MOVE
+            } else {
+                HapticFeedbackConstants.CLOCK_TICK
+            }
+            view.performHapticFeedback(code)
+        }
     }
 }
 
 @Composable
 fun rememberAppHaptics(): AppHaptics {
     val view = LocalView.current
-    val enabled = LocalHapticsEnabled.current
-    return remember(view, enabled) { AppHaptics(view, enabled) }
+    val context = LocalContext.current
+    val strength = LocalHapticStrength.current
+    val vibrator = remember(context) { context.getSystemService(Vibrator::class.java) }
+    return remember(view, vibrator, strength) { AppHaptics(view, vibrator, strength) }
 }
 
 fun ThemeAccent.previewColors(darkTheme: Boolean): Pair<Color, Color> {
@@ -445,6 +500,7 @@ fun PocketEverythingTheme(
     extractColorFromBg: Boolean = false,
     customBgSeedArgb: Int = 0,
     hapticsEnabled: Boolean = true,
+    hapticStrength: Float = 0.25f,
     content: @Composable () -> Unit
 ) {
     val baseScheme = when {
@@ -460,11 +516,13 @@ fun PocketEverythingTheme(
         }
     }
     val colorScheme = baseScheme.withPureBlackIfEnabled(darkTheme, pureBlackDark)
+    val effectiveStrength = if (hapticsEnabled) hapticStrength.coerceIn(0f, 1f) else 0f
 
     CompositionLocalProvider(
         LocalHasCustomBg provides hasCustomBg,
         LocalCardOpacity provides if (hasCustomBg) cardOpacity.coerceIn(0.30f, 1f) else 1f,
-        LocalHapticsEnabled provides hapticsEnabled
+        LocalHapticsEnabled provides (effectiveStrength > 0.01f),
+        LocalHapticStrength provides effectiveStrength
     ) {
         MaterialTheme(
             colorScheme = colorScheme,

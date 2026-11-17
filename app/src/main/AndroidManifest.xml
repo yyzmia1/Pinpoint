@@ -5,6 +5,7 @@
     <!-- Optional update check & in-app APK installer trigger -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- All-files access for Normal & fallback scanning on Android 11+ -->
     <uses-permission

@@ -175,7 +175,8 @@ class MainActivity : ComponentActivity() {
                 cardOpacity = settings.customBgOpacity,
                 extractColorFromBg = settings.extractColorFromBg,
                 customBgSeedArgb = settings.customBgSeedArgb,
-                hapticsEnabled = settings.hapticFeedbackEnabled
+                hapticsEnabled = settings.hapticFeedbackEnabled,
+                hapticStrength = settings.hapticStrength
             ) {
                 val query by viewModel.query.collectAsState()
                 val quickScope by viewModel.quickScope.collectAsState()
@@ -323,7 +324,7 @@ class MainActivity : ComponentActivity() {
                                 onSetCustomBgDim = { viewModel.setCustomBgDim(it) },
                                 onSetCustomBgBlur = { viewModel.setCustomBgBlur(it) },
                                 onSetExtractColorFromBg = { viewModel.setExtractColorFromBg(it) },
-                                onSetHapticFeedback = { viewModel.setHapticFeedbackEnabled(it) },
+                                onSetHapticStrength = { viewModel.setHapticStrength(it) },
                                 onSetUseMonospaceFont = { viewModel.setUseMonospaceFont(it) },
                                 onSetCompactListMode = { viewModel.setCompactListMode(it) },
                                 onResetThemeSettings = { viewModel.resetThemeSettings() }

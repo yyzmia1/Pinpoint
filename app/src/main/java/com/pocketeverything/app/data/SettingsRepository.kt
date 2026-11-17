@@ -50,6 +50,7 @@ data class AppSettings(
     val extractColorFromBg: Boolean = true,
     val customBgSeedArgb: Int = 0,
     val hapticFeedbackEnabled: Boolean = true,
+    val hapticStrength: Float = 0.25f,
     val useMonospaceFont: Boolean = false,
     val compactListMode: Boolean = false,
     val lastFullScanAtMillis: Long = 0L,
@@ -108,6 +109,10 @@ class SettingsRepository(context: Context) {
             extractColorFromBg = prefs.getBoolean(KEY_EXTRACT_COLOR_FROM_BG, true),
             customBgSeedArgb = prefs.getInt(KEY_CUSTOM_BG_SEED_ARGB, 0),
             hapticFeedbackEnabled = prefs.getBoolean(KEY_HAPTIC_FEEDBACK, true),
+            hapticStrength = prefs.getFloat(
+                KEY_HAPTIC_STRENGTH,
+                if (prefs.getBoolean(KEY_HAPTIC_FEEDBACK, true)) 0.25f else 0f
+            ).coerceIn(0f, 1f),
             useMonospaceFont = prefs.getBoolean(KEY_USE_MONOSPACE_FONT, false),
             compactListMode = prefs.getBoolean(KEY_COMPACT_LIST_MODE, false),
             lastFullScanAtMillis = prefs.getLong(KEY_LAST_FULL_SCAN, 0L),
@@ -225,8 +230,21 @@ class SettingsRepository(context: Context) {
     }
 
     fun setHapticFeedbackEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_HAPTIC_FEEDBACK, enabled).apply()
-        _settings.value = _settings.value.copy(hapticFeedbackEnabled = enabled)
+        val strength = if (enabled) (_settings.value.hapticStrength.takeIf { it > 0.02f } ?: 0.25f) else 0f
+        setHapticStrength(strength)
+    }
+
+    fun setHapticStrength(strength: Float) {
+        val v = strength.coerceIn(0f, 1f)
+        val enabled = v > 0.01f
+        prefs.edit()
+            .putFloat(KEY_HAPTIC_STRENGTH, v)
+            .putBoolean(KEY_HAPTIC_FEEDBACK, enabled)
+            .apply()
+        _settings.value = _settings.value.copy(
+            hapticStrength = v,
+            hapticFeedbackEnabled = enabled
+        )
     }
 
     fun setUseMonospaceFont(enabled: Boolean) {
@@ -251,6 +269,7 @@ class SettingsRepository(context: Context) {
             .putBoolean(KEY_CUSTOM_BG_BLUR, false)
             .putBoolean(KEY_EXTRACT_COLOR_FROM_BG, true)
             .putBoolean(KEY_HAPTIC_FEEDBACK, true)
+            .putFloat(KEY_HAPTIC_STRENGTH, 0.25f)
             .putBoolean(KEY_USE_MONOSPACE_FONT, false)
             .putBoolean(KEY_COMPACT_LIST_MODE, false)
             .apply()
@@ -265,6 +284,7 @@ class SettingsRepository(context: Context) {
             customBgBlur = false,
             extractColorFromBg = true,
             hapticFeedbackEnabled = true,
+            hapticStrength = 0.25f,
             useMonospaceFont = false,
             compactListMode = false
         )
@@ -311,6 +331,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_EXTRACT_COLOR_FROM_BG = "extract_color_from_bg"
         private const val KEY_CUSTOM_BG_SEED_ARGB = "custom_bg_seed_argb"
         private const val KEY_HAPTIC_FEEDBACK = "haptic_feedback_enabled"
+        private const val KEY_HAPTIC_STRENGTH = "haptic_strength"
         private const val KEY_USE_MONOSPACE_FONT = "use_monospace_font"
         private const val KEY_COMPACT_LIST_MODE = "compact_list_mode"
         private const val KEY_LAST_FULL_SCAN = "last_full_scan"

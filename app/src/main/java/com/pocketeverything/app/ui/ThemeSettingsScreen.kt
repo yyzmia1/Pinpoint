@@ -113,7 +113,7 @@ fun ThemeSettingsScreen(
     onSetCustomBgDim: (Float) -> Unit,
     onSetCustomBgBlur: (Boolean) -> Unit,
     onSetExtractColorFromBg: (Boolean) -> Unit,
-    onSetHapticFeedback: (Boolean) -> Unit,
+    onSetHapticStrength: (Float) -> Unit,
     onSetUseMonospaceFont: (Boolean) -> Unit,
     onSetCompactListMode: (Boolean) -> Unit,
     onResetThemeSettings: () -> Unit
@@ -526,14 +526,21 @@ fun ThemeSettingsScreen(
                 cardColor = cardColor,
                 hasCustomBg = hasCustomBg
             ) {
-                ThemeSwitchRow(
+                var lastHapticStep by remember { mutableIntStateOf((settings.hapticStrength * 25).roundToInt()) }
+                val pct = (settings.hapticStrength * 100).roundToInt()
+                ThemeSliderRow(
                     icon = Icons.Default.Vibration,
-                    title = "触感微小震动反馈",
-                    subtitle = "点击开关、切换标签与拖动滑块时提供细腻微震动",
-                    checked = settings.hapticFeedbackEnabled,
-                    onCheckedChange = { want ->
-                        if (want) haptics.click(forceEvenIfDisabled = true)
-                        onSetHapticFeedback(want)
+                    title = "触感震动强度",
+                    valueText = if (pct <= 1) "关闭 (0%)" else "$pct%",
+                    value = settings.hapticStrength,
+                    valueRange = 0f..1f,
+                    onValueChange = { v ->
+                        val step = (v * 25).roundToInt()
+                        if (step != lastHapticStep) {
+                            lastHapticStep = step
+                            haptics.click(forceEvenIfDisabled = true, overrideStrength = v)
+                        }
+                        onSetHapticStrength(v)
                     }
                 )
 
