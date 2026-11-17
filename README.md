@@ -119,7 +119,9 @@ Implemented by recursive-descent `QuerySyntaxParser`:
 
 ```text
 .
-├── .github/workflows/ci-build-release.yml   # Manual workflow_dispatch CI & nightly pre-release
+├── .github/workflows/
+│   ├── ci.yml                               # Automatic unit tests, Lint & Debug APK on push/PR
+│   └── release.yml                          # Signed Release & Debug APK publication on v* tags
 ├── gradle/libs.versions.toml                # Centralized version catalog
 ├── settings.gradle.kts                      # rootProject.name = "Pinpoint"
 ├── README.md                                # English documentation
@@ -176,10 +178,11 @@ Implemented by recursive-descent `QuerySyntaxParser`:
 ./gradlew :app:assembleRelease --console=plain
 ```
 
-### CI Workflow & Optional Release Secrets
+### Dual CI/CD Workflows & Release Secrets
 
-- [ci-build-release.yml](.github/workflows/ci-build-release.yml) triggers exclusively on manual `workflow_dispatch` to keep routine pushes instant.
-- Optional repository secrets for release signing in GitHub Actions: `RELEASE_KEYSTORE_BASE64`, `POCKET_KEYSTORE_PASS`, `POCKET_KEY_ALIAS`, `POCKET_KEY_PASS`.
+- **Continuous Integration ([ci.yml](.github/workflows/ci.yml))**: Automatically runs `:app:testDebugUnitTest`, `:app:lintDebug`, and `:app:assembleDebug` on pushes/PRs to `main` (ignoring `*.md` changes) and uploads Debug APKs as workflow artifacts without touching Releases.
+- **Release Pipeline ([release.yml](.github/workflows/release.yml))**: Triggers exclusively on `v*` tag pushes (or manual `workflow_dispatch`), runs full tests + Lint + R8 release build, verifies APK signatures with `aapt2` and `apksigner`, and publishes both Release & Debug APKs to GitHub Releases.
+- **Required GitHub Secrets for `release.yml`**: `RELEASE_KEYSTORE_BASE64`, `POCKET_KEYSTORE_PASS`, `POCKET_KEY_ALIAS`, `POCKET_KEY_PASS`.
 
 ---
 

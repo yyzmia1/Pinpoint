@@ -48,9 +48,9 @@ android {
         if (releaseKeystore.exists()) {
             create("release") {
                 storeFile = releaseKeystore
-                storePassword = System.getenv("POCKET_KEYSTORE_PASS") ?: "pocket123456"
-                keyAlias = System.getenv("POCKET_KEY_ALIAS") ?: "pocket"
-                keyPassword = System.getenv("POCKET_KEY_PASS") ?: "pocket123456"
+                storePassword = System.getenv("POCKET_KEYSTORE_PASS")?.takeIf { it.isNotBlank() } ?: "pocket123456"
+                keyAlias = System.getenv("POCKET_KEY_ALIAS")?.takeIf { it.isNotBlank() } ?: "pocket"
+                keyPassword = System.getenv("POCKET_KEY_PASS")?.takeIf { it.isNotBlank() } ?: "pocket123456"
             }
         }
     }

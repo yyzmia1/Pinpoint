@@ -119,7 +119,9 @@ flowchart TB
 
 ```text
 .
-├── .github/workflows/ci-build-release.yml   # 手动触发 CI 与 nightly 测试预发布流水线
+├── .github/workflows/
+│   ├── ci.yml                               # 日常推送/PR 自动运行单测、Lint 与 Debug 测试包构建
+│   └── release.yml                          # 推送 v* 标签时自动校验签名并发布正式 Release
 ├── gradle/libs.versions.toml                # 统一依赖版本清单
 ├── settings.gradle.kts                      # rootProject.name = "Pinpoint"
 ├── README.md                                # 英文工程文档
@@ -176,10 +178,11 @@ flowchart TB
 ./gradlew :app:assembleRelease --console=plain
 ```
 
-### CI 与发布签名配置
+### 双流水线 CI/CD 与发布签名配置
 
-- [ci-build-release.yml](.github/workflows/ci-build-release.yml) 设为 `workflow_dispatch` 手动按需触发，避免日常推送阻塞云端构建队列。
-- 如需在 GitHub Actions 中使用正式签名证书签发测试包，可在仓库 Secrets 中配置：`RELEASE_KEYSTORE_BASE64`、`POCKET_KEYSTORE_PASS`、`POCKET_KEY_ALIAS`、`POCKET_KEY_PASS`。
+- **日常质量门禁（[ci.yml](.github/workflows/ci.yml)）**：在代码推送至 `main` 或发起 PR 时自动执行 `:app:testDebugUnitTest`、`:app:lintDebug` 与 `:app:assembleDebug`（跳过纯 `.md` 文档变更），Debug 测试包作为 Actions Artifact 留存，不改动正式 Release。
+- **正式发布流水线（[release.yml](.github/workflows/release.yml)）**：仅在推送 `v*` 版本标签（或手动 `workflow_dispatch`）时触发，完成全量测试、Lint、R8 正式构建及 `aapt2`/`apksigner` 验签后自动创建并上传 GitHub 正式 Release。
+- **正式发布所需 GitHub Secrets**：`RELEASE_KEYSTORE_BASE64`、`POCKET_KEYSTORE_PASS`、`POCKET_KEY_ALIAS`、`POCKET_KEY_PASS`。
 
 ---
 
