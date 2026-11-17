@@ -39,7 +39,7 @@
 
 ![Pinpoint 功能动态演示 — 离线中文检索、Shizuku 穿透与 QuickLook 预览](docs/media/pinpoint-demo.webp)
 
-*基于完全脱敏的合成样本文件渲染（零真机隐私数据）：演示中文跨词/正文毫秒级命中 → 悬停点击拉起 QuickLook 内建预览 → Android 12+ 莫奈动态取色实时切换。*
+
 
 ---
 
