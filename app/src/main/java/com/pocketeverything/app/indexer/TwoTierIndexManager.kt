@@ -12,6 +12,7 @@ import com.pocketeverything.app.parser.ExtractorDispatcher
 import com.pocketeverything.app.search.AccessMode
 import com.pocketeverything.app.search.DatabaseStats
 import com.pocketeverything.app.search.FileUpsertEntry
+import com.pocketeverything.app.search.PruneSummary
 import com.pocketeverything.app.search.SqliteSearchDatabase
 import com.pocketeverything.app.search.Tier2Status
 import kotlinx.coroutines.CancellationException
@@ -123,11 +124,14 @@ class TwoTierIndexManager(
         scope.launch { refreshStats() }
     }
 
-    fun pruneByCurrentFilter(): Int {
+    fun pruneByCurrentFilter(): PruneSummary {
         val settings = settingsRepo.settings.value
-        val removed = db.pruneMatchingFilter(FilterEngine(settings.filterConfig), settings.accessMode)
+        val summary = db.pruneMatchingFilterDetailed(FilterEngine(settings.filterConfig), settings.accessMode)
         refreshStats()
-        return removed
+        if (summary.requeuedDocs > 0) {
+            ensureTier2Running()
+        }
+        return summary
     }
 
     fun startQuickHotDirsRefresh(silentIfUnavailable: Boolean = false): Job {

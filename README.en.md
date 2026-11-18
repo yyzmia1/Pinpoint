@@ -157,6 +157,7 @@ Implemented by recursive-descent `QuerySyntaxParser`:
         ├── FilePreviewLoaderTest.kt
         ├── FilterEngineTest.kt
         ├── FormatUtilsTest.kt
+        ├── MagneticSnapSliderTest.kt
         ├── MimeFilterHelperTest.kt
         ├── PinpointPickerAndProviderTest.kt
         ├── QuerySyntaxParserTest.kt

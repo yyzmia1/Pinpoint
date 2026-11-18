@@ -52,7 +52,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -63,11 +62,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -86,6 +81,8 @@ import com.pocketeverything.app.data.AppSettings
 import com.pocketeverything.app.data.ThemeAccent
 import com.pocketeverything.app.data.ThemeMode
 import com.pocketeverything.app.ui.components.FileTypeIcon
+import com.pocketeverything.app.ui.components.MagneticSnapSlider
+import com.pocketeverything.app.ui.components.SliderQuickNode
 import com.pocketeverything.app.ui.theme.Amber200
 import com.pocketeverything.app.ui.theme.LocalCardOpacity
 import com.pocketeverything.app.ui.theme.LocalHasCustomBg
@@ -470,50 +467,57 @@ fun ThemeSettingsScreen(
 
                         ThemeItemDivider()
 
-                        // Card Opacity Slider (0% - 100% with 10% snap nodes)
-                        var lastOpacityStep by remember { mutableIntStateOf((settings.customBgOpacity * 10).roundToInt()) }
-                        LaunchedEffect(settings.customBgOpacity) {
-                            lastOpacityStep = (settings.customBgOpacity * 10).roundToInt()
+                        // Card Opacity Slider (0% - 100%, every 1% reachable + 10% magnetic nodes)
+                        val opacityNodes = remember { (0..10).map { it / 10f } }
+                        val opacityQuickNodes = remember {
+                            listOf(
+                                SliderQuickNode(0.0f, "0%"),
+                                SliderQuickNode(0.2f, "20%"),
+                                SliderQuickNode(0.3f, "30%"),
+                                SliderQuickNode(0.5f, "50%"),
+                                SliderQuickNode(0.8f, "80%"),
+                                SliderQuickNode(1.0f, "100%")
+                            )
                         }
-                        ThemeSliderRow(
+                        MagneticSnapSlider(
                             icon = Icons.Default.Opacity,
                             title = "卡片不透明度",
                             valueText = "${(settings.customBgOpacity * 100).roundToInt()}%",
                             value = settings.customBgOpacity,
                             valueRange = 0.00f..1.00f,
-                            steps = 9,
-                            onValueChange = { v ->
-                                val step = (v * 10).roundToInt()
-                                if (step != lastOpacityStep) {
-                                    lastOpacityStep = step
-                                    haptics.tick()
-                                }
-                                onSetCustomBgOpacity(v)
-                            }
+                            snapNodes = opacityNodes,
+                            snapRadius = 0.008f,
+                            quantizeStep = 0.01f,
+                            quickNodes = opacityQuickNodes,
+                            onNodeSnapHaptic = { haptics.tick() },
+                            onValueChange = { v -> onSetCustomBgOpacity(v) }
                         )
 
                         ThemeItemDivider()
 
-                        // Background Dim Slider (0% - 80% with 10% snap nodes)
-                        var lastDimStep by remember { mutableIntStateOf((settings.customBgDim * 10).roundToInt()) }
-                        LaunchedEffect(settings.customBgDim) {
-                            lastDimStep = (settings.customBgDim * 10).roundToInt()
+                        // Background Dim Slider (0% - 80%, every 1% reachable + 10% magnetic nodes)
+                        val dimNodes = remember { (0..8).map { it / 10f } }
+                        val dimQuickNodes = remember {
+                            listOf(
+                                SliderQuickNode(0.0f, "0%"),
+                                SliderQuickNode(0.2f, "20%"),
+                                SliderQuickNode(0.4f, "40%"),
+                                SliderQuickNode(0.6f, "60%"),
+                                SliderQuickNode(0.8f, "80%")
+                            )
                         }
-                        ThemeSliderRow(
+                        MagneticSnapSlider(
                             icon = Icons.Default.Brightness6,
                             title = "背景暗度调节",
                             valueText = "${(settings.customBgDim * 100).roundToInt()}%",
                             value = settings.customBgDim,
                             valueRange = 0.00f..0.80f,
-                            steps = 7,
-                            onValueChange = { v ->
-                                val step = (v * 10).roundToInt()
-                                if (step != lastDimStep) {
-                                    lastDimStep = step
-                                    haptics.tick()
-                                }
-                                onSetCustomBgDim(v)
-                            }
+                            snapNodes = dimNodes,
+                            snapRadius = 0.008f,
+                            quantizeStep = 0.01f,
+                            quickNodes = dimQuickNodes,
+                            onNodeSnapHaptic = { haptics.tick() },
+                            onValueChange = { v -> onSetCustomBgDim(v) }
                         )
 
                         ThemeItemDivider()
@@ -540,26 +544,35 @@ fun ThemeSettingsScreen(
                 cardAlpha = cardAlpha,
                 hasCustomBg = hasCustomBg
             ) {
-                var lastHapticStep by remember { mutableIntStateOf((settings.hapticStrength * 10).roundToInt()) }
-                LaunchedEffect(settings.hapticStrength) {
-                    lastHapticStep = (settings.hapticStrength * 10).roundToInt()
+                val hapticNodes = remember { (0..10).map { it / 10f } }
+                val hapticQuickNodes = remember {
+                    listOf(
+                        SliderQuickNode(0.0f, "关闭"),
+                        SliderQuickNode(0.2f, "20%"),
+                        SliderQuickNode(0.4f, "40%"),
+                        SliderQuickNode(0.6f, "60%"),
+                        SliderQuickNode(0.8f, "80%"),
+                        SliderQuickNode(1.0f, "100%")
+                    )
                 }
                 val pct = (settings.hapticStrength * 100).roundToInt()
-                ThemeSliderRow(
+                MagneticSnapSlider(
                     icon = Icons.Default.Vibration,
                     title = "触感震动强度",
-                    valueText = if (pct <= 1) "关闭 (0%)" else "$pct%",
+                    valueText = if (pct <= 0) "关闭 (0%)" else "$pct%",
                     value = settings.hapticStrength,
                     valueRange = 0f..1f,
-                    steps = 9,
-                    onValueChange = { v ->
-                        val step = (v * 10).roundToInt()
-                        if (step != lastHapticStep) {
-                            lastHapticStep = step
-                            haptics.click(forceEvenIfDisabled = true, overrideStrength = v)
-                        }
-                        onSetHapticStrength(v)
-                    }
+                    snapNodes = hapticNodes,
+                    snapRadius = 0.008f,
+                    quantizeStep = 0.01f,
+                    quickNodes = hapticQuickNodes,
+                    onNodeSnapHaptic = { v ->
+                        haptics.click(forceEvenIfDisabled = true, overrideStrength = v)
+                    },
+                    onStepTickHaptic = { v ->
+                        haptics.click(forceEvenIfDisabled = true, overrideStrength = v)
+                    },
+                    onValueChange = { v -> onSetHapticStrength(v) }
                 )
 
                 ThemeItemDivider()
@@ -836,55 +849,6 @@ private fun ThemeSwitchRow(
         }
         Spacer(Modifier.width(10.dp))
         ThumbSwitch(checked = checked, onCheckedChange = onCheckedChange)
-    }
-}
-
-@Composable
-private fun ThemeSliderRow(
-    icon: ImageVector,
-    title: String,
-    valueText: String,
-    value: Float,
-    valueRange: ClosedFloatingPointRange<Float>,
-    steps: Int = 0,
-    onValueChange: (Float) -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(20.dp)
-            )
-            Spacer(Modifier.width(12.dp))
-            Text(
-                text = title,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.weight(1f)
-            )
-            Text(
-                text = valueText,
-                style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
-        Slider(
-            value = value,
-            onValueChange = onValueChange,
-            valueRange = valueRange,
-            steps = steps,
-            modifier = Modifier.padding(start = 28.dp)
-        )
     }
 }
 

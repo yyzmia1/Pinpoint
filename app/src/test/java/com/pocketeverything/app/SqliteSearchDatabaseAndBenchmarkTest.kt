@@ -3,6 +3,7 @@ package com.pocketeverything.app
 import com.pocketeverything.app.filter.FilterConfig
 import com.pocketeverything.app.filter.FilterEngine
 import com.pocketeverything.app.search.AccessMode
+import com.pocketeverything.app.search.CrowdedSortBy
 import com.pocketeverything.app.search.FileUpsertEntry
 import com.pocketeverything.app.search.QuickScope
 import com.pocketeverything.app.search.SqliteSearchDatabase
@@ -513,6 +514,122 @@ class SqliteSearchDatabaseAndBenchmarkTest {
             )
             assertEquals(0, db.search("content:报价").items.size)
             assertNull(db.getRawDocumentText(id))
+        }
+    }
+
+    @Test
+    fun `pruneMatchingFilterDetailed purges out-of-whitelist bodies, re-queues widened rules, and VACUUM shrinks DB file`() {
+        val dbFile = Files.createTempFile("pocket_vacuum_", ".db").toFile().apply { deleteOnExit() }
+        val now = System.currentTimeMillis()
+        SqliteSearchDatabase(dbFile.absolutePath).use { db ->
+            val spamBatch = (1..2500).map { i ->
+                FileUpsertEntry(
+                    path = "/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo/clip_$i.mp4",
+                    parentPath = "/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo",
+                    name = "clip_$i.mp4",
+                    ext = "mp4",
+                    size = 1024L * 1024L,
+                    mtime = now,
+                    isDir = false,
+                    accessMode = AccessMode.SHIZUKU,
+                    needsTier2 = false,
+                    initialTier2Status = Tier2Status.NOT_APPLICABLE
+                )
+            }
+            val docEntries = listOf(
+                FileUpsertEntry(
+                    path = "/storage/emulated/0/Download/work.pdf",
+                    parentPath = "/storage/emulated/0/Download",
+                    name = "work.pdf",
+                    ext = "pdf",
+                    size = 5L * 1024L * 1024L,
+                    mtime = now,
+                    isDir = false,
+                    accessMode = AccessMode.NORMAL,
+                    needsTier2 = true,
+                    initialTier2Status = Tier2Status.PENDING
+                ),
+                FileUpsertEntry(
+                    path = "/storage/emulated/0/Notes/diary.txt",
+                    parentPath = "/storage/emulated/0/Notes",
+                    name = "diary.txt",
+                    ext = "txt",
+                    size = 2L * 1024L * 1024L,
+                    mtime = now,
+                    isDir = false,
+                    accessMode = AccessMode.NORMAL,
+                    needsTier2 = true,
+                    initialTier2Status = Tier2Status.PENDING
+                )
+            )
+            db.upsertFileBatch(spamBatch + docEntries)
+            val tasks = db.fetchPendingTier2Tasks(10)
+            for (t in tasks) {
+                db.saveTier2Result(t.fileId, now, Tier2Status.INDEXED, "机密正文内容片段_测试压缩释放空间_".repeat(200))
+            }
+            assertEquals(2L, db.getStats().indexedDocs)
+            assertEquals(2, db.search("content:机密正文").items.size)
+
+            val sizeBefore = db.getStats().dbSizeBytes
+            assertTrue("Expected non-trivial DB size before prune", sizeBefore > 100_000L)
+
+            // Narrow whitelist to /storage/emulated/0/Download ONLY and exclude shortvideo dir
+            val tightFilter = FilterEngine(
+                FilterConfig(
+                    customExcludedPaths = listOf("/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo"),
+                    tier2AllowedPrefixes = listOf("/storage/emulated/0/Download")
+                )
+            )
+            val summary = db.pruneMatchingFilterDetailed(tightFilter, AccessMode.SHIZUKU)
+            assertEquals(2500, summary.removedEntries)
+            assertEquals(1, summary.clearedDocBodies)
+            assertTrue("Expected VACUUM to physically free bytes, freed=${summary.freedBytes}", summary.freedBytes > 0L)
+            assertTrue("Expected DB footprint to shrink on disk", db.getStats().dbSizeBytes < sizeBefore)
+
+            // diary.txt filename still searchable, but its body was purged because it is outside whitelist!
+            assertEquals(1, db.search("name:diary.txt").items.size)
+            assertEquals(1, db.search("content:机密正文").items.size)
+            assertEquals(1L, db.getStats().indexedDocs)
+
+            // Widen whitelist back to /storage/emulated -> diary.txt should be re-queued to PENDING!
+            val wideFilter = FilterEngine(
+                FilterConfig(
+                    customExcludedPaths = listOf("/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo"),
+                    tier2AllowedPrefixes = listOf("/storage/emulated")
+                )
+            )
+            val widenSummary = db.pruneMatchingFilterDetailed(wideFilter, AccessMode.SHIZUKU)
+            assertEquals(1, widenSummary.requeuedDocs)
+            assertEquals(1L, db.getStats().pendingDocs)
+        }
+    }
+
+    @Test
+    fun `getTopCrowdedDirectories supports both FILE_COUNT and TOTAL_BYTES sorting and marks personal dirs`() {
+        val now = System.currentTimeMillis()
+        SqliteSearchDatabase(":memory:").use { db ->
+            db.upsertFileBatch(
+                listOf(
+                    // shortvideo: 3 small files (total 3 KB), non-personal app cache
+                    FileUpsertEntry("/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo/1.mp4", "/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo", "1.mp4", "mp4", 1000L, now, false, AccessMode.SHIZUKU, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo/2.mp4", "/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo", "2.mp4", "mp4", 1000L, now, false, AccessMode.SHIZUKU, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo/3.mp4", "/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo", "3.mp4", "mp4", 1000L, now, false, AccessMode.SHIZUKU, false, Tier2Status.NOT_APPLICABLE),
+                    // DCIM/Camera: 1 huge video (500 MB), personal user dir
+                    FileUpsertEntry("/storage/emulated/0/DCIM/Camera/vid.mp4", "/storage/emulated/0/DCIM/Camera", "vid.mp4", "mp4", 500_000_000L, now, false, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE)
+                )
+            )
+
+            val byCount = db.getTopCrowdedDirectories(5, CrowdedSortBy.FILE_COUNT)
+            assertEquals("/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo", byCount[0].path)
+            assertFalse(byCount[0].isPersonalDir)
+            assertEquals(3, byCount[0].childCount)
+            assertEquals(3000L, byCount[0].totalBytes)
+
+            val byBytes = db.getTopCrowdedDirectories(5, CrowdedSortBy.TOTAL_BYTES)
+            assertEquals("/storage/emulated/0/DCIM/Camera", byBytes[0].path)
+            assertTrue(byBytes[0].isPersonalDir)
+            assertEquals(1, byBytes[0].childCount)
+            assertEquals(500_000_000L, byBytes[0].totalBytes)
         }
     }
 }

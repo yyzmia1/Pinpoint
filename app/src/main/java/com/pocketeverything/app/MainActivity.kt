@@ -201,6 +201,7 @@ class MainActivity : ComponentActivity() {
                 val shizukuStatus by viewModel.shizukuLiveStatus.collectAsState()
                 val indexProgress by viewModel.indexProgress.collectAsState()
                 val crowdedDirs by viewModel.crowdedDirs.collectAsState()
+                val crowdedSortBy by viewModel.crowdedSortBy.collectAsState()
                 val pendingModeSwitch by viewModel.pendingModeSwitch.collectAsState()
                 val updateState by viewModel.updateState.collectAsState()
                 val updateDialogInfo by viewModel.updateDialogInfo.collectAsState()
@@ -311,6 +312,7 @@ class MainActivity : ComponentActivity() {
                                 modeStatuses = modeStatuses,
                                 indexProgress = indexProgress,
                                 crowdedDirs = crowdedDirs,
+                                crowdedSortBy = crowdedSortBy,
                                 updateState = updateState,
                                 onBack = { currentPage = AppPage.SEARCH },
                                 onSelectMode = { viewModel.switchMode(it) },
@@ -323,6 +325,8 @@ class MainActivity : ComponentActivity() {
                                 onRefreshModes = { viewModel.refreshModeStatuses(probeRoot = true) },
                                 onUpdateFilterConfig = { viewModel.updateFilterConfig(it) },
                                 onExcludeCrowdedPath = { viewModel.excludeCrowdedPath(it) },
+                                onRemoveExcludedPath = { viewModel.removeExcludedPath(it) },
+                                onSetCrowdedSortBy = { viewModel.setCrowdedSortBy(it) },
                                 onSetShowRecentOnEmpty = { viewModel.setShowRecentOnEmptyQuery(it) },
                                 onSetPreviewPreference = { viewModel.setOpenContentHitsInPreview(it) },
                                 onSetSystemFilePickerEnabled = { viewModel.setSystemFilePickerEnabled(it) },

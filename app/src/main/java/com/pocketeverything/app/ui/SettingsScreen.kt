@@ -56,7 +56,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -94,7 +93,10 @@ import com.pocketeverything.app.indexer.Tier1Phase
 import com.pocketeverything.app.indexer.Tier2Phase
 import com.pocketeverything.app.search.AccessMode
 import com.pocketeverything.app.search.CrowdedDirStat
+import com.pocketeverything.app.search.CrowdedSortBy
 import com.pocketeverything.app.ui.components.BrandMarkIcon
+import com.pocketeverything.app.ui.components.MagneticSnapSlider
+import com.pocketeverything.app.ui.components.SliderQuickNode
 import com.pocketeverything.app.ui.theme.Amber400
 import com.pocketeverything.app.ui.theme.Emerald400
 import com.pocketeverything.app.ui.theme.LocalCardOpacity
@@ -113,6 +115,7 @@ fun SettingsScreen(
     modeStatuses: Map<AccessMode, ModeAvailability>,
     indexProgress: IndexProgressState,
     crowdedDirs: List<CrowdedDirStat>,
+    crowdedSortBy: CrowdedSortBy = CrowdedSortBy.FILE_COUNT,
     updateState: UpdateCheckState,
     onBack: () -> Unit,
     onSelectMode: (AccessMode) -> Unit,
@@ -122,6 +125,8 @@ fun SettingsScreen(
     onRefreshModes: () -> Unit,
     onUpdateFilterConfig: (FilterConfig) -> Unit,
     onExcludeCrowdedPath: (String) -> Unit,
+    onRemoveExcludedPath: (String) -> Unit = {},
+    onSetCrowdedSortBy: (CrowdedSortBy) -> Unit = {},
     onSetShowRecentOnEmpty: (Boolean) -> Unit,
     onSetPreviewPreference: (Boolean) -> Unit,
     onSetSystemFilePickerEnabled: (Boolean) -> Unit = {},
@@ -141,7 +146,6 @@ fun SettingsScreen(
     val cfg = settings.filterConfig
     var lastAppliedCfg by remember { mutableStateOf(cfg) }
     var skipNoise by remember { mutableStateOf(cfg.skipNoiseCaches) }
-    var dedupMounts by remember { mutableStateOf(cfg.deduplicateMounts) }
     var rootIncludeData by remember { mutableStateOf(cfg.rootIncludeData) }
     var maxTxtMb by remember { mutableFloatStateOf((cfg.maxTxtMdBytes / (1024f * 1024f)).coerceIn(1f, 100f)) }
     var maxDocxMb by remember { mutableFloatStateOf((cfg.maxDocxBytes / (1024f * 1024f)).coerceIn(1f, 100f)) }
@@ -157,7 +161,6 @@ fun SettingsScreen(
         val prev = lastAppliedCfg
         if (cfg != prev) {
             if (cfg.skipNoiseCaches != prev.skipNoiseCaches) skipNoise = cfg.skipNoiseCaches
-            if (cfg.deduplicateMounts != prev.deduplicateMounts) dedupMounts = cfg.deduplicateMounts
             if (cfg.rootIncludeData != prev.rootIncludeData) rootIncludeData = cfg.rootIncludeData
             if (cfg.maxTxtMdBytes != prev.maxTxtMdBytes) {
                 maxTxtMb = (cfg.maxTxtMdBytes / (1024f * 1024f)).coerceIn(1f, 100f)
@@ -684,7 +687,10 @@ fun SettingsScreen(
                 )
             }
 
-            // 5. Filtering & Extraction Rules (with Root /data toggle, non-user noise dir exclusion & top crowded dirs)
+            // 5. Filtering & Extraction Rules (Two-Stage Architecture: Tier-1 Scan Exclusion + Tier-2 Body Extraction)
+            var pendingPersonalDirExclude by remember { mutableStateOf<String?>(null) }
+            var showManualExcludeInput by remember { mutableStateOf(false) }
+
             SettingsSection(title = "过滤与提取规则", cardColor = cardColor) {
                 ToggleRow(
                     title = "Root 扫描包含 /data 目录",
@@ -697,26 +703,17 @@ fun SettingsScreen(
                     enabled = settings.accessMode == AccessMode.ROOT,
                     onCheckedChange = {
                         rootIncludeData = it
-                        onUpdateFilterConfig(cfg.copy(rootIncludeData = it))
+                        onUpdateFilterConfig(cfg.copy(rootIncludeData = it, deduplicateMounts = true))
                     }
                 )
                 SettingsDivider()
                 ToggleRow(
-                    title = "屏蔽临时文件、预览图与缓存目录",
-                    subtitle = "自动跳过 .thumbnails、previews、temp、webview、回收站等高噪目录（保留 /data/local/tmp）",
+                    title = "自动屏蔽缩略图、预览图与缓存目录",
+                    subtitle = "扫描时直接跳过 .thumbnails、previews、temp、webview、回收站等高噪目录（保留 /data/local/tmp）",
                     checked = skipNoise,
                     onCheckedChange = {
                         skipNoise = it
-                        onUpdateFilterConfig(cfg.copy(skipNoiseCaches = it, deduplicateMounts = dedupMounts, rootIncludeData = rootIncludeData))
-                    }
-                )
-                SettingsDivider()
-                ToggleRow(
-                    title = "挂载点与重复路径去重",
-                    checked = dedupMounts,
-                    onCheckedChange = {
-                        dedupMounts = it
-                        onUpdateFilterConfig(cfg.copy(skipNoiseCaches = skipNoise, deduplicateMounts = it, rootIncludeData = rootIncludeData))
+                        onUpdateFilterConfig(cfg.copy(skipNoiseCaches = it, deduplicateMounts = true, rootIncludeData = rootIncludeData))
                     }
                 )
                 SettingsDivider()
@@ -728,9 +725,13 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("目录过滤、大目录快排与正文上限", style = MaterialTheme.typography.bodyMedium)
                         Text(
-                            text = "TXT ${cfg.maxTxtMdBytes / (1024L * 1024L)}M · DOCX ${cfg.maxDocxBytes / (1024L * 1024L)}M · PDF ${cfg.maxPdfBytes / (1024L * 1024L)}M · 已自定义 ${cfg.customExcludedPaths.size + cfg.customExcludedDirNames.size} 项",
+                            text = "大目录排查、自定义排除与正文规则",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = "已排除 ${cfg.customExcludedPaths.size} 个目录 · 跳过 ${cfg.customExcludedDirNames.size} 类文件夹 · 正文上限 ${cfg.maxTxtMdBytes / (1024L * 1024L)}/${cfg.maxDocxBytes / (1024L * 1024L)}/${cfg.maxPdfBytes / (1024L * 1024L)}M",
                             style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -743,77 +744,78 @@ fun SettingsScreen(
                 }
 
                 AnimatedVisibility(visible = expandAdvancedFilters) {
-                    Column(modifier = Modifier.padding(top = 8.dp)) {
-                        Text("TXT / MD 上限：${maxTxtMb.roundToInt()} MB", style = MaterialTheme.typography.bodySmall)
-                        Slider(value = maxTxtMb, onValueChange = { maxTxtMb = it }, valueRange = 1f..100f)
-
-                        Text("Word (.docx) 上限：${maxDocxMb.roundToInt()} MB", style = MaterialTheme.typography.bodySmall)
-                        Slider(value = maxDocxMb, onValueChange = { maxDocxMb = it }, valueRange = 1f..100f)
-
-                        Text("PDF 上限：${maxPdfMb.roundToInt()} MB", style = MaterialTheme.typography.bodySmall)
-                        Slider(value = maxPdfMb, onValueChange = { maxPdfMb = it }, valueRange = 1f..150f)
-
-                        Spacer(Modifier.height(6.dp))
-                        OutlinedTextField(
-                            value = customExcludeDirNamesText,
-                            onValueChange = { customExcludeDirNamesText = it },
-                            label = { Text("按文件夹名全局跳过（每行或逗号分隔）") },
-                            placeholder = { Text("preview\nlogs\nbackup") },
-                            minLines = 2,
-                            maxLines = 4,
+                    Column(modifier = Modifier.padding(top = 6.dp)) {
+                        // ==================== STAGE 1: TIER-1 SCAN & CROWDED DIR CLEANUP ====================
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
                             modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(Modifier.height(6.dp))
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            FilterConfig.SUGGESTED_CUSTOM_DIR_NAMES.forEach { preset ->
-                                val already = customExcludeDirNamesText
-                                    .split('\n', ',', ';')
-                                    .any { it.trim().equals(preset, ignoreCase = true) }
-                                Surface(
-                                    onClick = {
-                                        if (!already) {
-                                            customExcludeDirNamesText = if (customExcludeDirNamesText.isBlank()) {
-                                                preset
-                                            } else {
-                                                customExcludeDirNamesText.trimEnd() + "\n" + preset
-                                            }
-                                        }
-                                    },
-                                    shape = CircleShape,
-                                    color = if (already) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh
-                                ) {
-                                    Text(
-                                        text = if (already) "✓ $preset" else "+ $preset",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = if (already) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                                    )
-                                }
+                            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                                Text(
+                                    text = "一 · 全盘扫描与大目录清理（管哪些文件入库）",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "全盘扫描后，可在下方查看文件最多或占空间最大的目录；点击「排除」会直接从索引库物理删除并释放库体积。",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
                         }
-
-                        Spacer(Modifier.height(10.dp))
-                        OutlinedTextField(
-                            value = customExcludeText,
-                            onValueChange = { customExcludeText = it },
-                            label = { Text("自定义排除目录前缀（每行一条）") },
-                            placeholder = { Text("/storage/emulated/0/Android/media\n/storage/emulated/0/Movies") },
-                            minLines = 2,
-                            maxLines = 4,
-                            modifier = Modifier.fillMaxWidth()
-                        )
 
                         if (crowdedDirs.isNotEmpty()) {
                             Spacer(Modifier.height(10.dp))
                             Text(
-                                text = "库内文件最多目录 Top ${crowdedDirs.size}（可一键排除并清理）",
+                                text = "库内大目录排行 Top ${crowdedDirs.size}",
                                 style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface
                             )
-                            Spacer(Modifier.height(4.dp))
+                            Spacer(Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                CrowdedSortBy.entries.forEach { mode ->
+                                    val selected = crowdedSortBy == mode
+                                    Surface(
+                                        onClick = {
+                                            haptics.tick()
+                                            onSetCrowdedSortBy(mode)
+                                        },
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (selected) {
+                                            MaterialTheme.colorScheme.primaryContainer
+                                        } else {
+                                            MaterialTheme.colorScheme.surfaceContainerHigh
+                                        },
+                                        border = if (selected) {
+                                            BorderStroke(0.9.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.55f))
+                                        } else null,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier.padding(vertical = 7.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = if (selected) "● ${mode.label}" else mode.label,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                                color = if (selected) {
+                                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.height(6.dp))
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
                                 color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = cardAlpha),
@@ -828,38 +830,70 @@ fun SettingsScreen(
                                             stat.path == cleanEx || stat.path.startsWith("$cleanEx/")
                                         }
                                         Row(
-                                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(vertical = 5.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             Column(modifier = Modifier.weight(1f)) {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text(
+                                                        text = FormatUtils.shortenPath(stat.path, emptyList()).first,
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        fontWeight = FontWeight.Medium,
+                                                        maxLines = 2,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier.weight(1f, fill = false)
+                                                    )
+                                                    if (stat.isPersonalDir) {
+                                                        Spacer(Modifier.width(6.dp))
+                                                        Surface(
+                                                            shape = RoundedCornerShape(4.dp),
+                                                            color = Amber400.copy(alpha = 0.18f)
+                                                        ) {
+                                                            Text(
+                                                                text = "个人目录",
+                                                                style = MaterialTheme.typography.labelSmall,
+                                                                color = Amber400,
+                                                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                                            )
+                                                        }
+                                                    }
+                                                }
                                                 Text(
-                                                    text = FormatUtils.shortenPath(stat.path, emptyList()).first,
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    maxLines = 2,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
-                                                Text(
-                                                    text = "${stat.childCount} 个直属条目",
+                                                    text = "${stat.childCount} 个直属条目 · 累计 ${FormatUtils.formatBytes(stat.totalBytes)}",
                                                     style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
                                             }
                                             Spacer(Modifier.width(8.dp))
-                                            TextButton(
+                                            FilledTonalButton(
                                                 enabled = !isExcluded,
                                                 onClick = {
-                                                    val clean = stat.path.trimEnd('/')
-                                                    val existing = customExcludeText.lines()
-                                                        .map { it.trim().trimEnd('/') }
-                                                        .filter { it.isNotEmpty() }
-                                                    if (clean.isNotEmpty() && clean !in existing) {
-                                                        customExcludeText = if (customExcludeText.isBlank()) clean else customExcludeText.trimEnd() + "\n" + clean
+                                                    haptics.click()
+                                                    val applyExclude = {
+                                                        val clean = stat.path.trimEnd('/')
+                                                        val existing = customExcludeText.lines()
+                                                            .map { it.trim().trimEnd('/') }
+                                                            .filter { it.isNotEmpty() }
+                                                        if (clean.isNotEmpty() && clean !in existing) {
+                                                            customExcludeText = if (customExcludeText.isBlank()) clean else customExcludeText.trimEnd() + "\n" + clean
+                                                        }
+                                                        onExcludeCrowdedPath(stat.path)
                                                     }
-                                                    onExcludeCrowdedPath(stat.path)
+                                                    if (stat.isPersonalDir) {
+                                                        pendingPersonalDirExclude = stat.path
+                                                    } else {
+                                                        applyExclude()
+                                                    }
                                                 },
-                                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                                modifier = Modifier.height(30.dp)
                                             ) {
-                                                Text(if (isExcluded) "已排除" else "排除", style = MaterialTheme.typography.labelSmall)
+                                                Text(
+                                                    text = if (isExcluded) "已排除" else "排除并清库",
+                                                    style = MaterialTheme.typography.labelSmall
+                                                )
                                             }
                                         }
                                     }
@@ -867,28 +901,311 @@ fun SettingsScreen(
                             }
                         }
 
+                        if (cfg.customExcludedPaths.isNotEmpty()) {
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                text = "当前已排除的特定目录（点 × 可移出排除）：",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                cfg.customExcludedPaths.forEach { exPath ->
+                                    Surface(
+                                        onClick = {
+                                            haptics.tick()
+                                            val clean = exPath.trim().trimEnd('/')
+                                            customExcludeText = customExcludeText.lines()
+                                                .map { it.trim() }
+                                                .filter { it.isNotEmpty() && it.trimEnd('/') != clean }
+                                                .joinToString("\n")
+                                            onRemoveExcludedPath(exPath)
+                                        },
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = MaterialTheme.colorScheme.secondaryContainer
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = FormatUtils.shortenPath(exPath, emptyList()).first,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Spacer(Modifier.width(4.dp))
+                                            Text(
+                                                text = "×",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+                        TextButton(
+                            onClick = { showManualExcludeInput = !showManualExcludeInput },
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                        ) {
+                            Text(
+                                text = if (showManualExcludeInput) "收起手动路径输入框 ▲" else "+ 手动输入或批量编辑排除目录路径 ▼",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                        AnimatedVisibility(visible = showManualExcludeInput) {
+                            OutlinedTextField(
+                                value = customExcludeText,
+                                onValueChange = { customExcludeText = it },
+                                label = { Text("自定义排除目录前缀（每行一条）") },
+                                placeholder = { Text("/storage/emulated/0/Android/media\n/storage/emulated/0/Movies") },
+                                minLines = 2,
+                                maxLines = 4,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "按文件夹名全局跳过（遇到同名文件夹直接不进）：",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            FilterConfig.SUGGESTED_CUSTOM_DIR_NAMES.forEach { preset ->
+                                val currentList = customExcludeDirNamesText
+                                    .split('\n', ',', ';')
+                                    .map { it.trim() }
+                                    .filter { it.isNotEmpty() }
+                                val already = currentList.any { it.equals(preset, ignoreCase = true) }
+                                Surface(
+                                    onClick = {
+                                        haptics.tick()
+                                        customExcludeDirNamesText = if (already) {
+                                            currentList.filterNot { it.equals(preset, ignoreCase = true) }.joinToString("\n")
+                                        } else {
+                                            (currentList + preset).joinToString("\n")
+                                        }
+                                    },
+                                    shape = CircleShape,
+                                    color = if (already) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh
+                                ) {
+                                    Text(
+                                        text = if (already) "✓ $preset" else "+ $preset",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (already) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedTextField(
+                            value = customExcludeDirNamesText,
+                            onValueChange = { customExcludeDirNamesText = it },
+                            label = { Text("跳过的文件夹名称（每行或逗号分隔）") },
+                            placeholder = { Text("preview, logs, backup") },
+                            minLines = 1,
+                            maxLines = 3,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(Modifier.height(14.dp))
+                        SettingsDivider()
                         Spacer(Modifier.height(10.dp))
+
+                        // ==================== STAGE 2: TIER-2 DOCUMENT BODY EXTRACTION ====================
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                                Text(
+                                    text = "二 · 文档正文提取规则（管哪些 PDF/Word/TXT 读内容）",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "仅对下方白名单目录内、且未超过体积上限的文档抽取正文文字；范围外或超大的文档仅搜文件名，保存时会自动清理超范围正文并释放空间。",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "正文解析白名单范围快捷预设：",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        val storageDefaultText = FilterConfig.DEFAULT_TIER2_ALLOWED_PREFIXES.joinToString("\n")
+                        val commonDocsText = listOf(
+                            "/storage/emulated/0/Download",
+                            "/storage/emulated/0/Documents",
+                            "/storage/emulated/0/Android/data/com.tencent.mm/MicroMsg/Download"
+                        ).joinToString("\n")
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf(
+                                "全盘存储 (/storage)" to storageDefaultText,
+                                "仅常用文档目录" to commonDocsText,
+                                "不限路径 (*)" to "*"
+                            ).forEach { (label, presetVal) ->
+                                val isCurrent = tier2AllowedText.trim() == presetVal.trim()
+                                Surface(
+                                    onClick = {
+                                        haptics.tick()
+                                        tier2AllowedText = presetVal
+                                    },
+                                    shape = CircleShape,
+                                    color = if (isCurrent) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                                    border = if (isCurrent) BorderStroke(0.8.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)) else null
+                                ) {
+                                    Text(
+                                        text = label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                                        color = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(6.dp))
                         OutlinedTextField(
                             value = tier2AllowedText,
                             onValueChange = { tier2AllowedText = it },
                             label = { Text("正文解析白名单前缀（每行一条）") },
                             placeholder = { Text("留空或填 * / / 表示不限路径") },
-                            supportingText = { Text("默认仅解析 /storage 下文档；留空、填 * 或 / 则放开所有非系统路径") },
+                            supportingText = { Text("收紧白名单或调小下方体积上限后点保存，会立即从数据库清除范围外已抽取的正文") },
                             minLines = 2,
                             maxLines = 4,
                             modifier = Modifier.fillMaxWidth()
                         )
 
-                        Spacer(Modifier.height(12.dp))
+                        Spacer(Modifier.height(10.dp))
+                        val mbNodes100 = remember { listOf(1f, 10f, 25f, 50f, 75f, 100f) }
+                        val mbQuick100 = remember {
+                            listOf(
+                                SliderQuickNode(1f, "1M"),
+                                SliderQuickNode(10f, "10M"),
+                                SliderQuickNode(25f, "25M"),
+                                SliderQuickNode(50f, "50M"),
+                                SliderQuickNode(75f, "75M"),
+                                SliderQuickNode(100f, "100M")
+                            )
+                        }
+                        val mbNodes150 = remember { listOf(1f, 10f, 25f, 50f, 100f, 150f) }
+                        val mbQuick150 = remember {
+                            listOf(
+                                SliderQuickNode(1f, "1M"),
+                                SliderQuickNode(10f, "10M"),
+                                SliderQuickNode(25f, "25M"),
+                                SliderQuickNode(50f, "50M"),
+                                SliderQuickNode(100f, "100M"),
+                                SliderQuickNode(150f, "150M")
+                            )
+                        }
+
+                        MagneticSnapSlider(
+                            title = "TXT / MD 正文上限",
+                            valueText = "${maxTxtMb.roundToInt()} MB",
+                            value = maxTxtMb,
+                            valueRange = 1f..100f,
+                            snapNodes = mbNodes100,
+                            snapRadius = 0.85f,
+                            quantizeStep = 1f,
+                            quickNodes = mbQuick100,
+                            onNodeSnapHaptic = { haptics.tick() },
+                            onValueChange = { maxTxtMb = it }
+                        )
+
+                        Spacer(Modifier.height(4.dp))
+                        MagneticSnapSlider(
+                            title = "Word (.docx) 正文上限",
+                            valueText = "${maxDocxMb.roundToInt()} MB",
+                            value = maxDocxMb,
+                            valueRange = 1f..100f,
+                            snapNodes = mbNodes100,
+                            snapRadius = 0.85f,
+                            quantizeStep = 1f,
+                            quickNodes = mbQuick100,
+                            onNodeSnapHaptic = { haptics.tick() },
+                            onValueChange = { maxDocxMb = it }
+                        )
+
+                        Spacer(Modifier.height(4.dp))
+                        MagneticSnapSlider(
+                            title = "PDF 正文上限",
+                            valueText = "${maxPdfMb.roundToInt()} MB",
+                            value = maxPdfMb,
+                            valueRange = 1f..150f,
+                            snapNodes = mbNodes150,
+                            snapRadius = 0.85f,
+                            quantizeStep = 1f,
+                            quickNodes = mbQuick150,
+                            onNodeSnapHaptic = { haptics.tick() },
+                            onValueChange = { maxPdfMb = it }
+                        )
+
+                        val draftExcludedPaths = customExcludeText.lines()
+                            .map { it.trim().trimEnd('/') }
+                            .filter { it.isNotEmpty() }
+                            .distinct()
+                        val draftExcludedDirNames = customExcludeDirNamesText.split('\n', ',', ';')
+                            .map { it.trim() }
+                            .filter { it.isNotEmpty() }
+                            .distinct()
+                        val draftTier2Allowed = tier2AllowedText.lines()
+                            .map { it.trim() }
+                            .filter { it.isNotEmpty() }
+                        val hasUnsavedDraftChanges =
+                            (maxTxtMb.roundToInt() * 1024L * 1024L) != cfg.maxTxtMdBytes ||
+                                (maxDocxMb.roundToInt() * 1024L * 1024L) != cfg.maxDocxBytes ||
+                                (maxPdfMb.roundToInt() * 1024L * 1024L) != cfg.maxPdfBytes ||
+                                draftExcludedPaths != cfg.customExcludedPaths ||
+                                draftExcludedDirNames != cfg.customExcludedDirNames ||
+                                FilterConfig.normalizeTier2AllowedPrefixes(draftTier2Allowed) !=
+                                FilterConfig.normalizeTier2AllowedPrefixes(cfg.tier2AllowedPrefixes)
+
+                        Spacer(Modifier.height(10.dp))
+                        if (hasUnsavedDraftChanges) {
+                            Text(
+                                text = "● 当前有未保存的规则改动，请点击下方「保存并立即清理库」生效",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.padding(bottom = 6.dp)
+                            )
+                        }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             OutlinedButton(
                                 onClick = {
+                                    haptics.click()
                                     val def = FilterConfig().recommendedForMode(settings.accessMode, includeData = false)
                                     skipNoise = def.skipNoiseCaches
-                                    dedupMounts = def.deduplicateMounts
                                     rootIncludeData = def.rootIncludeData
                                     maxTxtMb = 10f
                                     maxDocxMb = 30f
@@ -902,25 +1219,61 @@ fun SettingsScreen(
                             ) { Text("恢复默认") }
                             Button(
                                 onClick = {
+                                    haptics.click()
                                     val newConfig = cfg.copy(
                                         skipNoiseCaches = skipNoise,
-                                        deduplicateMounts = dedupMounts,
+                                        deduplicateMounts = true,
                                         rootIncludeData = rootIncludeData,
                                         maxTxtMdBytes = maxTxtMb.roundToInt() * 1024L * 1024L,
                                         maxDocxBytes = maxDocxMb.roundToInt() * 1024L * 1024L,
                                         maxPdfBytes = maxPdfMb.roundToInt() * 1024L * 1024L,
-                                        customExcludedPaths = customExcludeText.lines().map { it.trim() }.filter { it.isNotEmpty() },
-                                        customExcludedDirNames = customExcludeDirNamesText.split('\n', ',', ';')
-                                            .map { it.trim() }.filter { it.isNotEmpty() },
-                                        tier2AllowedPrefixes = tier2AllowedText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                                        customExcludedPaths = draftExcludedPaths,
+                                        customExcludedDirNames = draftExcludedDirNames,
+                                        tier2AllowedPrefixes = draftTier2Allowed
                                     )
                                     onUpdateFilterConfig(newConfig)
                                 },
-                                modifier = Modifier.weight(1f)
-                            ) { Text("保存规则") }
+                                modifier = Modifier.weight(1.35f)
+                            ) { Text("保存并立即清理库") }
                         }
                     }
                 }
+            }
+
+            if (pendingPersonalDirExclude != null) {
+                val targetPath = pendingPersonalDirExclude!!
+                AlertDialog(
+                    onDismissRequest = { pendingPersonalDirExclude = null },
+                    title = { Text("确认排除个人常用目录？") },
+                    text = {
+                        Text(
+                            "「${FormatUtils.shortenPath(targetPath, emptyList()).first}」属于个人相册、下载或文档常用目录。\n\n排除后将从索引库中删除该目录下的全部文件记录，后续将无法搜到里面的照片或文档。确定要排除吗？",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                val clean = targetPath.trimEnd('/')
+                                val existing = customExcludeText.lines()
+                                    .map { it.trim().trimEnd('/') }
+                                    .filter { it.isNotEmpty() }
+                                if (clean.isNotEmpty() && clean !in existing) {
+                                    customExcludeText = if (customExcludeText.isBlank()) clean else customExcludeText.trimEnd() + "\n" + clean
+                                }
+                                pendingPersonalDirExclude = null
+                                onExcludeCrowdedPath(targetPath)
+                            }
+                        ) {
+                            Text("确认排除并清理")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { pendingPersonalDirExclude = null }) {
+                            Text("取消")
+                        }
+                    }
+                )
             }
 
             // 6. About & Open Source

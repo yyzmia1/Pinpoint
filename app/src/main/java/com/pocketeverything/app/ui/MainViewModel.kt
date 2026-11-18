@@ -33,6 +33,7 @@ import com.pocketeverything.app.indexer.IndexProgressState
 import com.pocketeverything.app.indexer.RealtimeMonitorService
 import com.pocketeverything.app.search.AccessMode
 import com.pocketeverything.app.search.CrowdedDirStat
+import com.pocketeverything.app.search.CrowdedSortBy
 import com.pocketeverything.app.search.QuerySyntaxParser
 import com.pocketeverything.app.search.QuickScope
 import com.pocketeverything.app.search.SearchResponse
@@ -147,6 +148,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _crowdedDirs = MutableStateFlow<List<CrowdedDirStat>>(emptyList())
     val crowdedDirs: StateFlow<List<CrowdedDirStat>> = _crowdedDirs.asStateFlow()
+
+    private val _crowdedSortBy = MutableStateFlow(CrowdedSortBy.FILE_COUNT)
+    val crowdedSortBy: StateFlow<CrowdedSortBy> = _crowdedSortBy.asStateFlow()
 
     private val _messages = MutableSharedFlow<UiNotice>(extraBufferCapacity = 8)
     val messages: SharedFlow<UiNotice> = _messages.asSharedFlow()
@@ -622,9 +626,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         indexManager.clearErrorMessage()
     }
 
+    fun setCrowdedSortBy(sortBy: CrowdedSortBy) {
+        if (_crowdedSortBy.value == sortBy) return
+        _crowdedSortBy.value = sortBy
+        refreshCrowdedDirs()
+    }
+
     fun refreshCrowdedDirs() {
+        val sort = _crowdedSortBy.value
         viewModelScope.launch(Dispatchers.IO) {
-            _crowdedDirs.value = runCatching { db.getTopCrowdedDirectories(5) }.getOrDefault(emptyList())
+            _crowdedDirs.value = runCatching { db.getTopCrowdedDirectories(limit = 5, sortBy = sort) }.getOrDefault(emptyList())
         }
     }
 
@@ -636,16 +647,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun updateFilterConfig(config: FilterConfig) {
         val old = settings.value.filterConfig
         settingsRepo.updateFilterConfig(config)
+        val sort = _crowdedSortBy.value
         viewModelScope.launch(Dispatchers.IO) {
-            val pruned = indexManager.pruneByCurrentFilter()
-            _crowdedDirs.value = runCatching { db.getTopCrowdedDirectories(5) }.getOrDefault(emptyList())
+            val summary = indexManager.pruneByCurrentFilter()
+            _crowdedDirs.value = runCatching { db.getTopCrowdedDirectories(limit = 5, sortBy = sort) }.getOrDefault(emptyList())
+            val freedNote = if (summary.freedBytes >= 64 * 1024L) {
+                " · 释放库空间 ${FormatUtils.formatBytes(summary.freedBytes)}"
+            } else ""
             val msg = when {
                 !old.rootIncludeData && config.rootIncludeData && settings.value.accessMode == AccessMode.ROOT ->
                     "已允许扫描 /data（体积与耗时将明显增加），请点击「重建全库」纳入索引"
-                pruned > 0 ->
-                    "规则已保存并清理 $pruned 条已过滤项目"
+                summary.removedEntries > 0 && summary.clearedDocBodies > 0 ->
+                    "已从数据库真删 ${summary.removedEntries} 项、清理 ${summary.clearedDocBodies} 篇超范围正文$freedNote"
+                summary.removedEntries > 0 ->
+                    "已从数据库真删 ${summary.removedEntries} 条已排除记录$freedNote"
+                summary.clearedDocBodies > 0 ->
+                    "已清理 ${summary.clearedDocBodies} 篇超范围文档正文$freedNote"
+                summary.requeuedDocs > 0 ->
+                    "规则已放宽，已将 ${summary.requeuedDocs} 篇文档重新加入后台正文提取队列"
                 else ->
-                    "过滤规则已保存，后续同步生效（扩大范围建议重建一次）"
+                    "过滤与正文规则已保存生效（如扩大扫描目录可点增量同步或重建）"
             }
             emitMessage(msg)
         }
@@ -656,6 +677,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val clean = path.trimEnd('/')
         if (clean.isEmpty() || clean in cfg.customExcludedPaths) return
         updateFilterConfig(cfg.copy(customExcludedPaths = cfg.customExcludedPaths + clean))
+    }
+
+    fun removeExcludedPath(path: String) {
+        val cfg = settings.value.filterConfig
+        val clean = path.trimEnd('/')
+        val updated = cfg.customExcludedPaths.filterNot { it.trim().trimEnd('/') == clean }
+        if (updated.size == cfg.customExcludedPaths.size) return
+        settingsRepo.updateFilterConfig(cfg.copy(customExcludedPaths = updated))
+        emitMessage("已从排除列表移出：$clean（点增量同步或重建即可重新入库）")
     }
 
     fun setOpenContentHitsInPreview(enabled: Boolean) {

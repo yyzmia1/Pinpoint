@@ -157,6 +157,7 @@ flowchart TB
         ├── FilePreviewLoaderTest.kt
         ├── FilterEngineTest.kt
         ├── FormatUtilsTest.kt
+        ├── MagneticSnapSliderTest.kt
         ├── MimeFilterHelperTest.kt
         ├── PinpointPickerAndProviderTest.kt
         ├── QuerySyntaxParserTest.kt

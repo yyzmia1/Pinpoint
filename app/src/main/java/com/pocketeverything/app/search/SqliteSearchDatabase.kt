@@ -34,9 +34,23 @@ data class PendingTier2Task(
     val accessMode: AccessMode
 )
 
+enum class CrowdedSortBy(val label: String) {
+    FILE_COUNT("按文件数最多"),
+    TOTAL_BYTES("按占用体积最大")
+}
+
 data class CrowdedDirStat(
     val path: String,
-    val childCount: Int
+    val childCount: Int,
+    val totalBytes: Long = 0L,
+    val isPersonalDir: Boolean = false
+)
+
+data class PruneSummary(
+    val removedEntries: Int,
+    val clearedDocBodies: Int = 0,
+    val requeuedDocs: Int = 0,
+    val freedBytes: Long = 0L
 )
 
 data class FileMetaRow(
@@ -736,47 +750,211 @@ class SqliteSearchDatabase(
         }
     }
 
-    fun pruneMatchingFilter(filter: com.pocketeverything.app.filter.FilterEngine, mode: AccessMode): Int {
+    fun pruneMatchingFilter(filter: com.pocketeverything.app.filter.FilterEngine, mode: AccessMode): Int =
+        pruneMatchingFilterDetailed(filter, mode).removedEntries
+
+    /**
+     * Truly cleans the index database according to [filter]:
+     * 1. Deletes all Tier-1 excluded files/subtrees from `files_meta`, `files_fts`, `docs_*`, and `dir_snapshots`.
+     * 2. Re-evaluates remaining documents against Tier-2 whitelist (`tier2AllowedPrefixes`) and size caps:
+     *    - Purges `docs_fts`, `docs_uni_fts`, and `docs_raw` for documents no longer eligible.
+     *    - Re-queues previously skipped documents (`SKIPPED_FILTER` / `SKIPPED_SIZE`) that are now eligible.
+     * 3. Runs FTS5 `optimize`, `PRAGMA wal_checkpoint(TRUNCATE)`, and `VACUUM` so `.db` file size shrinks on disk immediately.
+     */
+    fun pruneMatchingFilterDetailed(
+        filter: com.pocketeverything.app.filter.FilterEngine,
+        mode: AccessMode
+    ): PruneSummary {
         return writeLock.withLock {
+            val beforeBytes = computeDiskFootprintBytes()
             val staleIds = ArrayList<Long>()
-            writeConn.prepare("SELECT id, path, name, is_dir FROM files_meta").use { stmt ->
+            val downgradedDocs = ArrayList<Pair<Long, Int>>()
+            val requeuedDocIds = ArrayList<Long>()
+
+            writeConn.prepare(
+                "SELECT id, path, name, ext, size, is_dir, tier2_status FROM files_meta"
+            ).use { stmt ->
                 while (stmt.step()) {
                     val id = stmt.getLong(0)
                     val path = stmt.getText(1)
                     val name = stmt.getText(2)
-                    val isDir = stmt.getLong(3) != 0L
+                    val ext = stmt.getText(3)
+                    val size = stmt.getLong(4)
+                    val isDir = stmt.getLong(5) != 0L
+                    val oldTier2Status = stmt.getLong(6).toInt()
+
                     if (filter.shouldSkipTier1Path(path, name, isDir, mode)) {
                         staleIds.add(id)
+                    } else if (!isDir) {
+                        val desired = filter.evaluateTier2Status(path, ext, size, isDir = false)
+                        if ((oldTier2Status == Tier2Status.INDEXED.code || oldTier2Status == Tier2Status.PENDING.code) &&
+                            (desired == Tier2Status.SKIPPED_FILTER || desired == Tier2Status.SKIPPED_SIZE)
+                        ) {
+                            downgradedDocs.add(id to desired.code)
+                        } else if ((oldTier2Status == Tier2Status.SKIPPED_FILTER.code || oldTier2Status == Tier2Status.SKIPPED_SIZE.code) &&
+                            desired == Tier2Status.PENDING
+                        ) {
+                            requeuedDocIds.add(id)
+                        }
                     }
                 }
             }
-            if (staleIds.isEmpty()) return@withLock 0
-            deleteEntriesByIdsLocked(staleIds)
-            staleIds.size
+
+            val staleSnapshotPaths = ArrayList<String>()
+            writeConn.prepare("SELECT path FROM dir_snapshots").use { stmt ->
+                while (stmt.step()) {
+                    val p = stmt.getText(0)
+                    val name = p.substringAfterLast('/')
+                    if (filter.shouldSkipTier1Path(p, name, isDir = true, mode = mode)) {
+                        staleSnapshotPaths.add(p)
+                    }
+                }
+            }
+
+            if (staleIds.isNotEmpty()) {
+                deleteEntriesByIdsLocked(staleIds)
+            }
+
+            if (staleSnapshotPaths.isNotEmpty()) {
+                writeConn.execSQL("BEGIN IMMEDIATE;")
+                try {
+                    writeConn.prepare("DELETE FROM dir_snapshots WHERE path = ?").use { delSnap ->
+                        for (p in staleSnapshotPaths) {
+                            delSnap.reset()
+                            delSnap.bindText(1, p)
+                            delSnap.step()
+                        }
+                    }
+                    writeConn.execSQL("COMMIT;")
+                } catch (t: Throwable) {
+                    runCatching { writeConn.execSQL("ROLLBACK;") }
+                    throw t
+                }
+            }
+
+            if (downgradedDocs.isNotEmpty() || requeuedDocIds.isNotEmpty()) {
+                writeConn.execSQL("BEGIN IMMEDIATE;")
+                try {
+                    val updStatus = writeConn.prepare(
+                        "UPDATE files_meta SET tier2_status = ?, tier2_error = NULL WHERE id = ?"
+                    )
+                    val delDocsFts = writeConn.prepare("DELETE FROM docs_fts WHERE rowid = ?")
+                    val delDocsUni = writeConn.prepare("DELETE FROM docs_uni_fts WHERE rowid = ?")
+                    val delDocsRaw = writeConn.prepare("DELETE FROM docs_raw WHERE file_id = ?")
+                    try {
+                        for ((docId, newCode) in downgradedDocs) {
+                            updStatus.reset()
+                            updStatus.bindLong(1, newCode.toLong())
+                            updStatus.bindLong(2, docId)
+                            updStatus.step()
+
+                            delDocsFts.reset(); delDocsFts.bindLong(1, docId); delDocsFts.step()
+                            delDocsUni.reset(); delDocsUni.bindLong(1, docId); delDocsUni.step()
+                            delDocsRaw.reset(); delDocsRaw.bindLong(1, docId); delDocsRaw.step()
+                        }
+                        for (docId in requeuedDocIds) {
+                            updStatus.reset()
+                            updStatus.bindLong(1, Tier2Status.PENDING.code.toLong())
+                            updStatus.bindLong(2, docId)
+                            updStatus.step()
+                        }
+                    } finally {
+                        updStatus.close()
+                        delDocsFts.close()
+                        delDocsUni.close()
+                        delDocsRaw.close()
+                    }
+                    writeConn.execSQL("COMMIT;")
+                } catch (t: Throwable) {
+                    runCatching { writeConn.execSQL("ROLLBACK;") }
+                    throw t
+                }
+            }
+
+            if (staleIds.isNotEmpty() || downgradedDocs.isNotEmpty() || staleSnapshotPaths.isNotEmpty()) {
+                reclaimDiskSpaceLocked()
+            }
+
+            val afterBytes = computeDiskFootprintBytes()
+            PruneSummary(
+                removedEntries = staleIds.size,
+                clearedDocBodies = downgradedDocs.size,
+                requeuedDocs = requeuedDocIds.size,
+                freedBytes = (beforeBytes - afterBytes).coerceAtLeast(0L)
+            )
         }
     }
 
-    fun getTopCrowdedDirectories(limit: Int = 5): List<CrowdedDirStat> {
+    private fun computeDiskFootprintBytes(): Long {
+        if (isInMemory) return 0L
+        val mainFile = File(dbPath)
+        val walFile = File("$dbPath-wal")
+        return (if (mainFile.exists()) mainFile.length() else 0L) +
+            (if (walFile.exists()) walFile.length() else 0L)
+    }
+
+    private fun reclaimDiskSpaceLocked() {
+        if (isInMemory) return
+        readLock.withLock {
+            runCatching { writeConn.execSQL("INSERT INTO files_fts(files_fts) VALUES('optimize');") }
+            runCatching { writeConn.execSQL("INSERT INTO docs_fts(docs_fts) VALUES('optimize');") }
+            runCatching { writeConn.execSQL("INSERT INTO docs_uni_fts(docs_uni_fts) VALUES('optimize');") }
+            runCatching { writeConn.execSQL("PRAGMA wal_checkpoint(TRUNCATE);") }
+            runCatching { writeConn.execSQL("VACUUM;") }
+            runCatching { writeConn.execSQL("PRAGMA wal_checkpoint(TRUNCATE);") }
+        }
+    }
+
+    fun getTopCrowdedDirectories(
+        limit: Int = 5,
+        sortBy: CrowdedSortBy = CrowdedSortBy.FILE_COUNT
+    ): List<CrowdedDirStat> {
         return readLock.withLock {
             val out = ArrayList<CrowdedDirStat>(limit)
+            val orderClause = when (sortBy) {
+                CrowdedSortBy.FILE_COUNT -> "cnt DESC, total_bytes DESC, parent_path ASC"
+                CrowdedSortBy.TOTAL_BYTES -> "total_bytes DESC, cnt DESC, parent_path ASC"
+            }
             readConn.prepare(
                 """
-                SELECT parent_path, COUNT(*) AS cnt
+                SELECT
+                    parent_path,
+                    COUNT(*) AS cnt,
+                    COALESCE(SUM(CASE WHEN is_dir = 0 THEN size ELSE 0 END), 0) AS total_bytes
                 FROM files_meta
                 WHERE (parent_path LIKE '/storage/%/%' OR parent_path LIKE '/data/%')
                   AND parent_path NOT IN ('/', '/data', '/sdcard', '/storage', '/storage/emulated', '/storage/emulated/0', '/storage/self', '/storage/self/primary')
                   AND NOT (parent_path GLOB '/storage/emulated/[0-9]*' AND parent_path NOT LIKE '/storage/emulated/%/%')
                 GROUP BY parent_path
-                ORDER BY cnt DESC, parent_path ASC
+                ORDER BY $orderClause
                 LIMIT ?
                 """.trimIndent()
             ).use { stmt ->
                 stmt.bindLong(1, limit.coerceIn(1, 20).toLong())
                 while (stmt.step()) {
-                    out.add(CrowdedDirStat(stmt.getText(0), stmt.getLong(1).toInt()))
+                    val path = stmt.getText(0)
+                    val cnt = stmt.getLong(1).toInt()
+                    val bytes = stmt.getLong(2)
+                    out.add(
+                        CrowdedDirStat(
+                            path = path,
+                            childCount = cnt,
+                            totalBytes = bytes,
+                            isPersonalDir = isPersonalUserDirectory(path)
+                        )
+                    )
                 }
             }
             out
+        }
+    }
+
+    private fun isPersonalUserDirectory(path: String): Boolean {
+        val lower = path.lowercase()
+        if (lower.contains("/android/data/") || lower.contains("/android/obb/")) return false
+        val segments = lower.split('/').filter { it.isNotEmpty() }
+        return segments.any { seg ->
+            seg in PERSONAL_USER_DIR_NAMES
         }
     }
 
@@ -1894,6 +2072,20 @@ class SqliteSearchDatabase(
     }
 
     companion object {
+        private val PERSONAL_USER_DIR_NAMES = setOf(
+            "dcim",
+            "camera",
+            "pictures",
+            "download",
+            "downloads",
+            "documents",
+            "movies",
+            "music",
+            "recordings",
+            "podcasts",
+            "audiobooks"
+        )
+
         fun compressUtf8(text: String): ByteArray {
             val raw = text.toByteArray(Charsets.UTF_8)
             val deflater = Deflater(Deflater.DEFAULT_COMPRESSION)
