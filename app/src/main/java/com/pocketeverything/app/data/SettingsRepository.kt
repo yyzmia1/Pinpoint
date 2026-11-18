@@ -3,6 +3,8 @@ package com.pocketeverything.app.data
 import android.content.Context
 import android.content.SharedPreferences
 import com.pocketeverything.app.filter.FilterConfig
+import com.pocketeverything.app.filter.Tier2PriorityEntry
+import com.pocketeverything.app.filter.Tier2PriorityRule
 import com.pocketeverything.app.search.AccessMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -72,34 +74,27 @@ class SettingsRepository(context: Context) {
         val mode = AccessMode.fromCode(prefs.getInt(KEY_MODE, AccessMode.NORMAL.code))
         val skipNoise = prefs.getBoolean(KEY_SKIP_NOISE, true)
         val dedupMounts = prefs.getBoolean(KEY_DEDUP_MOUNTS, true)
-        val customExcludes = prefs.getString(KEY_CUSTOM_EXCLUDES, "")
-            ?.lines()?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()
-        val customExcludedDirs = prefs.getString(KEY_CUSTOM_EXCLUDED_DIRS, "")
-            ?.split('\n', ',', ';')
-            ?.map { it.trim() }
-            ?.filter { it.isNotEmpty() }
-            ?: emptyList()
-        val rootIncludeData = prefs.getBoolean(KEY_ROOT_INCLUDE_DATA, false)
+        val customExcludes = loadAndMigrateExcludedPaths()
         val allowedPrefixes = prefs.getString(KEY_TIER2_ALLOWED, null)
             ?.lines()?.map { it.trim() }?.filter { it.isNotEmpty() }
             ?: FilterConfig.DEFAULT_TIER2_ALLOWED_PREFIXES
         val blockedPrefixes = prefs.getString(KEY_TIER2_BLOCKED, null)
             ?.lines()?.map { it.trim() }?.filter { it.isNotEmpty() }
             ?: FilterConfig.DEFAULT_TIER2_BLOCKED_PREFIXES
-        val maxTxtMb = prefs.getInt(KEY_MAX_TXT_MB, 10).coerceIn(1, 200)
-        val maxDocxMb = prefs.getInt(KEY_MAX_DOCX_MB, 30).coerceIn(1, 200)
-        val maxPdfMb = prefs.getInt(KEY_MAX_PDF_MB, 50).coerceIn(1, 300)
+        val priorityOrder = decodePriorityOrder(prefs.getString(KEY_TIER2_PRIORITY, null))
+        val maxTxtMb = coerceLimitMb(prefs.getInt(KEY_MAX_TXT_MB, 10))
+        val maxDocxMb = coerceLimitMb(prefs.getInt(KEY_MAX_DOCX_MB, 30))
+        val maxPdfMb = coerceLimitMb(prefs.getInt(KEY_MAX_PDF_MB, 50))
 
         return AppSettings(
             accessMode = mode,
             filterConfig = FilterConfig(
                 skipNoiseCaches = skipNoise,
                 deduplicateMounts = dedupMounts,
-                rootIncludeData = rootIncludeData,
                 customExcludedPaths = customExcludes,
-                customExcludedDirNames = customExcludedDirs,
                 tier2AllowedPrefixes = allowedPrefixes,
                 tier2BlockedPrefixes = blockedPrefixes,
+                tier2PriorityOrder = priorityOrder,
                 maxTxtMdBytes = maxTxtMb * 1024L * 1024L,
                 maxDocxBytes = maxDocxMb * 1024L * 1024L,
                 maxPdfBytes = maxPdfMb * 1024L * 1024L
@@ -141,19 +136,64 @@ class SettingsRepository(context: Context) {
     }
 
     fun updateFilterConfig(config: FilterConfig) {
+        val cleanExcludes = FilterConfig.normalizePaths(config.customExcludedPaths)
+        val cleanPriority = FilterConfig.normalizePriorityOrder(config.tier2PriorityOrder)
+        val cleanConfig = config.copy(
+            customExcludedPaths = cleanExcludes,
+            tier2PriorityOrder = cleanPriority
+        )
         prefs.edit()
-            .putBoolean(KEY_SKIP_NOISE, config.skipNoiseCaches)
-            .putBoolean(KEY_DEDUP_MOUNTS, config.deduplicateMounts)
-            .putBoolean(KEY_ROOT_INCLUDE_DATA, config.rootIncludeData)
-            .putString(KEY_CUSTOM_EXCLUDES, config.customExcludedPaths.joinToString("\n"))
-            .putString(KEY_CUSTOM_EXCLUDED_DIRS, config.customExcludedDirNames.joinToString("\n"))
-            .putString(KEY_TIER2_ALLOWED, config.tier2AllowedPrefixes.joinToString("\n"))
-            .putString(KEY_TIER2_BLOCKED, config.tier2BlockedPrefixes.joinToString("\n"))
-            .putInt(KEY_MAX_TXT_MB, (config.maxTxtMdBytes / (1024L * 1024L)).toInt())
-            .putInt(KEY_MAX_DOCX_MB, (config.maxDocxBytes / (1024L * 1024L)).toInt())
-            .putInt(KEY_MAX_PDF_MB, (config.maxPdfBytes / (1024L * 1024L)).toInt())
+            .putBoolean(KEY_SKIP_NOISE, cleanConfig.skipNoiseCaches)
+            .putBoolean(KEY_DEDUP_MOUNTS, cleanConfig.deduplicateMounts)
+            .putString(KEY_CUSTOM_EXCLUDES, cleanExcludes.joinToString("\n"))
+            .putBoolean(KEY_EXCLUDES_MIGRATED_V143, true)
+            .putString(KEY_TIER2_ALLOWED, cleanConfig.tier2AllowedPrefixes.joinToString("\n"))
+            .putString(KEY_TIER2_BLOCKED, cleanConfig.tier2BlockedPrefixes.joinToString("\n"))
+            .putString(KEY_TIER2_PRIORITY, encodePriorityOrder(cleanPriority))
+            .putInt(KEY_MAX_TXT_MB, coerceLimitMb((cleanConfig.maxTxtMdBytes / (1024L * 1024L)).toInt()))
+            .putInt(KEY_MAX_DOCX_MB, coerceLimitMb((cleanConfig.maxDocxBytes / (1024L * 1024L)).toInt()))
+            .putInt(KEY_MAX_PDF_MB, coerceLimitMb((cleanConfig.maxPdfBytes / (1024L * 1024L)).toInt()))
             .apply()
-        _settings.value = _settings.value.copy(filterConfig = config)
+        _settings.value = _settings.value.copy(filterConfig = cleanConfig)
+    }
+
+    private fun loadAndMigrateExcludedPaths(): List<String> {
+        val raw = prefs.getString(KEY_CUSTOM_EXCLUDES, null)
+            ?.lines()?.map { it.trim() }?.filter { it.isNotEmpty() }
+        if (prefs.getBoolean(KEY_EXCLUDES_MIGRATED_V143, false)) {
+            return FilterConfig.normalizePaths(raw ?: FilterConfig.DEFAULT_EXCLUDED_PATHS)
+        }
+        val legacyIncludeData = prefs.getBoolean(KEY_LEGACY_ROOT_INCLUDE_DATA, false)
+        val base = raw ?: emptyList()
+        val migrated = if (!legacyIncludeData && "/data" !in FilterConfig.normalizePaths(base)) {
+            FilterConfig.normalizePaths(listOf("/data") + base)
+        } else {
+            FilterConfig.normalizePaths(base)
+        }
+        prefs.edit()
+            .putString(KEY_CUSTOM_EXCLUDES, migrated.joinToString("\n"))
+            .putBoolean(KEY_EXCLUDES_MIGRATED_V143, true)
+            .remove(KEY_LEGACY_CUSTOM_EXCLUDED_DIRS)
+            .remove(KEY_LEGACY_ROOT_INCLUDE_DATA)
+            .apply()
+        return migrated
+    }
+
+    private fun coerceLimitMb(raw: Int): Int =
+        if (raw <= 0) 0 else raw.coerceIn(1, FilterConfig.MAX_FINITE_MB)
+
+    private fun encodePriorityOrder(entries: List<Tier2PriorityEntry>): String =
+        entries.joinToString(",") { "${it.rule.code}:${if (it.enabled) 1 else 0}" }
+
+    private fun decodePriorityOrder(raw: String?): List<Tier2PriorityEntry> {
+        if (raw.isNullOrBlank()) return FilterConfig.DEFAULT_TIER2_PRIORITY_ORDER
+        val parsed = raw.split(',').mapNotNull { token ->
+            val parts = token.trim().split(':')
+            val rule = Tier2PriorityRule.fromCode(parts.getOrNull(0).orEmpty()) ?: return@mapNotNull null
+            val enabled = parts.getOrNull(1)?.let { it != "0" } ?: true
+            Tier2PriorityEntry(rule, enabled)
+        }
+        return FilterConfig.normalizePriorityOrder(parsed)
     }
 
     fun setRealtimeMonitorEnabled(enabled: Boolean) {
@@ -346,11 +386,13 @@ class SettingsRepository(context: Context) {
         private const val KEY_MODE = "access_mode"
         private const val KEY_SKIP_NOISE = "skip_noise_caches"
         private const val KEY_DEDUP_MOUNTS = "dedup_mounts"
-        private const val KEY_ROOT_INCLUDE_DATA = "root_include_data"
+        private const val KEY_LEGACY_ROOT_INCLUDE_DATA = "root_include_data"
         private const val KEY_CUSTOM_EXCLUDES = "custom_excludes"
-        private const val KEY_CUSTOM_EXCLUDED_DIRS = "custom_excluded_dirs"
+        private const val KEY_EXCLUDES_MIGRATED_V143 = "excludes_migrated_v143"
+        private const val KEY_LEGACY_CUSTOM_EXCLUDED_DIRS = "custom_excluded_dirs"
         private const val KEY_TIER2_ALLOWED = "tier2_allowed"
         private const val KEY_TIER2_BLOCKED = "tier2_blocked"
+        private const val KEY_TIER2_PRIORITY = "tier2_priority"
         private const val KEY_MAX_TXT_MB = "max_txt_mb"
         private const val KEY_MAX_DOCX_MB = "max_docx_mb"
         private const val KEY_MAX_PDF_MB = "max_pdf_mb"

@@ -151,7 +151,7 @@ class FilePreviewLoader(
         var textContent = cachedText
         var textNote: String? = null
         if (textContent == null) {
-            val extractLimit = filterConfig.maxPdfBytes.coerceAtMost(80L * 1024L * 1024L)
+            val extractLimit = previewExtractCap(filterConfig.maxPdfBytes)
             val live = runCatching {
                 if (localFile != null && localFile.canRead()) {
                     localFile.inputStream().use { extractorDispatcher.extractByExtension("pdf", it, extractLimit) }
@@ -219,7 +219,7 @@ class FilePreviewLoader(
 
         val provider = providerResolver(item.accessMode)
         if (ext == "docx") {
-            val maxBytes = filterConfig.maxDocxBytes.coerceAtMost(50L * 1024L * 1024L)
+            val maxBytes = previewExtractCap(filterConfig.maxDocxBytes)
             val result = runCatching {
                 provider.openFileStream(item.path, maxBytes) { input ->
                     extractorDispatcher.extractByExtension("docx", input, maxBytes)
@@ -633,6 +633,9 @@ class FilePreviewLoader(
             }
             return sb.toString()
         }
+
+        private fun previewExtractCap(configuredBytes: Long): Long =
+            if (configuredBytes <= 0L) 80L * 1024L * 1024L else configuredBytes.coerceAtMost(80L * 1024L * 1024L)
 
         private fun computeInSampleSize(width: Int, height: Int, maxDim: Int): Int {
             var inSample = 1

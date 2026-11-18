@@ -9,25 +9,20 @@ import com.pocketeverything.app.search.Tier2Status
 class FilterEngine(
     val config: FilterConfig = FilterConfig()
 ) {
-    private val normalizedCustomExcludes = config.customExcludedPaths
-        .map { it.trim().trimEnd('/') }
-        .filter { it.isNotEmpty() }
+    private val normalizedCustomExcludes = FilterConfig.normalizePaths(config.customExcludedPaths)
 
-    private val excludedDirNameSet: Set<String> = buildSet {
-        if (config.skipNoiseCaches) {
-            addAll(FilterConfig.DEFAULT_NOISE_DIR_NAMES)
-        }
-        config.customExcludedDirNames
-            .map { it.trim().lowercase() }
-            .filter { it.isNotEmpty() }
-            .forEach { add(it) }
+    private val excludedDirNameSet: Set<String> = if (config.skipNoiseCaches) {
+        FilterConfig.DEFAULT_NOISE_DIR_NAMES
+    } else {
+        emptySet()
     }
 
     private val normalizedTier2Allowed = FilterConfig.normalizeTier2AllowedPrefixes(config.tier2AllowedPrefixes)
 
-    private val normalizedTier2Blocked = config.tier2BlockedPrefixes
-        .map { it.trim().trimEnd('/') }
-        .filter { it.isNotEmpty() }
+    private val normalizedTier2Blocked = FilterConfig.normalizePaths(config.tier2BlockedPrefixes)
+
+    fun isDataPotentiallyIndexed(mode: AccessMode): Boolean =
+        mode == AccessMode.ROOT && !shouldSkipTier1Path("/data", "data", isDir = true, mode = mode)
 
     fun getRootExcludedPrefixes(mode: AccessMode): Array<String> {
         val list = ArrayList<String>(24)
@@ -35,9 +30,6 @@ class FilterEngine(
             list.addAll(FilterConfig.VIRTUAL_FS_EXCLUSIONS)
             if (config.deduplicateMounts) {
                 list.addAll(FilterConfig.BIND_MOUNT_DUPLICATE_PREFIXES)
-            }
-            if (!config.rootIncludeData) {
-                list.add("/data")
             }
         }
         list.addAll(normalizedCustomExcludes)
@@ -56,9 +48,6 @@ class FilterEngine(
                 for (dup in FilterConfig.BIND_MOUNT_DUPLICATE_PREFIXES) {
                     if (matchesPathPrefix(clean, dup)) return true
                 }
-            }
-            if (!config.rootIncludeData && matchesPathPrefix(clean, "/data")) {
-                return true
             }
         }
 
@@ -113,7 +102,7 @@ class FilterEngine(
         if (size <= 0L) return Tier2Status.SCANNED_OR_EMPTY
 
         val maxAllowed = maxBytesForExtension(lowerExt)
-        if (size > maxAllowed) return Tier2Status.SKIPPED_SIZE
+        if (maxAllowed > 0L && size > maxAllowed) return Tier2Status.SKIPPED_SIZE
 
         return Tier2Status.PENDING
     }

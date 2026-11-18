@@ -1,12 +1,14 @@
 package com.pocketeverything.app.parser
 
 import com.pocketeverything.app.search.Tier2Status
+import java.io.File
 import java.io.InputStream
 
 class ExtractorDispatcher(
+    tempDir: File? = null,
     private val txtMdExtractor: DocumentExtractor = TxtMdExtractor(),
     private val docxExtractor: DocumentExtractor = DocxExtractor(),
-    private val pdfExtractor: DocumentExtractor = PdfExtractor()
+    private val pdfExtractor: DocumentExtractor = PdfExtractor(tempDir = tempDir)
 ) {
     fun extractByExtension(ext: String, inputStream: InputStream, maxBytes: Long): ExtractionResult {
         return when (ext.lowercase()) {

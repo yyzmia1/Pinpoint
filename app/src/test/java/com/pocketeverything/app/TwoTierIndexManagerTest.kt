@@ -5,6 +5,7 @@ import android.content.ContextWrapper
 import android.content.SharedPreferences
 import com.pocketeverything.app.data.SettingsRepository
 import com.pocketeverything.app.filter.FilterEngine
+import com.pocketeverything.app.filter.RootDataScope
 import com.pocketeverything.app.fs.FileSystemProvider
 import com.pocketeverything.app.fs.ModeAvailability
 import com.pocketeverything.app.fs.ScannedFileRecord
@@ -390,6 +391,95 @@ class TwoTierIndexManagerTest {
             assertEquals(0, db.search("content:旧版关键字").items.size)
             val updated = db.search("content:新版正文").items.single()
             assertEquals(512L, updated.size)
+        }
+    }
+
+    @Test
+    fun `legacy root_include_data migrates cleanly and root incremental sync tracks non-adb data subdirs`() = runBlocking {
+        // 1. Legacy v1.4.2 prefs with root_include_data=false migrates /data into customExcludedPaths
+        val legacyFalseCtx = TestContext()
+        legacyFalseCtx.getSharedPreferences("pocket_everything_prefs", 0).edit()
+            .putBoolean("root_include_data", false)
+            .putString("custom_excludes", "/storage/emulated/0/Movies")
+            .apply()
+        val migratedFalseRepo = SettingsRepository(legacyFalseCtx)
+        assertEquals(RootDataScope.EXCLUDE_ALL, migratedFalseRepo.settings.value.filterConfig.rootDataScope())
+        assertTrue("/storage/emulated/0/Movies" in migratedFalseRepo.settings.value.filterConfig.customExcludedPaths)
+
+        // 2. Legacy v1.4.2 prefs with root_include_data=true keeps /data unexcluded
+        val legacyTrueCtx = TestContext()
+        legacyTrueCtx.getSharedPreferences("pocket_everything_prefs", 0).edit()
+            .putBoolean("root_include_data", true)
+            .putString("custom_excludes", "")
+            .apply()
+        val migratedTrueRepo = SettingsRepository(legacyTrueCtx)
+        assertEquals(RootDataScope.INCLUDE_ALL, migratedTrueRepo.settings.value.filterConfig.rootDataScope())
+
+        // 3. Relaxing from EXCLUDE_ALL -> EXCLUDE_PRIVATE scans /data/misc and /data/adb, then incremental sync catches updates under /data/misc
+        val dbFile = Files.createTempFile("pocket_data_inc_", ".db").toFile().apply { deleteOnExit() }
+        val ctx = TestContext()
+        val settingsRepo = SettingsRepository(ctx)
+        settingsRepo.updateAccessMode(AccessMode.ROOT)
+        settingsRepo.updateFilterConfig(settingsRepo.settings.value.filterConfig.withRootDataScope(RootDataScope.EXCLUDE_PRIVATE))
+
+        val provider = FakeProvider(AccessMode.ROOT)
+        var miscMtime = 1000L
+        var includeNewWifiFile = false
+
+        provider.scanDirsHandler = { roots, onDirListed, onBatch ->
+            if ("/data" in roots) {
+                onDirListed("/data")
+                val records = listOf(
+                    ScannedFileRecord("/data", "/", "data", "", 0L, 1000L, true, AccessMode.ROOT),
+                    ScannedFileRecord("/data/misc", "/data", "misc", "", 0L, miscMtime, true, AccessMode.ROOT),
+                    ScannedFileRecord("/data/misc/wifi.conf", "/data/misc", "wifi.conf", "conf", 120L, miscMtime, false, AccessMode.ROOT),
+                    ScannedFileRecord("/data/adb", "/data", "adb", "", 0L, 1000L, true, AccessMode.ROOT),
+                    ScannedFileRecord("/data/adb/mod.sh", "/data/adb", "mod.sh", "sh", 64L, 1000L, false, AccessMode.ROOT)
+                )
+                onBatch(records)
+                records.size
+            } else 0
+        }
+        provider.statDirsHandler = { dirs ->
+            dirs.mapNotNull { d ->
+                when (d) {
+                    "/storage/emulated/0" -> d to 1000L
+                    "/data" -> d to 1000L
+                    "/data/misc" -> d to miscMtime
+                    "/data/adb" -> d to 1000L
+                    else -> null
+                }
+            }.toMap()
+        }
+        provider.listDirectHandler = { dirs, onDirListed, onBatch ->
+            if ("/data/misc" in dirs && includeNewWifiFile) {
+                onDirListed("/data/misc")
+                val updatedList = listOf(
+                    ScannedFileRecord("/data/misc/wifi.conf", "/data/misc", "wifi.conf", "conf", 120L, miscMtime, false, AccessMode.ROOT),
+                    ScannedFileRecord("/data/misc/bluedroid.conf", "/data/misc", "bluedroid.conf", "conf", 80L, miscMtime, false, AccessMode.ROOT)
+                )
+                onBatch(updatedList)
+                updatedList.size
+            } else 0
+        }
+
+        SqliteSearchDatabase(dbFile.absolutePath).use { db ->
+            val mgr = TwoTierIndexManager(
+                context = ctx,
+                db = db,
+                settingsRepo = settingsRepo,
+                providerResolver = { provider },
+                storageRootsResolver = { listOf("/storage/emulated/0") }
+            )
+            mgr.startDirectoriesRefresh(listOf("/data")).join()
+            settingsRepo.markFullScanCompleted(1000L)
+            assertEquals(1, db.search("name:wifi.conf").items.size)
+            assertEquals(1, db.search("name:mod.sh").items.size)
+
+            miscMtime = 2000L
+            includeNewWifiFile = true
+            mgr.startQuickHotDirsRefresh().join()
+            assertEquals(1, db.search("name:bluedroid.conf").items.size)
         }
     }
 }

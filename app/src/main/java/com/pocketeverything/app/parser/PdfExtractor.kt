@@ -1,27 +1,34 @@
 package com.pocketeverything.app.parser
 
 import com.pocketeverything.app.search.Tier2Status
+import com.tom_roush.pdfbox.io.MemoryUsageSetting
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import java.io.BufferedInputStream
+import java.io.File
 import java.io.InputStream
 
 /**
- * Extracts text layers page-by-page using PDFBox-Android.
- * Safely flags scanned/image-only PDFs and password-protected PDFs without crashing.
+ * Extracts text layers page-by-page using PDFBox-Android with disk-spilled scratch memory
+ * so large (hundreds of MB) PDFs never trigger heap OutOfMemoryError.
  */
 class PdfExtractor(
-    private val maxPages: Int = 500,
-    private val maxChars: Int = 1_500_000
+    private val maxPages: Int = 1000,
+    private val maxChars: Int = 2_000_000,
+    private val tempDir: File? = null
 ) : DocumentExtractor {
 
     override fun extract(inputStream: InputStream, maxBytes: Long): ExtractionResult {
         var doc: PDDocument? = null
         return try {
-            doc = PDDocument.load(BufferedInputStream(inputStream))
+            val memSetting = MemoryUsageSetting.setupMixed(MIXED_RAM_BUDGET_BYTES).apply {
+                if (tempDir != null && (tempDir.exists() || tempDir.mkdirs())) {
+                    setTempDir(tempDir)
+                }
+            }
+            doc = PDDocument.load(BufferedInputStream(inputStream.boundedBy(maxBytes)), memSetting)
             if (doc.isEncrypted) {
-                // Attempt empty-password decrypt; PDFBox throws InvalidPasswordException if locked
                 runCatching { doc.setAllSecurityToBeRemoved(true) }
             }
 
@@ -70,5 +77,9 @@ class PdfExtractor(
         } finally {
             runCatching { doc?.close() }
         }
+    }
+
+    private companion object {
+        const val MIXED_RAM_BUDGET_BYTES = 16L * 1024L * 1024L
     }
 }

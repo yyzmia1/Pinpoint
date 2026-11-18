@@ -4,6 +4,9 @@ import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.SQLiteStatement
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import androidx.sqlite.execSQL
+import com.pocketeverything.app.filter.FilterConfig
+import com.pocketeverything.app.filter.Tier2PriorityEntry
+import com.pocketeverything.app.filter.Tier2PriorityRule
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.concurrent.locks.ReentrantLock
@@ -32,18 +35,6 @@ data class PendingTier2Task(
     val size: Long,
     val mtime: Long,
     val accessMode: AccessMode
-)
-
-enum class CrowdedSortBy(val label: String) {
-    FILE_COUNT("按文件数最多"),
-    TOTAL_BYTES("按占用体积最大")
-}
-
-data class CrowdedDirStat(
-    val path: String,
-    val childCount: Int,
-    val totalBytes: Long = 0L,
-    val isPersonalDir: Boolean = false
 )
 
 data class PruneSummary(
@@ -409,7 +400,11 @@ class SqliteSearchDatabase(
         }
     }
 
-    fun fetchPendingTier2Tasks(limit: Int = 32): List<PendingTier2Task> {
+    fun fetchPendingTier2Tasks(
+        limit: Int = 32,
+        priorityOrder: List<Tier2PriorityEntry> = FilterConfig.DEFAULT_TIER2_PRIORITY_ORDER
+    ): List<PendingTier2Task> {
+        val orderSql = buildTier2OrderClause(priorityOrder)
         return readLock.withLock {
             val result = ArrayList<PendingTier2Task>(limit)
             readConn.prepare(
@@ -417,7 +412,7 @@ class SqliteSearchDatabase(
                 SELECT id, path, name, ext, size, mtime, access_mode
                 FROM files_meta
                 WHERE tier2_status = ?
-                ORDER BY mtime DESC
+                ORDER BY $orderSql
                 LIMIT ?
                 """.trimIndent()
             ).use { stmt ->
@@ -439,6 +434,44 @@ class SqliteSearchDatabase(
             }
             result
         }
+    }
+
+    private fun buildTier2OrderClause(priorityOrder: List<Tier2PriorityEntry>): String {
+        val clauses = ArrayList<String>(6)
+        var hasMtime = false
+        var hasSize = false
+        for (entry in FilterConfig.normalizePriorityOrder(priorityOrder)) {
+            if (!entry.enabled) continue
+            when (entry.rule) {
+                Tier2PriorityRule.USER_DIRS_FIRST -> clauses.add(
+                    """
+                    CASE WHEN instr(lower(path), '/download/') > 0
+                           OR instr(lower(path), '/documents/') > 0
+                           OR instr(lower(path), '/micromsg/download/') > 0
+                           OR instr(lower(path), '/qqfile_recv/') > 0
+                           OR instr(lower(path), '/weixin/') > 0
+                           OR instr(lower(path), '/telegram/') > 0
+                           OR instr(lower(path), '/notes/') > 0
+                         THEN 0 ELSE 1 END ASC
+                    """.trimIndent().replace('\n', ' ')
+                )
+                Tier2PriorityRule.MTIME_DESC -> {
+                    clauses.add("mtime DESC")
+                    hasMtime = true
+                }
+                Tier2PriorityRule.FAST_FORMAT_FIRST -> clauses.add(
+                    "CASE WHEN lower(ext) IN ('txt', 'md', 'markdown') THEN 0 WHEN lower(ext) = 'docx' THEN 1 WHEN lower(ext) = 'pdf' THEN 2 ELSE 3 END ASC"
+                )
+                Tier2PriorityRule.SMALL_SIZE_FIRST -> {
+                    clauses.add("size ASC")
+                    hasSize = true
+                }
+            }
+        }
+        if (!hasMtime) clauses.add("mtime DESC")
+        if (!hasSize) clauses.add("size ASC")
+        clauses.add("id ASC")
+        return clauses.joinToString(", ")
     }
 
     fun saveTier2Result(
@@ -601,10 +634,10 @@ class SqliteSearchDatabase(
 
     /**
      * Returns tracked mutable directories (`path -> mtime`) from `files_meta` for incremental sync,
-     * covering all user storage dirs (and `/data/adb`, `/data/local` when [includeDataAdb] is true),
-     * while skipping immutable ROM partitions and high-churn `/data/data` app private internals.
+     * covering all user storage dirs (and indexed `/data/...` dirs when [includeData] is true),
+     * while skipping immutable ROM partitions (`/system`, `/vendor`, etc.).
      */
-    fun getTrackedMutableDirectories(includeDataAdb: Boolean): Map<String, Long> {
+    fun getTrackedMutableDirectories(includeData: Boolean): Map<String, Long> {
         return readLock.withLock {
             val out = HashMap<String, Long>(1024)
             readConn.prepare("SELECT path, mtime FROM files_meta WHERE is_dir = 1").use { stmt ->
@@ -612,11 +645,9 @@ class SqliteSearchDatabase(
                     val p = stmt.getText(0)
                     val isContainerDir = p == "/storage/emulated" || p == "/storage/self" || p == "/storage/enc_emulated"
                     val isMutableStorage = p.startsWith("/storage/") && !isContainerDir
-                    val isPrivilegedUserDir = includeDataAdb && (
-                        p == "/data/adb" || p.startsWith("/data/adb/") ||
-                            p == "/data/local" || p.startsWith("/data/local/")
-                        )
-                    if (isMutableStorage || isPrivilegedUserDir) {
+                    val isDataDir = includeData && (p == "/data" || p.startsWith("/data/")) &&
+                        p != "/data/dalvik-cache" && !p.startsWith("/data/dalvik-cache/")
+                    if (isMutableStorage || isDataDir) {
                         out[p] = stmt.getLong(1)
                     }
                 }
@@ -902,59 +933,6 @@ class SqliteSearchDatabase(
             runCatching { writeConn.execSQL("PRAGMA wal_checkpoint(TRUNCATE);") }
             runCatching { writeConn.execSQL("VACUUM;") }
             runCatching { writeConn.execSQL("PRAGMA wal_checkpoint(TRUNCATE);") }
-        }
-    }
-
-    fun getTopCrowdedDirectories(
-        limit: Int = 5,
-        sortBy: CrowdedSortBy = CrowdedSortBy.FILE_COUNT
-    ): List<CrowdedDirStat> {
-        return readLock.withLock {
-            val out = ArrayList<CrowdedDirStat>(limit)
-            val orderClause = when (sortBy) {
-                CrowdedSortBy.FILE_COUNT -> "cnt DESC, total_bytes DESC, parent_path ASC"
-                CrowdedSortBy.TOTAL_BYTES -> "total_bytes DESC, cnt DESC, parent_path ASC"
-            }
-            readConn.prepare(
-                """
-                SELECT
-                    parent_path,
-                    COUNT(*) AS cnt,
-                    COALESCE(SUM(CASE WHEN is_dir = 0 THEN size ELSE 0 END), 0) AS total_bytes
-                FROM files_meta
-                WHERE (parent_path LIKE '/storage/%/%' OR parent_path LIKE '/data/%')
-                  AND parent_path NOT IN ('/', '/data', '/sdcard', '/storage', '/storage/emulated', '/storage/emulated/0', '/storage/self', '/storage/self/primary')
-                  AND NOT (parent_path GLOB '/storage/emulated/[0-9]*' AND parent_path NOT LIKE '/storage/emulated/%/%')
-                GROUP BY parent_path
-                ORDER BY $orderClause
-                LIMIT ?
-                """.trimIndent()
-            ).use { stmt ->
-                stmt.bindLong(1, limit.coerceIn(1, 20).toLong())
-                while (stmt.step()) {
-                    val path = stmt.getText(0)
-                    val cnt = stmt.getLong(1).toInt()
-                    val bytes = stmt.getLong(2)
-                    out.add(
-                        CrowdedDirStat(
-                            path = path,
-                            childCount = cnt,
-                            totalBytes = bytes,
-                            isPersonalDir = isPersonalUserDirectory(path)
-                        )
-                    )
-                }
-            }
-            out
-        }
-    }
-
-    private fun isPersonalUserDirectory(path: String): Boolean {
-        val lower = path.lowercase()
-        if (lower.contains("/android/data/") || lower.contains("/android/obb/")) return false
-        val segments = lower.split('/').filter { it.isNotEmpty() }
-        return segments.any { seg ->
-            seg in PERSONAL_USER_DIR_NAMES
         }
     }
 
@@ -2072,20 +2050,6 @@ class SqliteSearchDatabase(
     }
 
     companion object {
-        private val PERSONAL_USER_DIR_NAMES = setOf(
-            "dcim",
-            "camera",
-            "pictures",
-            "download",
-            "downloads",
-            "documents",
-            "movies",
-            "music",
-            "recordings",
-            "podcasts",
-            "audiobooks"
-        )
-
         fun compressUtf8(text: String): ByteArray {
             val raw = text.toByteArray(Charsets.UTF_8)
             val deflater = Deflater(Deflater.DEFAULT_COMPRESSION)

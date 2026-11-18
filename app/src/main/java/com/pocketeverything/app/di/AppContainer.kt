@@ -39,7 +39,9 @@ class AppContainer(context: Context) {
         }
     }
 
-    val extractorDispatcher = ExtractorDispatcher()
+    val extractorDispatcher by lazy {
+        ExtractorDispatcher(tempDir = File(appContext.cacheDir, "pdf_scratch").apply { mkdirs() })
+    }
 
     val indexManager: TwoTierIndexManager by lazy {
         TwoTierIndexManager(

@@ -3,7 +3,6 @@ package com.pocketeverything.app
 import com.pocketeverything.app.filter.FilterConfig
 import com.pocketeverything.app.filter.FilterEngine
 import com.pocketeverything.app.search.AccessMode
-import com.pocketeverything.app.search.CrowdedSortBy
 import com.pocketeverything.app.search.FileUpsertEntry
 import com.pocketeverything.app.search.QuickScope
 import com.pocketeverything.app.search.SqliteSearchDatabase
@@ -382,14 +381,9 @@ class SqliteSearchDatabaseAndBenchmarkTest {
                 )
             )
 
-            // Incremental dir query skips /system and /data/data, keeps /storage and optionally /data/adb
-            assertEquals(setOf("/storage/emulated/0/11aa", "/storage/emulated/0/temp_dir"), db.getTrackedMutableDirectories(includeDataAdb = false).keys)
-            assertTrue("/data/adb" in db.getTrackedMutableDirectories(includeDataAdb = true).keys)
-
-            // Top crowded directory should rank 11aa first (2 children)
-            val top = db.getTopCrowdedDirectories(5)
-            assertEquals("/storage/emulated/0/11aa", top.first().path)
-            assertEquals(2, top.first().childCount)
+            // Incremental dir query skips /system, keeps /storage and optionally /data
+            assertEquals(setOf("/storage/emulated/0/11aa", "/storage/emulated/0/temp_dir"), db.getTrackedMutableDirectories(includeData = false).keys)
+            assertTrue("/data/adb" in db.getTrackedMutableDirectories(includeData = true).keys)
 
             // pruneDirectChildren on /storage/emulated/0 keeping only 11aa drops temp_dir AND its subtree
             db.pruneDirectChildren("/storage/emulated/0", setOf("/storage/emulated/0/11aa"))
@@ -426,8 +420,7 @@ class SqliteSearchDatabaseAndBenchmarkTest {
             val filter = FilterEngine(
                 FilterConfig(
                     skipNoiseCaches = true,
-                    rootIncludeData = true,
-                    customExcludedDirNames = listOf("logs")
+                    customExcludedPaths = listOf("/storage/emulated/0/logs")
                 )
             )
             val removed = db.pruneMatchingFilter(filter, AccessMode.ROOT)
@@ -441,7 +434,7 @@ class SqliteSearchDatabaseAndBenchmarkTest {
     }
 
     @Test
-    fun `top crowded directories excludes root and container paths and getTrackedMutableDirectories skips emulated container`() {
+    fun `getTrackedMutableDirectories skips emulated container and tracks subdirs`() {
         val now = System.currentTimeMillis()
         SqliteSearchDatabase(":memory:").use { db ->
             db.upsertFileBatch(
@@ -451,18 +444,13 @@ class SqliteSearchDatabaseAndBenchmarkTest {
                     FileUpsertEntry("/storage/emulated/0", "/storage/emulated", "0", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
                     FileUpsertEntry("/storage/emulated/10", "/storage/emulated", "10", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
                     FileUpsertEntry("/storage/emulated/0/a.txt", "/storage/emulated/0", "a.txt", "txt", 10L, now, false, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
-                    FileUpsertEntry("/storage/emulated/0/b.txt", "/storage/emulated/0", "b.txt", "txt", 10L, now, false, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
-                    FileUpsertEntry("/storage/emulated/10/c.txt", "/storage/emulated/10", "c.txt", "txt", 10L, now, false, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
                     FileUpsertEntry("/storage/emulated/0/Download", "/storage/emulated/0", "Download", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
                     FileUpsertEntry("/storage/emulated/0/Download/d.txt", "/storage/emulated/0/Download", "d.txt", "txt", 10L, now, false, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE)
                 )
             )
-            val tracked = db.getTrackedMutableDirectories(includeDataAdb = false)
+            val tracked = db.getTrackedMutableDirectories(includeData = false)
             assertFalse("/storage/emulated" in tracked.keys)
             assertTrue("/storage/emulated/0/Download" in tracked.keys)
-
-            val top = db.getTopCrowdedDirectories(5)
-            assertEquals(listOf("/storage/emulated/0/Download"), top.map { it.path })
         }
     }
 
@@ -605,31 +593,65 @@ class SqliteSearchDatabaseAndBenchmarkTest {
     }
 
     @Test
-    fun `getTopCrowdedDirectories supports both FILE_COUNT and TOTAL_BYTES sorting and marks personal dirs`() {
+    fun `fetchPendingTier2Tasks respects default and customized extraction priority ranking`() {
         val now = System.currentTimeMillis()
         SqliteSearchDatabase(":memory:").use { db ->
             db.upsertFileBatch(
                 listOf(
-                    // shortvideo: 3 small files (total 3 KB), non-personal app cache
-                    FileUpsertEntry("/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo/1.mp4", "/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo", "1.mp4", "mp4", 1000L, now, false, AccessMode.SHIZUKU, false, Tier2Status.NOT_APPLICABLE),
-                    FileUpsertEntry("/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo/2.mp4", "/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo", "2.mp4", "mp4", 1000L, now, false, AccessMode.SHIZUKU, false, Tier2Status.NOT_APPLICABLE),
-                    FileUpsertEntry("/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo/3.mp4", "/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo", "3.mp4", "mp4", 1000L, now, false, AccessMode.SHIZUKU, false, Tier2Status.NOT_APPLICABLE),
-                    // DCIM/Camera: 1 huge video (500 MB), personal user dir
-                    FileUpsertEntry("/storage/emulated/0/DCIM/Camera/vid.mp4", "/storage/emulated/0/DCIM/Camera", "vid.mp4", "mp4", 500_000_000L, now, false, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE)
+                    FileUpsertEntry("/storage/emulated/0/AppLogs/fresh_log.txt", "/storage/emulated/0/AppLogs", "fresh_log.txt", "txt", 10_000L, now, false, AccessMode.NORMAL, true, Tier2Status.PENDING),
+                    FileUpsertEntry("/storage/emulated/0/Documents/contract.pdf", "/storage/emulated/0/Documents", "contract.pdf", "pdf", 20_000_000L, now - 86_400_000L, false, AccessMode.NORMAL, true, Tier2Status.PENDING),
+                    FileUpsertEntry("/storage/emulated/0/Download/readme.txt", "/storage/emulated/0/Download", "readme.txt", "txt", 5_000L, now - 172_800_000L, false, AccessMode.NORMAL, true, Tier2Status.PENDING),
+                    FileUpsertEntry("/storage/emulated/0/Download/report.docx", "/storage/emulated/0/Download", "report.docx", "docx", 1_000_000L, now - 3_600_000L, false, AccessMode.NORMAL, true, Tier2Status.PENDING),
+                    FileUpsertEntry("/storage/emulated/0/Documents/notes.md", "/storage/emulated/0/Documents", "notes.md", "md", 2_000L, now - 3_600_000L, false, AccessMode.NORMAL, true, Tier2Status.PENDING)
                 )
             )
 
-            val byCount = db.getTopCrowdedDirectories(5, CrowdedSortBy.FILE_COUNT)
-            assertEquals("/storage/emulated/0/Android/data/com.tencent.mobileqq/shortvideo", byCount[0].path)
-            assertFalse(byCount[0].isPersonalDir)
-            assertEquals(3, byCount[0].childCount)
-            assertEquals(3000L, byCount[0].totalBytes)
+            // Default: USER_DIRS_FIRST -> MTIME_DESC -> FAST_FORMAT_FIRST -> SMALL_SIZE_FIRST
+            val defaultNames = db.fetchPendingTier2Tasks(10).map { it.name }
+            assertEquals(
+                listOf("notes.md", "report.docx", "contract.pdf", "readme.txt", "fresh_log.txt"),
+                defaultNames
+            )
 
-            val byBytes = db.getTopCrowdedDirectories(5, CrowdedSortBy.TOTAL_BYTES)
-            assertEquals("/storage/emulated/0/DCIM/Camera", byBytes[0].path)
-            assertTrue(byBytes[0].isPersonalDir)
-            assertEquals(1, byBytes[0].childCount)
-            assertEquals(500_000_000L, byBytes[0].totalBytes)
+            // Custom: format speed first (txt/md -> docx -> pdf), smallest size first inside ties
+            val formatSizeFirst = listOf(
+                com.pocketeverything.app.filter.Tier2PriorityEntry(com.pocketeverything.app.filter.Tier2PriorityRule.FAST_FORMAT_FIRST, true),
+                com.pocketeverything.app.filter.Tier2PriorityEntry(com.pocketeverything.app.filter.Tier2PriorityRule.SMALL_SIZE_FIRST, true),
+                com.pocketeverything.app.filter.Tier2PriorityEntry(com.pocketeverything.app.filter.Tier2PriorityRule.USER_DIRS_FIRST, false),
+                com.pocketeverything.app.filter.Tier2PriorityEntry(com.pocketeverything.app.filter.Tier2PriorityRule.MTIME_DESC, false)
+            )
+            val customNames = db.fetchPendingTier2Tasks(10, formatSizeFirst).map { it.name }
+            assertEquals(
+                listOf("notes.md", "readme.txt", "fresh_log.txt", "report.docx", "contract.pdf"),
+                customNames
+            )
+        }
+    }
+
+    @Test
+    fun `getTrackedMutableDirectories includes all non-dalvik data dirs when enabled`() {
+        val now = System.currentTimeMillis()
+        SqliteSearchDatabase(":memory:").use { db ->
+            db.upsertFileBatch(
+                listOf(
+                    FileUpsertEntry("/storage/emulated/0/Download", "/storage/emulated/0", "Download", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/data/misc", "/data", "misc", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/data/adb", "/data", "adb", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/data/data", "/data", "data", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/data/dalvik-cache", "/data", "dalvik-cache", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/system/etc", "/system", "etc", "", 0L, now, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE)
+                )
+            )
+            val withoutData = db.getTrackedMutableDirectories(includeData = false).keys
+            assertTrue("/storage/emulated/0/Download" in withoutData)
+            assertFalse("/data/misc" in withoutData)
+
+            val withData = db.getTrackedMutableDirectories(includeData = true).keys
+            assertTrue("/data/misc" in withData)
+            assertTrue("/data/adb" in withData)
+            assertTrue("/data/data" in withData)
+            assertFalse("/data/dalvik-cache" in withData)
+            assertFalse("/system/etc" in withData)
         }
     }
 }

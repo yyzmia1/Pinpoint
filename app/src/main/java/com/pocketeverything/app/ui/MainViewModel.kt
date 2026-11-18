@@ -28,12 +28,12 @@ import com.pocketeverything.app.ui.theme.extractSeedColorArgb
 import java.io.FileOutputStream
 import kotlin.math.max
 import com.pocketeverything.app.filter.FilterConfig
+import com.pocketeverything.app.filter.FilterEngine
 import com.pocketeverything.app.fs.ModeAvailability
+import com.pocketeverything.app.fs.StorageRootsHelper
 import com.pocketeverything.app.indexer.IndexProgressState
 import com.pocketeverything.app.indexer.RealtimeMonitorService
 import com.pocketeverything.app.search.AccessMode
-import com.pocketeverything.app.search.CrowdedDirStat
-import com.pocketeverything.app.search.CrowdedSortBy
 import com.pocketeverything.app.search.QuerySyntaxParser
 import com.pocketeverything.app.search.QuickScope
 import com.pocketeverything.app.search.SearchResponse
@@ -68,10 +68,7 @@ data class ShizukuLiveStatus(
 )
 
 data class PendingModeSwitch(
-    val targetMode: AccessMode,
-    val includeDataForRoot: Boolean,
-    val syncRulesToPreset: Boolean,
-    val hasCustomRules: Boolean
+    val targetMode: AccessMode
 )
 
 data class UiNotice(
@@ -146,12 +143,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _pendingModeSwitch = MutableStateFlow<PendingModeSwitch?>(null)
     val pendingModeSwitch: StateFlow<PendingModeSwitch?> = _pendingModeSwitch.asStateFlow()
 
-    private val _crowdedDirs = MutableStateFlow<List<CrowdedDirStat>>(emptyList())
-    val crowdedDirs: StateFlow<List<CrowdedDirStat>> = _crowdedDirs.asStateFlow()
-
-    private val _crowdedSortBy = MutableStateFlow(CrowdedSortBy.FILE_COUNT)
-    val crowdedSortBy: StateFlow<CrowdedSortBy> = _crowdedSortBy.asStateFlow()
-
     private val _messages = MutableSharedFlow<UiNotice>(extraBufferCapacity = 8)
     val messages: SharedFlow<UiNotice> = _messages.asSharedFlow()
 
@@ -192,16 +183,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         refreshModeStatuses()
         indexManager.triggerStartupSync()
-
-        viewModelScope.launch {
-            indexManager.progress
-                .map { it.stats.totalEntries }
-                .distinctUntilChanged()
-                .debounce(400)
-                .collectLatest {
-                    refreshCrowdedDirs()
-                }
-        }
 
         viewModelScope.launch {
             delay(1500L)
@@ -330,13 +311,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         return@launch
                     }
-                    val hasCustom = curSettings.filterConfig.differsFromPreset(mode)
-                    _pendingModeSwitch.value = PendingModeSwitch(
-                        targetMode = mode,
-                        includeDataForRoot = if (mode == AccessMode.ROOT) curSettings.filterConfig.rootIncludeData else false,
-                        syncRulesToPreset = false,
-                        hasCustomRules = hasCustom
-                    )
+                    _pendingModeSwitch.value = PendingModeSwitch(targetMode = mode)
                 }
                 is ModeAvailability.NeedsPermission -> {
                     if (mode == AccessMode.SHIZUKU) {
@@ -352,14 +327,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun updatePendingModeSwitch(includeDataForRoot: Boolean? = null, syncRulesToPreset: Boolean? = null) {
-        val current = _pendingModeSwitch.value ?: return
-        _pendingModeSwitch.value = current.copy(
-            includeDataForRoot = includeDataForRoot ?: current.includeDataForRoot,
-            syncRulesToPreset = syncRulesToPreset ?: current.syncRulesToPreset
-        )
-    }
-
     fun dismissPendingModeSwitch() {
         _pendingModeSwitch.value = null
     }
@@ -367,16 +334,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun confirmPendingModeSwitch() {
         val pending = _pendingModeSwitch.value ?: return
         _pendingModeSwitch.value = null
-        val curCfg = settings.value.filterConfig
-        val nextCfg = if (pending.syncRulesToPreset) {
-            curCfg.recommendedForMode(pending.targetMode, includeData = pending.includeDataForRoot)
-        } else {
-            curCfg.copy(rootIncludeData = if (pending.targetMode == AccessMode.ROOT) pending.includeDataForRoot else false)
-        }
-        settingsRepo.updateFilterConfig(nextCfg)
         settingsRepo.updateAccessMode(pending.targetMode)
         indexManager.startFullScan(clearExisting = false)
-        emitMessage("已切换至 ${pending.targetMode.label}，正在后台全盘重建索引", jumpToSearch = true)
+        emitMessage("已切换至 ${pending.targetMode.label}，正在后台重建索引", jumpToSearch = true)
     }
 
     fun requestShizukuPermission() {
@@ -626,66 +586,99 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         indexManager.clearErrorMessage()
     }
 
-    fun setCrowdedSortBy(sortBy: CrowdedSortBy) {
-        if (_crowdedSortBy.value == sortBy) return
-        _crowdedSortBy.value = sortBy
-        refreshCrowdedDirs()
-    }
-
-    fun refreshCrowdedDirs() {
-        val sort = _crowdedSortBy.value
-        viewModelScope.launch(Dispatchers.IO) {
-            _crowdedDirs.value = runCatching { db.getTopCrowdedDirectories(limit = 5, sortBy = sort) }.getOrDefault(emptyList())
-        }
-    }
-
     fun refreshDirectory(dirPath: String) {
         indexManager.startDirectoryRefresh(dirPath)
         emitMessage("正在刷新目录：$dirPath")
     }
 
+    suspend fun listChildDirectories(parentPath: String): List<String> = withContext(Dispatchers.IO) {
+        val cleanParent = parentPath.trim().trimEnd('/').ifEmpty { "/" }
+        val openFilter = FilterEngine(
+            FilterConfig(
+                skipNoiseCaches = false,
+                deduplicateMounts = false,
+                customExcludedPaths = emptyList()
+            )
+        )
+        val dirs = LinkedHashSet<String>()
+        val mode = settings.value.accessMode
+        val provider = container.providerFor(mode)
+        val ready = runCatching { provider.checkAvailability() is ModeAvailability.Ready }.getOrDefault(false)
+        if (ready) {
+            if (cleanParent == "/" && mode != AccessMode.ROOT) {
+                dirs.addAll(StorageRootsHelper.getNormalStorageRoots(app))
+            } else {
+                runCatching {
+                    provider.listDirectChildren(listOf(cleanParent), openFilter) { batch ->
+                        for (rec in batch) {
+                            if (rec.isDir) dirs.add(rec.path)
+                        }
+                    }
+                }
+            }
+        }
+        if (dirs.isEmpty()) {
+            db.listChildren(cleanParent, 400).asSequence().filter { it.isDir }.forEach { dirs.add(it.path) }
+        }
+        dirs.sortedBy { it.lowercase() }
+    }
+
     fun updateFilterConfig(config: FilterConfig) {
         val old = settings.value.filterConfig
+        val mode = settings.value.accessMode
         settingsRepo.updateFilterConfig(config)
-        val sort = _crowdedSortBy.value
+        val cleanOld = FilterConfig.normalizePaths(old.customExcludedPaths)
+        val cleanNew = FilterConfig.normalizePaths(config.customExcludedPaths)
+        val pruneRelevantChanged =
+            old.skipNoiseCaches != config.skipNoiseCaches ||
+                old.deduplicateMounts != config.deduplicateMounts ||
+                cleanOld != cleanNew ||
+                FilterConfig.normalizeTier2AllowedPrefixes(old.tier2AllowedPrefixes) !=
+                FilterConfig.normalizeTier2AllowedPrefixes(config.tier2AllowedPrefixes) ||
+                FilterConfig.normalizePaths(old.tier2BlockedPrefixes) !=
+                FilterConfig.normalizePaths(config.tier2BlockedPrefixes) ||
+                old.maxTxtMdBytes != config.maxTxtMdBytes ||
+                old.maxDocxBytes != config.maxDocxBytes ||
+                old.maxPdfBytes != config.maxPdfBytes
+
+        if (!pruneRelevantChanged) {
+            emitMessage("正文提取优先级已更新")
+            return
+        }
+
         viewModelScope.launch(Dispatchers.IO) {
             val summary = indexManager.pruneByCurrentFilter()
-            _crowdedDirs.value = runCatching { db.getTopCrowdedDirectories(limit = 5, sortBy = sort) }.getOrDefault(emptyList())
+            val removedExcludes = cleanOld.filter { prev ->
+                prev !in cleanNew && cleanNew.none { cur -> cur == "/" || prev.startsWith("$cur/") }
+            }
+            val accessibleNewDirs = removedExcludes.filter { mode == AccessMode.ROOT || !it.startsWith("/data") }
+            val fullRescanNeeded = (old.skipNoiseCaches && !config.skipNoiseCaches) ||
+                (old.deduplicateMounts && !config.deduplicateMounts)
+
+            when {
+                fullRescanNeeded -> indexManager.startFullScan(clearExisting = false)
+                accessibleNewDirs.isNotEmpty() -> indexManager.startDirectoriesRefresh(accessibleNewDirs)
+            }
+
             val freedNote = if (summary.freedBytes >= 64 * 1024L) {
-                " · 释放库空间 ${FormatUtils.formatBytes(summary.freedBytes)}"
+                " · 释放 ${FormatUtils.formatBytes(summary.freedBytes)}"
             } else ""
             val msg = when {
-                !old.rootIncludeData && config.rootIncludeData && settings.value.accessMode == AccessMode.ROOT ->
-                    "已允许扫描 /data（体积与耗时将明显增加），请点击「重建全库」纳入索引"
+                fullRescanNeeded || accessibleNewDirs.isNotEmpty() ->
+                    "规则已更新，正在补扫新增范围"
                 summary.removedEntries > 0 && summary.clearedDocBodies > 0 ->
-                    "已从数据库真删 ${summary.removedEntries} 项、清理 ${summary.clearedDocBodies} 篇超范围正文$freedNote"
+                    "已清理 ${summary.removedEntries} 项索引与 ${summary.clearedDocBodies} 篇正文$freedNote"
                 summary.removedEntries > 0 ->
-                    "已从数据库真删 ${summary.removedEntries} 条已排除记录$freedNote"
+                    "已从索引库移除 ${summary.removedEntries} 条记录$freedNote"
                 summary.clearedDocBodies > 0 ->
-                    "已清理 ${summary.clearedDocBodies} 篇超范围文档正文$freedNote"
+                    "已清理 ${summary.clearedDocBodies} 篇超范围正文$freedNote"
                 summary.requeuedDocs > 0 ->
-                    "规则已放宽，已将 ${summary.requeuedDocs} 篇文档重新加入后台正文提取队列"
+                    "规则已放宽，已将 ${summary.requeuedDocs} 篇文档加入提取队列"
                 else ->
-                    "过滤与正文规则已保存生效（如扩大扫描目录可点增量同步或重建）"
+                    "规则已应用"
             }
             emitMessage(msg)
         }
-    }
-
-    fun excludeCrowdedPath(path: String) {
-        val cfg = settings.value.filterConfig
-        val clean = path.trimEnd('/')
-        if (clean.isEmpty() || clean in cfg.customExcludedPaths) return
-        updateFilterConfig(cfg.copy(customExcludedPaths = cfg.customExcludedPaths + clean))
-    }
-
-    fun removeExcludedPath(path: String) {
-        val cfg = settings.value.filterConfig
-        val clean = path.trimEnd('/')
-        val updated = cfg.customExcludedPaths.filterNot { it.trim().trimEnd('/') == clean }
-        if (updated.size == cfg.customExcludedPaths.size) return
-        settingsRepo.updateFilterConfig(cfg.copy(customExcludedPaths = updated))
-        emitMessage("已从排除列表移出：$clean（点增量同步或重建即可重新入库）")
     }
 
     fun setOpenContentHitsInPreview(enabled: Boolean) {

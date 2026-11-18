@@ -998,9 +998,9 @@ private fun ModeSheet(
                             )
                             Text(
                                 text = when (mode) {
-                                    AccessMode.NORMAL -> "公开存储 /sdcard（不含 Android/data 与 /obb）"
-                                    AccessMode.SHIZUKU -> "存储全区（穿透 /Android/data 与 /obb，不含 /data）"
-                                    AccessMode.ROOT -> "根目录 /（默认跳过高噪 /data，可选勾选加入）"
+                                    AccessMode.NORMAL -> "公开存储"
+                                    AccessMode.SHIZUKU -> "含 Android/data · obb"
+                                    AccessMode.ROOT -> "全机根目录 /"
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.82f) else MaterialTheme.colorScheme.onSurfaceVariant

@@ -23,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -88,8 +89,45 @@ data class SliderQuickNode(
 )
 
 /**
+ * Piecewise continuous scale mapping track fraction `0f..1f` <-> integer MB limit
+ * (`0` = unlimited at the far-right end stop, `1..1024` = finite MB).
+ * Gives the common `1..100 MB` zone half the slider width so every 1 MB stays comfortable.
+ */
+object DocSizeSliderScale {
+    const val UNLIMITED_MB: Int = 0
+    const val MAX_FINITE_MB: Int = 1024
+    const val UNLIMITED_FRACTION: Float = 1f
+
+    private const val F_100 = 0.50f
+    private const val F_500 = 0.82f
+    private const val F_1024 = 0.94f
+
+    fun mbToFraction(mb: Int): Float {
+        if (mb <= 0) return UNLIMITED_FRACTION
+        val c = mb.coerceIn(1, MAX_FINITE_MB)
+        return when {
+            c <= 100 -> ((c - 1) / 99f) * F_100
+            c <= 500 -> F_100 + ((c - 100) / 400f) * (F_500 - F_100)
+            else -> F_500 + ((c - 500) / 524f) * (F_1024 - F_500)
+        }
+    }
+
+    fun fractionToMb(fraction: Float): Int {
+        val f = fraction.coerceIn(0f, 1f)
+        if (f >= 0.965f) return UNLIMITED_MB
+        return when {
+            f <= F_100 -> (1 + (f / F_100) * 99f).roundToInt().coerceIn(1, 100)
+            f <= F_500 -> (100 + ((f - F_100) / (F_500 - F_100)) * 400f).roundToInt().coerceIn(100, 500)
+            else -> (500 + ((f - F_500) / (F_1024 - F_500)).coerceIn(0f, 1f) * 524f).roundToInt().coerceIn(500, MAX_FINITE_MB)
+        }
+    }
+
+    fun formatMbLabel(mb: Int): String = if (mb <= 0) "不限" else "$mb MB"
+}
+
+/**
  * Continuous slider (`steps = 0`) with magnetic node snapping, visual track node markers,
- * and one-tap quick node pills so users can both snap to key milestones and freely pick any 1% / 1 MB in between.
+ * and one-tap quick node pills so users can both snap to key milestones and freely pick any intermediate step.
  */
 @Composable
 fun MagneticSnapSlider(
@@ -105,17 +143,21 @@ fun MagneticSnapSlider(
     icon: ImageVector? = null,
     quickNodes: List<SliderQuickNode> = emptyList(),
     onNodeSnapHaptic: (Float) -> Unit = {},
-    onStepTickHaptic: ((Float) -> Unit)? = null
+    onStepTickHaptic: ((Float) -> Unit)? = null,
+    onValueChangeFinished: (Float) -> Unit = {},
+    onValueBadgeClick: (() -> Unit)? = null
 ) {
-    val tolerance = if (quantizeStep > 0f) quantizeStep * 0.35f else 0.003f
+    val tolerance = if (quantizeStep > 0f) quantizeStep * 0.35f else 0.008f
     var lastSnappedNode by remember {
         mutableStateOf(snapNodes.firstOrNull { abs(value - it) <= tolerance })
     }
-    var lastQuantized by remember { mutableStateOf(value) }
+    var lastQuantized by remember { mutableFloatStateOf(value) }
+    var latestEmitted by remember { mutableFloatStateOf(value) }
 
     LaunchedEffect(value) {
         lastSnappedNode = snapNodes.firstOrNull { abs(value - it) <= tolerance }
         lastQuantized = value
+        latestEmitted = value
     }
 
     val isAtNode = snapNodes.any { abs(value - it) <= tolerance }
@@ -152,6 +194,13 @@ fun MagneticSnapSlider(
                     MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.75f)
                 } else {
                     MaterialTheme.colorScheme.surfaceContainerHigh
+                },
+                modifier = if (onValueBadgeClick != null) {
+                    Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { onValueBadgeClick() }
+                } else {
+                    Modifier
                 }
             ) {
                 Text(
@@ -212,21 +261,25 @@ fun MagneticSnapSlider(
                         onNodeSnapHaptic(res.value)
                     } else if (res.snappedNode == null) {
                         lastSnappedNode = null
-                        if (onStepTickHaptic != null && abs(res.value - lastQuantized) >= quantizeStep * 3.9f) {
+                        if (onStepTickHaptic != null && quantizeStep > 0f && abs(res.value - lastQuantized) >= quantizeStep * 3.9f) {
                             lastQuantized = res.value
                             onStepTickHaptic(res.value)
                         }
                     }
+                    latestEmitted = res.value
                     if (abs(res.value - value) > 1e-4f) {
                         onValueChange(res.value)
                     }
                 },
                 valueRange = valueRange,
                 steps = 0,
+                onValueChangeFinished = { onValueChangeFinished(latestEmitted) },
                 modifier = Modifier.fillMaxWidth()
             )
         }
 
+        val quickNode = quickNodes.minByOrNull { abs(it.value - value) }
+        val activeQuick = quickNode != null && abs(quickNode.value - value) <= tolerance
         if (quickNodes.isNotEmpty()) {
             Row(
                 modifier = Modifier
@@ -236,7 +289,7 @@ fun MagneticSnapSlider(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 for (qn in quickNodes) {
-                    val selected = abs(value - qn.value) <= tolerance
+                    val selected = activeQuick && qn == quickNode
                     Surface(
                         shape = CircleShape,
                         color = if (selected) {
@@ -251,8 +304,10 @@ fun MagneticSnapSlider(
                             .clip(CircleShape)
                             .clickable {
                                 lastSnappedNode = qn.value
+                                latestEmitted = qn.value
                                 onNodeSnapHaptic(qn.value)
                                 onValueChange(qn.value)
+                                onValueChangeFinished(qn.value)
                             }
                     ) {
                         Text(

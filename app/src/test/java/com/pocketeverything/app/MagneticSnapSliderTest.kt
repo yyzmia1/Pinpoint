@@ -1,9 +1,11 @@
 package com.pocketeverything.app
 
+import com.pocketeverything.app.ui.components.DocSizeSliderScale
 import com.pocketeverything.app.ui.components.snapValueWithMagnetism
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.roundToInt
 
@@ -75,5 +77,18 @@ class MagneticSnapSliderTest {
         val near30 = snapValueWithMagnetism(0.293f, range, nodesPct, radius, 0.01f)
         assertEquals(30, (near30.value * 100).roundToInt())
         assertEquals(0.3f, near30.snappedNode ?: -1f, 1e-4f)
+    }
+
+    @Test
+    fun `document size slider scale maps every integer MB 1 to 1024 cleanly and supports unlimited endpoint`() {
+        for (mb in 1..1024) {
+            val f = DocSizeSliderScale.mbToFraction(mb)
+            assertTrue("Expected $mb MB to be strictly inside finite zone, got $f", f in 0f..0.95f)
+            assertEquals("Expected $mb MB round-trip", mb, DocSizeSliderScale.fractionToMb(f))
+        }
+        assertEquals(DocSizeSliderScale.UNLIMITED_FRACTION, DocSizeSliderScale.mbToFraction(DocSizeSliderScale.UNLIMITED_MB), 1e-5f)
+        assertEquals(DocSizeSliderScale.UNLIMITED_MB, DocSizeSliderScale.fractionToMb(1.0f))
+        assertEquals("不限", DocSizeSliderScale.formatMbLabel(0))
+        assertEquals("500 MB", DocSizeSliderScale.formatMbLabel(500))
     }
 }

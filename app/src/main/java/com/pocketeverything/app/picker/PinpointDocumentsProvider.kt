@@ -285,9 +285,12 @@ class PinpointDocumentsProvider : DocumentsProvider() {
             val label = if (root == primaryRoot) "内部存储" else File(root).name.ifBlank { root }
             roots[PinpointDocId.normalizePath(root)] = label
         }
-        if (settings.filterConfig.rootIncludeData) {
-            for (privRoot in listOf("/data/adb", "/data/local")) {
-                if (db.getFileMetaByPath(privRoot) != null || db.listChildren(privRoot, 1).isNotEmpty()) {
+        val filter = com.pocketeverything.app.filter.FilterEngine(settings.filterConfig)
+        if (filter.isDataPotentiallyIndexed(settings.accessMode)) {
+            for (privRoot in listOf("/data", "/data/adb", "/data/local", "/data/misc", "/data/app", "/data/system")) {
+                if (!filter.shouldSkipTier1Path(privRoot, privRoot.substringAfterLast('/'), isDir = true, settings.accessMode) &&
+                    (db.getFileMetaByPath(privRoot) != null || db.listChildren(privRoot, 1).isNotEmpty())
+                ) {
                     roots[privRoot] = privRoot
                 }
             }

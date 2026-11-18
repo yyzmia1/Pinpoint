@@ -176,17 +176,25 @@ class TwoTierIndexManager(
                     )
 
                     val filter = FilterEngine(settings.filterConfig)
-                    val includeDataAdb = mode == AccessMode.ROOT && settings.filterConfig.rootIncludeData
+                    val includeData = filter.isDataPotentiallyIndexed(mode)
                     val storageRoots = storageRootsResolver()
-                    val extraRootDirs = if (includeDataAdb) listOf("/data/adb", "/data/local") else emptyList()
+                    val extraRootDirs = if (includeData) listOf("/data") else emptyList()
                     val snapshotRoots = (storageRoots + extraRootDirs).distinct()
                     val rootSnapshots = db.getDirSnapshots(snapshotRoots)
 
                     // Populate files_meta directories first so authoritative dir_snapshots win for rootSet.
                     val trackedDirs = LinkedHashMap<String, Long>(1024)
-                    trackedDirs.putAll(db.getTrackedMutableDirectories(includeDataAdb = includeDataAdb))
+                    for ((dirPath, savedMtime) in db.getTrackedMutableDirectories(includeData = includeData)) {
+                        val name = dirPath.substringAfterLast('/')
+                        if (!filter.shouldSkipTier1Path(dirPath, name, isDir = true, mode = mode)) {
+                            trackedDirs[dirPath] = savedMtime
+                        }
+                    }
                     for (r in snapshotRoots) {
-                        trackedDirs[r] = rootSnapshots[r] ?: trackedDirs[r] ?: -1L
+                        val name = r.substringAfterLast('/')
+                        if (!filter.shouldSkipTier1Path(r, name, isDir = true, mode = mode)) {
+                            trackedDirs[r] = rootSnapshots[r] ?: trackedDirs[r] ?: -1L
+                        }
                     }
 
                     val liveDirMtimes = provider.statDirectories(trackedDirs.keys.toList())
@@ -197,14 +205,11 @@ class TwoTierIndexManager(
                     for ((dir, savedMtime) in trackedDirs) {
                         val live = liveDirMtimes[dir]
                         if (live == null) {
-                            if (shouldPruneMissingDirectory(dir, mode, includeDataAdb, rootSet, liveDirMtimes)) {
+                            if (shouldPruneMissingDirectory(dir, mode, includeData, rootSet, liveDirMtimes)) {
                                 missingSubdirs.add(dir)
                             }
                         } else if (live != savedMtime) {
-                            val name = dir.substringAfterLast('/')
-                            if (!filter.shouldSkipTier1Path(dir, name, isDir = true, mode = mode)) {
-                                dirtyDirs.add(dir)
-                            }
+                            dirtyDirs.add(dir)
                         }
                     }
 
@@ -311,11 +316,10 @@ class TwoTierIndexManager(
 
                     val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
                     val updatedStats = db.getStats()
-                    val dataScopeNote = if (includeDataAdb) "（含 /data/adb，应用私有 /data/data 需手动全盘重建）" else ""
                     val msg = if (dirtyDirs.isEmpty() && removedCount == 0 && changedCount == 0) {
-                        "增量校验完成：已检查 ${trackedDirs.size} 个目录，均无变动 (${elapsed}ms)$dataScopeNote"
+                        "增量校验完成：检查 ${trackedDirs.size} 个目录，均无变动 (${elapsed}ms)"
                     } else {
-                        "增量同步完成：检查 ${trackedDirs.size} 个目录 · 更新 $changedCount / 清理 $removedCount 项 (${elapsed}ms)$dataScopeNote"
+                        "增量同步完成：更新 $changedCount / 清理 $removedCount 项 (${elapsed}ms)"
                     }
                     _progress.value = _progress.value.copy(
                         tier1Phase = Tier1Phase.IDLE,
@@ -423,11 +427,7 @@ class TwoTierIndexManager(
             }
 
             val rootPaths = storageRootsResolver().let { base ->
-                if (mode == AccessMode.ROOT && settings.filterConfig.rootIncludeData) {
-                    (base + listOf("/data/adb", "/data/local")).distinct()
-                } else {
-                    base
-                }
+                if (filter.isDataPotentiallyIndexed(mode)) (base + "/data").distinct() else base
             }
             runCatching {
                 val snaps = provider.statDirectories(rootPaths)
@@ -437,16 +437,13 @@ class TwoTierIndexManager(
 
             val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
             val stats = db.getStats()
-            val rootScopeNote = if (mode == AccessMode.ROOT) {
-                if (settings.filterConfig.rootIncludeData) "（已包含 /data）" else "（已跳过 /data）"
-            } else ""
             _progress.value = _progress.value.copy(
                 tier1Phase = Tier1Phase.IDLE,
                 tier1ScannedCount = scannedCount,
                 lastScanDurationMs = elapsed,
                 stats = stats,
                 tier2PendingCount = stats.pendingDocs,
-                statusMessage = "全盘建库完成：共 ${stats.totalEntries} 项 · 耗时 ${formatDuration(elapsed)}$rootScopeNote"
+                statusMessage = "全盘建库完成：共 ${stats.totalEntries} 项 · ${formatDuration(elapsed)}"
             )
             ensureTier2Running()
         } catch (ce: CancellationException) {
@@ -494,30 +491,69 @@ class TwoTierIndexManager(
     }
 
     fun startDirectoryRefresh(dirPath: String) {
-        scope.launch {
+        startDirectoriesRefresh(listOf(dirPath))
+    }
+
+    fun startDirectoriesRefresh(dirPaths: List<String>): Job {
+        val cleanDirs = dirPaths.map { it.trim().trimEnd('/').ifEmpty { "/" } }.distinct()
+        return scope.launch {
+            if (cleanDirs.isEmpty()) return@launch
             tier1Mutex.withLock {
                 try {
                     val settings = settingsRepo.settings.value
                     val provider = providerResolver(settings.accessMode)
                     if (provider.checkAvailability() !is ModeAvailability.Ready) return@withLock
                     val filter = FilterEngine(settings.filterConfig)
-                    val seen = HashSet<String>(256)
-                    seen.add(dirPath)
-                    val listedDirs = HashSet<String>(4)
+                    val targetDirs = cleanDirs.filter { dir ->
+                        settings.accessMode == AccessMode.ROOT || !dir.startsWith("/data")
+                    }.filterNot { dir ->
+                        filter.shouldSkipTier1Path(dir, dir.substringAfterLast('/'), isDir = true, mode = settings.accessMode)
+                    }
+                    if (targetDirs.isEmpty()) {
+                        refreshStats()
+                        ensureTier2Running()
+                        return@withLock
+                    }
+                    _progress.value = _progress.value.copy(
+                        tier1Phase = Tier1Phase.QUICK_SYNC,
+                        tier1ScannedCount = 0,
+                        errorMessage = null,
+                        statusMessage = "正在扫描新增或变更目录…"
+                    )
+                    val seen = HashSet<String>(512)
+                    seen.addAll(targetDirs)
+                    val listedDirs = HashSet<String>(targetDirs.size)
+                    var scanned = 0
                     provider.scanDirectories(
-                        roots = listOf(dirPath),
+                        roots = targetDirs,
                         filterEngine = filter,
                         onDirListed = { listedDirs.add(it) }
                     ) { batch ->
                         for (r in batch) seen.add(r.path)
-                        db.upsertFileBatch(batch.map { it.toUpsertEntry(filter) })
+                        scanned += db.upsertFileBatch(batch.map { it.toUpsertEntry(filter) })
+                        _progress.value = _progress.value.copy(
+                            tier1ScannedCount = scanned,
+                            statusMessage = "正在索引目录：已处理 $scanned 项"
+                        )
                     }
-                    if (dirPath in listedDirs) {
-                        db.pruneDirectorySubtree(dirPath, seen)
+                    for (dir in targetDirs) {
+                        if (dir in listedDirs) {
+                            db.pruneDirectorySubtree(dir, seen)
+                        }
                     }
-                    refreshStats()
+                    val snaps = runCatching { provider.statDirectories(targetDirs) }.getOrDefault(emptyMap())
+                    db.saveDirSnapshots(snaps, settings.accessMode)
+                    val stats = db.getStats()
+                    _progress.value = _progress.value.copy(
+                        tier1Phase = Tier1Phase.IDLE,
+                        tier1ScannedCount = scanned,
+                        stats = stats,
+                        tier2PendingCount = stats.pendingDocs,
+                        statusMessage = "就绪 · ${stats.totalEntries} 项 / ${stats.indexedDocs} 正文"
+                    )
                     ensureTier2Running()
                 } catch (ce: CancellationException) {
+                    _progress.value = _progress.value.copy(tier1Phase = Tier1Phase.IDLE)
                     throw ce
                 } catch (t: Throwable) {
                     _progress.value = _progress.value.copy(
@@ -537,11 +573,13 @@ class TwoTierIndexManager(
                 val semaphore = Semaphore(2)
                 var processed = 0
                 while (isActive) {
-                    val tasks = db.fetchPendingTier2Tasks(limit = 20)
-                    if (tasks.isEmpty()) break
-
                     val settings = settingsRepo.settings.value
                     val filter = FilterEngine(settings.filterConfig)
+                    val tasks = db.fetchPendingTier2Tasks(
+                        limit = 20,
+                        priorityOrder = settings.filterConfig.tier2PriorityOrder
+                    )
+                    if (tasks.isEmpty()) break
 
                     _progress.value = _progress.value.copy(
                         tier2Phase = Tier2Phase.EXTRACTING,
@@ -621,7 +659,7 @@ class TwoTierIndexManager(
     private fun shouldPruneMissingDirectory(
         dir: String,
         mode: AccessMode,
-        includeDataAdb: Boolean,
+        includeData: Boolean,
         rootSet: Set<String>,
         liveDirMtimes: Map<String, Long>
     ): Boolean {
@@ -630,13 +668,7 @@ class TwoTierIndexManager(
             return false
         }
         if (dir.startsWith("/data/")) {
-            if (!includeDataAdb) return false
-            val dataRoot = when {
-                dir.startsWith("/data/adb/") -> "/data/adb"
-                dir.startsWith("/data/local/") -> "/data/local"
-                else -> return false
-            }
-            return dataRoot in rootSet && liveDirMtimes[dataRoot] != null
+            return includeData && "/data" in rootSet && liveDirMtimes["/data"] != null
         }
         if (dir.startsWith("/storage/")) {
             val volRoot = storageVolumeRootFor(dir) ?: return false

@@ -14,7 +14,7 @@ import javax.xml.parsers.SAXParserFactory
  * Extracts body text, tables, headers, footers, and footnotes without heavy Apache POI bloat.
  */
 class DocxExtractor(
-    private val maxChars: Int = 1_500_000
+    private val maxChars: Int = 2_000_000
 ) : DocumentExtractor {
 
     override fun extract(inputStream: InputStream, maxBytes: Long): ExtractionResult {
@@ -27,7 +27,7 @@ class DocxExtractor(
                 }
             }
 
-            ZipInputStream(BufferedInputStream(inputStream)).use { zip ->
+            ZipInputStream(BufferedInputStream(inputStream.boundedBy(maxBytes))).use { zip ->
                 while (sb.length < maxChars) {
                     val entry = zip.nextEntry ?: break
                     if (!entry.isDirectory && isRelevantXml(entry.name)) {

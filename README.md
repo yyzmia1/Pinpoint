@@ -29,7 +29,7 @@
   - **普通模式**：基于 `MANAGE_EXTERNAL_STORAGE` 快速扫描内部与外置公开存储目录。
   - **Shizuku 模式**：免 Root 绑定 `UserService` 穿透 `/Android/data` 与 `/Android/obb`，内置三步式实时检测引导向导。
   - **Root 模式**：通过 `libsu` `RootService` 从 `/` 根目录全盘扫描，基于 POSIX `Os.lstat` 与 `(st_dev, st_ino)` 自动跳过符号链接、虚拟文件系统并消除重复挂载。
-- **两级真流式异步建库**：一级路径与元数据通过 `ParcelFileDescriptor` 管道边扫边入库并即时开放搜索，二级队列低并发异步抽取 `.txt` / `.md` / `.docx` / `.pdf` 正文内容，全程恒定批内存占用。
+- **两级真流式异步建库与智能队列**：一级路径与元数据通过 `ParcelFileDescriptor` 管道边扫边入库并即时开放搜索，支持目录前缀精准排除与 Root `/data` 分级放行；二级队列支持可自定义优先级的低并发流式抽取（`.txt` / `.md` / `.docx` / `.pdf`），体积上限最高开放至 `不限` 且全程防 OOM。
 - **全类型 QuickLook 内置预览 (`ReaderPreviewSheet`)**：支持高亮文本/代码/日志预览（自动探测 UTF-8 / BOM / GB18030）、原生 `PdfRenderer` 逐页渲染（覆盖扫描版 PDF）、双指缩放画布切换图片、压缩包目录浏览（`ZIP` / `APK`）、音视频元数据与首帧查看、目录子项钻取及未知二进制文件头十六进制检视。
 - **系统文件选择器双入口（`ACTION_GET_CONTENT` + SAF `DocumentsProvider`）**：在微信、QQ、浏览器等外部应用选文时，可通过系统 `DocumentsUI` 的 `Pinpoint` 文档源或独立 `Pinpoint 选择` 面板直接完成全盘检索、MIME 筛选、目录钻取与多选；受限目录文件经 `preview_bridge` 独立子目录桥接并保留原始文件名，支持在设置中一键开关。
 - **莫奈动态取色（Material You）与规范内建更新**：支持 Android 12+ 壁纸莫奈动态取色（默认开启，可随时关闭回落至标准对比度配色）及跟随系统 / 白天 / 黑夜切换；内置 24 小时静默节流检查更新、严格 SemVer 版本比对、版本忽略黑名单、`DownloadManager` 应用内下载安装 + 浏览器兜底跳转，以及全版本 Markdown **更新日志（Changelog）** 面板。

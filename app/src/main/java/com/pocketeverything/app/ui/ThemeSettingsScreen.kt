@@ -211,14 +211,7 @@ fun ThemeSettingsScreen(
                             modifier = Modifier.size(20.dp)
                         )
                         Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text("主题模式", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                            Text(
-                                text = settings.themeMode.label,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                        Text("主题模式", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         ThemeMode.entries.forEach { mode ->
@@ -262,7 +255,6 @@ fun ThemeSettingsScreen(
                 ThemeSwitchRow(
                     icon = Icons.Default.Contrast,
                     title = "纯黑深邃底色 (AMOLED)",
-                    subtitle = "黑夜模式下使用 #000000 纯黑背景，提升对比度并省电",
                     checked = settings.pureBlackDark,
                     onCheckedChange = {
                         haptics.click()
@@ -282,12 +274,8 @@ fun ThemeSettingsScreen(
                     val dynActive = settings.useDynamicColor && !bgOverride
                     ThemeSwitchRow(
                         icon = Icons.Default.Palette,
-                        title = "动态颜色（跟随系统壁纸）",
-                        subtitle = when {
-                            bgOverride -> "当前已优先启用下方「从自定义背景图片中取色」"
-                            settings.useDynamicColor -> "正在使用系统主题的动态颜色（圆球为当前系统色）"
-                            else -> "已关闭，当前使用下方精选色盘：${settings.themeAccent.label}"
-                        },
+                        title = "系统壁纸动态取色",
+                        subtitle = if (bgOverride) "当前由背景图片取色覆盖" else null,
                         badgeContent = {
                             TwoToneSwatchDot(
                                 primary = sysPreviewScheme.primary,
@@ -333,15 +321,17 @@ fun ThemeSettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "精选主题色盘",
+                            text = "主题色盘",
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Medium
                         )
-                        Text(
-                            text = if (isUsingPreset) "当前：${settings.themeAccent.label}" else "点击任意色球立即切换",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        if (isUsingPreset) {
+                            Text(
+                                text = settings.themeAccent.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
 
                     Row(
@@ -390,11 +380,6 @@ fun ThemeSettingsScreen(
                 ThemeSwitchRow(
                     icon = Icons.Default.Image,
                     title = "自定义背景",
-                    subtitle = if (settings.customBgPath.isNotBlank()) {
-                        if (settings.customBgEnabled) "已启用自定义背景图" else "已保存背景图（当前关闭）"
-                    } else {
-                        "选择一张图片作为应用全局背景"
-                    },
                     checked = settings.customBgEnabled && settings.customBgPath.isNotBlank(),
                     onCheckedChange = { want ->
                         haptics.click()
@@ -447,8 +432,7 @@ fun ThemeSettingsScreen(
                         }
                         ThemeSwitchRow(
                             icon = Icons.Default.Colorize,
-                            title = "从自定义背景图片中取色",
-                            subtitle = "从当前背景图中提取动态颜色种子色",
+                            title = "背景图片取色",
                             badgeContent = if (settings.customBgSeedArgb != 0) {
                                 {
                                     TwoToneSwatchDot(
@@ -525,8 +509,7 @@ fun ThemeSettingsScreen(
                         // Blur Background
                         ThemeSwitchRow(
                             icon = Icons.Default.BlurOn,
-                            title = "将自定义背景渲染到模糊",
-                            subtitle = "启用柔和毛玻璃背景模糊，提升文字与卡片清晰度",
+                            title = "背景毛玻璃模糊",
                             checked = settings.customBgBlur,
                             onCheckedChange = {
                                 haptics.click()
@@ -579,8 +562,7 @@ fun ThemeSettingsScreen(
 
                 ThemeSwitchRow(
                     icon = Icons.Default.FormatSize,
-                    title = "使用内置等宽字体",
-                    subtitle = "使用内置等宽字体显示路径、体积与毫秒耗时，解决对齐异常",
+                    title = "内置等宽字体",
                     checked = settings.useMonospaceFont,
                     onCheckedChange = {
                         haptics.click()
@@ -593,7 +575,6 @@ fun ThemeSettingsScreen(
                 ThemeSwitchRow(
                     icon = Icons.Default.ViewCompact,
                     title = "紧凑列表模式",
-                    subtitle = "缩小搜索结果行上下留白，一屏浏览更多文件条目",
                     checked = settings.compactListMode,
                     onCheckedChange = {
                         haptics.click()
@@ -816,9 +797,9 @@ private fun ThemeGroupCard(
 private fun ThemeSwitchRow(
     icon: ImageVector,
     title: String,
-    subtitle: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
+    subtitle: String? = null,
     badgeContent: (@Composable () -> Unit)? = null
 ) {
     Row(
@@ -837,11 +818,13 @@ private fun ThemeSwitchRow(
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            if (!subtitle.isNullOrBlank()) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
         if (badgeContent != null) {
             Spacer(Modifier.width(8.dp))

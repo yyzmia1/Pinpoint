@@ -200,8 +200,6 @@ class MainActivity : ComponentActivity() {
                 val modeStatuses by viewModel.modeStatuses.collectAsState()
                 val shizukuStatus by viewModel.shizukuLiveStatus.collectAsState()
                 val indexProgress by viewModel.indexProgress.collectAsState()
-                val crowdedDirs by viewModel.crowdedDirs.collectAsState()
-                val crowdedSortBy by viewModel.crowdedSortBy.collectAsState()
                 val pendingModeSwitch by viewModel.pendingModeSwitch.collectAsState()
                 val updateState by viewModel.updateState.collectAsState()
                 val updateDialogInfo by viewModel.updateDialogInfo.collectAsState()
@@ -311,8 +309,6 @@ class MainActivity : ComponentActivity() {
                                 settings = settings,
                                 modeStatuses = modeStatuses,
                                 indexProgress = indexProgress,
-                                crowdedDirs = crowdedDirs,
-                                crowdedSortBy = crowdedSortBy,
                                 updateState = updateState,
                                 onBack = { currentPage = AppPage.SEARCH },
                                 onSelectMode = { viewModel.switchMode(it) },
@@ -324,9 +320,7 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onRefreshModes = { viewModel.refreshModeStatuses(probeRoot = true) },
                                 onUpdateFilterConfig = { viewModel.updateFilterConfig(it) },
-                                onExcludeCrowdedPath = { viewModel.excludeCrowdedPath(it) },
-                                onRemoveExcludedPath = { viewModel.removeExcludedPath(it) },
-                                onSetCrowdedSortBy = { viewModel.setCrowdedSortBy(it) },
+                                onBrowseDirectories = { parent -> viewModel.listChildDirectories(parent) },
                                 onSetShowRecentOnEmpty = { viewModel.setShowRecentOnEmptyQuery(it) },
                                 onSetPreviewPreference = { viewModel.setOpenContentHitsInPreview(it) },
                                 onSetSystemFilePickerEnabled = { viewModel.setSystemFilePickerEnabled(it) },
@@ -468,8 +462,6 @@ class MainActivity : ComponentActivity() {
                 pendingModeSwitch?.let { pending ->
                     ModeSwitchConfirmDialog(
                         pending = pending,
-                        onToggleIncludeData = { viewModel.updatePendingModeSwitch(includeDataForRoot = it) },
-                        onToggleSyncRules = { viewModel.updatePendingModeSwitch(syncRulesToPreset = it) },
                         onConfirm = { viewModel.confirmPendingModeSwitch() },
                         onDismiss = { viewModel.dismissPendingModeSwitch() }
                     )
