@@ -31,6 +31,7 @@ Desktop *Everything*-style query syntax · Sub-10 ms CJK substring retrieval ove
   - **Root**: Full-tree traversal from `/` via `libsu` `RootService`, using POSIX `Os.lstat` and `(st_dev, st_ino)` deduplication to skip symlinks, virtual filesystems, and duplicate bind mounts.
 - **Two-Tier Streaming Pipeline**: Separates instant Tier-1 path/metadata indexing from bounded asynchronous Tier-2 document extraction (`.txt`, `.md`, `.docx`, `.pdf`), backed by `ParcelFileDescriptor` pipe streaming so large scans run with bounded heap memory.
 - **Universal QuickLook Preview (`ReaderPreviewSheet`)**: Built-in text/code/log viewer (UTF-8/BOM/GB18030 detection), hardware `PdfRenderer` page viewer (including image-only scanned PDFs), zoomable image canvas, `ZIP`/`APK` archive inspector, media metadata viewer, directory drill-down, and hex head inspector.
+- **System File Picker Integration (`ACTION_GET_CONTENT` + SAF `DocumentsProvider`)**: Exposes both a SAF `Pinpoint` root inside Android `DocumentsUI` and a dedicated `Pinpoint 选择` picker (`FilePickerActivity`) with MIME filtering, folder drill-down, multi-select, and FTS5/CJK search; restricted files bridge cleanly via `preview_bridge` while preserving filenames, toggleable in Settings.
 - **Adaptive Material You (Monet) UI & Safe In-App Updater**: Supports Android 12+ wallpaper-driven Monet dynamic color alongside System / Light / Dark modes, 24h throttled silent startup update checks, strict SemVer comparison, version ignore blacklist, system `DownloadManager` APK installation with browser fallback, and an in-app multi-release **Changelog** sheet with Markdown rendering.
 
 ---
@@ -73,7 +74,7 @@ flowchart TB
 | **Lock-Free Search UX** | `SqliteSearchDatabase` configures bundled SQLite in `WAL` mode with isolated `writeConn` / `query_only` `readConn`, ensuring background indexing never blocks typing. |
 | **Directory Pruning** | `pruneDirectorySubtree` executes an indexed B-tree prefix range query (`path >= ? AND path < ?`) rather than `LIKE`, preventing wildcard collisions on `_`/`%` folder names. |
 | **Body Compression** | Extracted text is compressed with Zlib (`Deflater` / `Inflater`) in `docs_raw` and decompressed on demand for contextual snippet highlighting. |
-| **Cross-Boundary File Handoff** | `FileOpener` serves primary external storage URIs directly via `FileProvider` and automatically bridges restricted or secondary-volume paths through `preview_bridge`. |
+| **Cross-Boundary Handoff & Picker** | `FileOpener` serves readable paths directly via `FileProvider` / read-only descriptors and bridges restricted paths through clean `preview_bridge` subdirectories to preserve filenames; `PinpointDocumentsProvider` (SAF) and `FilePickerActivity` (`ACTION_GET_CONTENT`) expose indexed search and browsing to external apps. |
 
 ---
 
@@ -144,8 +145,10 @@ Implemented by recursive-descent `QuerySyntaxParser`:
     │   │   ├── fs/          # PrivilegedTreeWalker, Root/Shizuku services, BinaryTreeStreamCodec, FileOpener
     │   │   ├── indexer/     # TwoTierIndexManager, IncrementalSyncWorker, RealtimeMonitorService, BootReceiver
     │   │   ├── parser/      # ExtractorDispatcher, TxtMdExtractor, DocxExtractor, PdfExtractor
+    │   │   ├── picker/      # PinpointDocumentsProvider (SAF), MimeFilterHelper
     │   │   ├── search/      # QuerySyntaxParser, SearchQueryAst, CjkTokenizer, SqliteSearchDatabase, SnippetHighlighter
-    │   │   └── ui/          # SearchScreen, SettingsScreen, ShizukuGuideScreen, ReaderPreviewSheet, FormatUtils
+    │   │   ├── ui/          # SearchScreen, SettingsScreen, ShizukuGuideScreen, ReaderPreviewSheet, FormatUtils
+    │   │   └── FilePickerActivity.kt # ACTION_GET_CONTENT picker UI (Pinpoint 选择)
     │   └── res/             # Adaptive monochrome launcher icons, strings, FileProvider paths
     └── src/test/java/com/pocketeverything/app/
         ├── BinaryTreeStreamCodecTest.kt
@@ -154,6 +157,8 @@ Implemented by recursive-descent `QuerySyntaxParser`:
         ├── FilePreviewLoaderTest.kt
         ├── FilterEngineTest.kt
         ├── FormatUtilsTest.kt
+        ├── MimeFilterHelperTest.kt
+        ├── PinpointPickerAndProviderTest.kt
         ├── QuerySyntaxParserTest.kt
         ├── SnippetHighlighterTest.kt
         ├── SqliteSearchDatabaseAndBenchmarkTest.kt

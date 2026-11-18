@@ -325,6 +325,7 @@ class MainActivity : ComponentActivity() {
                                 onExcludeCrowdedPath = { viewModel.excludeCrowdedPath(it) },
                                 onSetShowRecentOnEmpty = { viewModel.setShowRecentOnEmptyQuery(it) },
                                 onSetPreviewPreference = { viewModel.setOpenContentHitsInPreview(it) },
+                                onSetSystemFilePickerEnabled = { viewModel.setSystemFilePickerEnabled(it) },
                                 onSetRealtimeMonitor = { viewModel.setRealtimeMonitorEnabled(it) },
                                 onQuickSync = { viewModel.triggerQuickSync() },
                                 onFullRebuild = { viewModel.triggerFullRebuild(clearFirst = false) },

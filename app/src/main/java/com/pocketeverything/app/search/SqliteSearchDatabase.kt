@@ -515,6 +515,25 @@ class SqliteSearchDatabase(
     }
 
     /**
+     * Fast indexed lookup of a single entry in `files_meta` by its exact [path].
+     */
+    fun getFileMetaByPath(path: String): FileMetaRow? {
+        if (path.isEmpty()) return null
+        return readLock.withLock {
+            val sql = """
+                SELECT id, path, parent_path, name, ext, size, mtime, is_dir, access_mode, tier2_status, tier2_error
+                FROM files_meta
+                WHERE path = ?
+                LIMIT 1
+            """.trimIndent()
+            readConn.prepare(sql).use { stmt ->
+                stmt.bindText(1, path)
+                if (stmt.step()) readMetaRow(stmt) else null
+            }
+        }
+    }
+
+    /**
      * Lists indexed direct children of [parentPath], folders first, sorted case-insensitively by name.
      */
     fun listChildren(parentPath: String, limit: Int = 250): List<SearchResultItem> {
