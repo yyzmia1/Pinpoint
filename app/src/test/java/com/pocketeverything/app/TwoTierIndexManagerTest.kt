@@ -194,10 +194,10 @@ class TwoTierIndexManagerTest {
                 providerResolver = { provider },
                 storageRootsResolver = { listOf("/storage/emulated/0") }
             )
-            mgr.startFullScan(clearExisting = false)
             withTimeout(5000L) {
-                mgr.progress.first { it.tier1Phase == Tier1Phase.IDLE && it.stats.totalEntries == 4L }
+                mgr.startFullScan(clearExisting = false).join()
             }
+            assertEquals(4L, db.getStats().totalEntries)
 
             // Simulate root folder mtime bump on disk
             rootMtime = 2000L
@@ -247,10 +247,10 @@ class TwoTierIndexManagerTest {
 
             // 1. IPC bind failure / timeout even with clearExisting = true must preserve DB & Tier-2 body
             provider.fullTreeHandler = { _, _ -> throw IllegalStateException("RootService 绑定超时") }
-            mgr.startFullScan(clearExisting = true)
             withTimeout(5000L) {
-                mgr.progress.first { it.tier1Phase == Tier1Phase.IDLE && it.errorMessage != null }
+                mgr.startFullScan(clearExisting = true).join()
             }
+            assertTrue(mgr.progress.value.errorMessage != null)
             assertEquals(1L, db.getStats().totalEntries)
             assertEquals(1L, db.getStats().indexedDocs)
             assertEquals(1, db.search("content:重要备份").items.size)
@@ -263,11 +263,11 @@ class TwoTierIndexManagerTest {
                 gate.await()
                 0
             }
-            mgr.startFullScan(clearExisting = true)
+            val scanJob = mgr.startFullScan(clearExisting = true)
             withTimeout(5000L) { started.await() }
             mgr.cancelCurrentScan()
             withTimeout(5000L) {
-                mgr.progress.first { it.tier1Phase == Tier1Phase.IDLE }
+                scanJob.join()
             }
             assertEquals(1L, db.getStats().totalEntries)
             assertEquals(1, db.search("content:重要备份").items.size)

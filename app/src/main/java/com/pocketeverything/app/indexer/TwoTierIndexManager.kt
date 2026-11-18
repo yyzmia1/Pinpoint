@@ -106,7 +106,7 @@ class TwoTierIndexManager(
         }
     }
 
-    fun isTier1Busy(): Boolean = tier1Job?.isActive == true
+    fun isTier1Busy(): Boolean = tier1Job?.isActive == true && _progress.value.tier1Phase != Tier1Phase.IDLE
 
     fun clearErrorMessage() {
         _progress.value = _progress.value.copy(errorMessage = null)
@@ -131,8 +131,9 @@ class TwoTierIndexManager(
     }
 
     fun startQuickHotDirsRefresh(silentIfUnavailable: Boolean = false): Job {
-        if (tier1Job?.isActive == true) {
-            return tier1Job!!
+        val active = tier1Job
+        if (active?.isActive == true && _progress.value.tier1Phase != Tier1Phase.IDLE) {
+            return active
         }
         val job = scope.launch {
             tier1Mutex.withLock {
@@ -343,14 +344,16 @@ class TwoTierIndexManager(
         return job
     }
 
-    fun startFullScan(clearExisting: Boolean = false) {
+    fun startFullScan(clearExisting: Boolean = false): Job {
         tier1Job?.cancel()
         tier2Job?.cancel()
-        tier1Job = scope.launch {
+        val job = scope.launch {
             tier1Mutex.withLock {
                 runFullScanInternal(clearExisting)
             }
         }
+        tier1Job = job
+        return job
     }
 
     private suspend fun runFullScanInternal(clearExisting: Boolean) {
