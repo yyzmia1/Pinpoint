@@ -124,6 +124,7 @@ fun SettingsScreen(
     onExcludeCrowdedPath: (String) -> Unit,
     onSetShowRecentOnEmpty: (Boolean) -> Unit,
     onSetPreviewPreference: (Boolean) -> Unit,
+    onSetSystemFilePickerEnabled: (Boolean) -> Unit = {},
     onSetRealtimeMonitor: (Boolean) -> Unit,
     onQuickSync: () -> Unit,
     onFullRebuild: () -> Unit,
@@ -668,6 +669,13 @@ fun SettingsScreen(
                     title = "搜索栏为空时显示最近文件",
                     checked = settings.showRecentOnEmptyQuery,
                     onCheckedChange = onSetShowRecentOnEmpty
+                )
+                SettingsDivider()
+                ToggleRow(
+                    title = "系统文件选择器入口",
+                    subtitle = "在微信/QQ 等系统文件选择面板提供「Pinpoint」(SAF) 与「Pinpoint 选择」入口",
+                    checked = settings.systemFilePickerEnabled,
+                    onCheckedChange = onSetSystemFilePickerEnabled
                 )
                 SettingsDivider()
                 NavigationRow(

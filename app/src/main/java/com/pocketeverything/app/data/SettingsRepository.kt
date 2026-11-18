@@ -53,6 +53,7 @@ data class AppSettings(
     val hapticStrength: Float = 0.20f,
     val useMonospaceFont: Boolean = false,
     val compactListMode: Boolean = false,
+    val systemFilePickerEnabled: Boolean = true,
     val lastFullScanAtMillis: Long = 0L,
     val lastUpdateCheckAtMillis: Long = 0L,
     val ignoredUpdateTag: String = "",
@@ -125,6 +126,7 @@ class SettingsRepository(context: Context) {
             ).coerceIn(0f, 1f),
             useMonospaceFont = prefs.getBoolean(KEY_USE_MONOSPACE_FONT, false),
             compactListMode = prefs.getBoolean(KEY_COMPACT_LIST_MODE, false),
+            systemFilePickerEnabled = prefs.getBoolean(KEY_SYSTEM_FILE_PICKER_ENABLED, true),
             lastFullScanAtMillis = prefs.getLong(KEY_LAST_FULL_SCAN, 0L),
             lastUpdateCheckAtMillis = prefs.getLong(KEY_LAST_UPDATE_CHECK, 0L),
             ignoredUpdateTag = prefs.getString(KEY_IGNORED_UPDATE_TAG, "").orEmpty(),
@@ -167,6 +169,11 @@ class SettingsRepository(context: Context) {
     fun setShowRecentOnEmptyQuery(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_SHOW_RECENT_ON_EMPTY, enabled).apply()
         _settings.value = _settings.value.copy(showRecentOnEmptyQuery = enabled)
+    }
+
+    fun setSystemFilePickerEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SYSTEM_FILE_PICKER_ENABLED, enabled).apply()
+        _settings.value = _settings.value.copy(systemFilePickerEnabled = enabled)
     }
 
     fun setHasSeenOnboarding(seen: Boolean) {
@@ -366,6 +373,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_HAPTIC_STRENGTH = "haptic_strength"
         private const val KEY_USE_MONOSPACE_FONT = "use_monospace_font"
         private const val KEY_COMPACT_LIST_MODE = "compact_list_mode"
+        private const val KEY_SYSTEM_FILE_PICKER_ENABLED = "system_file_picker_enabled"
         private const val KEY_LAST_FULL_SCAN = "last_full_scan"
         private const val KEY_LAST_UPDATE_CHECK = "last_update_check_at"
         private const val KEY_IGNORED_UPDATE_TAG = "ignored_update_tag"

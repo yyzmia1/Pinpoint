@@ -31,6 +31,7 @@
   - **Root 模式**：通过 `libsu` `RootService` 从 `/` 根目录全盘扫描，基于 POSIX `Os.lstat` 与 `(st_dev, st_ino)` 自动跳过符号链接、虚拟文件系统并消除重复挂载。
 - **两级真流式异步建库**：一级路径与元数据通过 `ParcelFileDescriptor` 管道边扫边入库并即时开放搜索，二级队列低并发异步抽取 `.txt` / `.md` / `.docx` / `.pdf` 正文内容，全程恒定批内存占用。
 - **全类型 QuickLook 内置预览 (`ReaderPreviewSheet`)**：支持高亮文本/代码/日志预览（自动探测 UTF-8 / BOM / GB18030）、原生 `PdfRenderer` 逐页渲染（覆盖扫描版 PDF）、双指缩放画布切换图片、压缩包目录浏览（`ZIP` / `APK`）、音视频元数据与首帧查看、目录子项钻取及未知二进制文件头十六进制检视。
+- **系统文件选择器双入口（`ACTION_GET_CONTENT` + SAF `DocumentsProvider`）**：在微信、QQ、浏览器等外部应用选文时，可通过系统 `DocumentsUI` 的 `Pinpoint` 文档源或独立 `Pinpoint 选择` 面板直接完成全盘检索、MIME 筛选、目录钻取与多选；受限目录文件经 `preview_bridge` 独立子目录桥接并保留原始文件名，支持在设置中一键开关。
 - **莫奈动态取色（Material You）与规范内建更新**：支持 Android 12+ 壁纸莫奈动态取色（默认开启，可随时关闭回落至标准对比度配色）及跟随系统 / 白天 / 黑夜切换；内置 24 小时静默节流检查更新、严格 SemVer 版本比对、版本忽略黑名单、`DownloadManager` 应用内下载安装 + 浏览器兜底跳转，以及全版本 Markdown **更新日志（Changelog）** 面板。
 
 ---
@@ -73,7 +74,7 @@ flowchart TB
 | **WAL 读写分离连接池** | `SqliteSearchDatabase` 启用 `WAL` 模式并严格隔离 `writeConn` 与 `query_only` `readConn`，后台建库与正文写入不会阻塞前台键入检索。 |
 | **目录精准增量清理** | `pruneDirectorySubtree` 采用基于 `path` 唯一索引的 B 树范围查询（`path >= ? AND path < ?`）替代 `LIKE`，规避 `QQfile_recv` 等含 `_`/`%` 目录名通配误删问题。 |
 | **正文压缩存储** | 正文经 Zlib（`Deflater` / `Inflater`）压缩后落库 `docs_raw`，命中时按需解压抽取高亮上下文片段。 |
-| **跨权限安全唤起** | `FileOpener` 对主存储可读路径直接使用 `FileProvider`，对外置存储次级卷或受限目录自动通过内部 `preview_bridge` 桥接并附加 `ClipData` 读权限。 |
+| **跨权限安全唤起与系统选文** | `FileOpener` 对主存储可读路径直接使用 `FileProvider` / 只读描述符，对受限目录通过 `preview_bridge` 独立子目录桥接保留真实文件名；`PinpointDocumentsProvider`（SAF）与 `FilePickerActivity`（`ACTION_GET_CONTENT`）复用索引库安全向外部应用开放。 |
 
 ---
 
@@ -144,8 +145,10 @@ flowchart TB
     │   │   ├── fs/          # PrivilegedTreeWalker, Root/Shizuku 服务, BinaryTreeStreamCodec, FileOpener
     │   │   ├── indexer/     # TwoTierIndexManager, IncrementalSyncWorker, RealtimeMonitorService, BootReceiver
     │   │   ├── parser/      # ExtractorDispatcher, TxtMdExtractor, DocxExtractor, PdfExtractor
+    │   │   ├── picker/      # PinpointDocumentsProvider（SAF 根）, MimeFilterHelper（类型筛选）
     │   │   ├── search/      # QuerySyntaxParser, SearchQueryAst, CjkTokenizer, SqliteSearchDatabase, SnippetHighlighter
-    │   │   └── ui/          # SearchScreen, SettingsScreen, ShizukuGuideScreen, ReaderPreviewSheet, FormatUtils
+    │   │   ├── ui/          # SearchScreen, SettingsScreen, ShizukuGuideScreen, ReaderPreviewSheet, FormatUtils
+    │   │   └── FilePickerActivity.kt # ACTION_GET_CONTENT 系统选文件界面（Pinpoint 选择）
     │   └── res/             # 自适应单色桌面图标、字符串资源、FileProvider 路径配置
     └── src/test/java/com/pocketeverything/app/
         ├── BinaryTreeStreamCodecTest.kt
@@ -154,6 +157,8 @@ flowchart TB
         ├── FilePreviewLoaderTest.kt
         ├── FilterEngineTest.kt
         ├── FormatUtilsTest.kt
+        ├── MimeFilterHelperTest.kt
+        ├── PinpointPickerAndProviderTest.kt
         ├── QuerySyntaxParserTest.kt
         ├── SnippetHighlighterTest.kt
         ├── SqliteSearchDatabaseAndBenchmarkTest.kt

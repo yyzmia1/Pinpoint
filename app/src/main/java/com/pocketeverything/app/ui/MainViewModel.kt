@@ -2,6 +2,7 @@ package com.pocketeverything.app.ui
 
 import android.app.Application
 import android.app.DownloadManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -9,10 +10,13 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Environment
+import android.provider.DocumentsContract
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketeverything.app.BuildConfig
+import com.pocketeverything.app.FilePickerActivity
 import com.pocketeverything.app.PocketEverythingApp
+import com.pocketeverything.app.picker.PinpointDocumentsProvider
 import com.pocketeverything.app.data.AppSettings
 import com.pocketeverything.app.data.ChangelogState
 import com.pocketeverything.app.data.ReleaseUpdateInfo
@@ -660,6 +664,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setShowRecentOnEmptyQuery(enabled: Boolean) {
         settingsRepo.setShowRecentOnEmptyQuery(enabled)
+    }
+
+    fun setSystemFilePickerEnabled(enabled: Boolean) {
+        settingsRepo.setSystemFilePickerEnabled(enabled)
+        val state = if (enabled) {
+            PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+        } else {
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+        }
+        runCatching {
+            val pm = app.packageManager
+            pm.setComponentEnabledSetting(
+                ComponentName(app, FilePickerActivity::class.java),
+                state,
+                PackageManager.DONT_KILL_APP
+            )
+            pm.setComponentEnabledSetting(
+                ComponentName(app, PinpointDocumentsProvider::class.java),
+                state,
+                PackageManager.DONT_KILL_APP
+            )
+            app.contentResolver.notifyChange(
+                DocumentsContract.buildRootsUri("${app.packageName}.documents"),
+                null
+            )
+        }
+        emitMessage(if (enabled) "已开启系统文件选择器入口" else "已关闭系统文件选择器入口")
     }
 
     fun setThemeMode(mode: ThemeMode) {
