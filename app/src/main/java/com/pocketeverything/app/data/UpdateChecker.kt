@@ -34,6 +34,14 @@ sealed interface ChangelogState {
 object UpdateChecker {
 
     const val SILENT_CHECK_INTERVAL_MS = 24L * 60L * 60L * 1000L
+    const val MANIFEST_BRANCH = "release-manifest"
+    const val MANIFEST_FILE = "releases.json"
+
+    fun manifestAndApiUrls(repoSlug: String, perPage: Int = 15): List<String> = listOf(
+        "https://raw.githubusercontent.com/$repoSlug/$MANIFEST_BRANCH/$MANIFEST_FILE",
+        "https://cdn.jsdelivr.net/gh/$repoSlug@$MANIFEST_BRANCH/$MANIFEST_FILE",
+        "https://api.github.com/repos/$repoSlug/releases?per_page=$perPage"
+    )
 
     fun shouldRunSilentCheck(lastCheckAtMillis: Long, nowMillis: Long): Boolean {
         return lastCheckAtMillis <= 0L || (nowMillis - lastCheckAtMillis) >= SILENT_CHECK_INTERVAL_MS
@@ -53,47 +61,34 @@ object UpdateChecker {
         currentVersion: String,
         receiveStable: Boolean = true,
         receiveBeta: Boolean = false,
-        timeoutMs: Int = 8000
+        timeoutMs: Int = 8000,
+        fetcher: (String, Int) -> Pair<Int, String> = ::fetchJson
     ): UpdateCheckState {
         if (!receiveStable && !receiveBeta) {
             return UpdateCheckState.UpToDate(currentVersion)
         }
-        return try {
-            if (!receiveBeta) {
-                val (code, body) = fetchJson("https://api.github.com/repos/$repoSlug/releases/latest", timeoutMs)
-                if (code == 404) {
-                    return UpdateCheckState.UpToDate(currentVersion)
-                }
-                if (code !in 200..299) {
-                    return UpdateCheckState.Error("GitHub 返回状态码 $code", httpStatusCode = code)
-                }
-
-                val info = parseReleaseJson(body)
-                    ?: return UpdateCheckState.Error("无法解析版本信息", httpStatusCode = code)
-
-                if (!info.isPrerelease && isNewerVersion(currentVersion, info.tagName)) {
-                    UpdateCheckState.Available(info)
-                } else {
-                    UpdateCheckState.UpToDate(currentVersion)
-                }
-            } else {
-                val (code, body) = fetchJson("https://api.github.com/repos/$repoSlug/releases?per_page=15", timeoutMs)
-                if (code == 404) {
-                    return UpdateCheckState.UpToDate(currentVersion)
-                }
-                if (code !in 200..299) {
-                    return UpdateCheckState.Error("GitHub 返回状态码 $code", httpStatusCode = code)
-                }
-                val list = parseReleaseListJson(body)
-                val match = selectEligibleUpdate(list, currentVersion, receiveStable = receiveStable, receiveBeta = true)
+        val fetched = fetchReleaseListWithFallback(
+            repoSlug = repoSlug,
+            perPage = 15,
+            timeoutMs = timeoutMs,
+            fetcher = fetcher
+        )
+        return when (fetched) {
+            is FetchOutcome.Success -> {
+                val match = selectEligibleUpdate(
+                    releases = fetched.releases,
+                    currentVersion = currentVersion,
+                    receiveStable = receiveStable,
+                    receiveBeta = receiveBeta
+                )
                 if (match != null) {
                     UpdateCheckState.Available(match)
                 } else {
                     UpdateCheckState.UpToDate(currentVersion)
                 }
             }
-        } catch (t: Throwable) {
-            UpdateCheckState.Error(t.message ?: "网络连接失败")
+            is FetchOutcome.Empty -> UpdateCheckState.UpToDate(currentVersion)
+            is FetchOutcome.Failure -> UpdateCheckState.Error(fetched.message, httpStatusCode = fetched.httpStatusCode)
         }
     }
 
@@ -119,26 +114,81 @@ object UpdateChecker {
     fun fetchReleaseHistory(
         repoSlug: String,
         perPage: Int = 15,
-        timeoutMs: Int = 8000
+        timeoutMs: Int = 8000,
+        fetcher: (String, Int) -> Pair<Int, String> = ::fetchJson
     ): Result<List<ReleaseUpdateInfo>> = runCatching {
-        val (code, body) = fetchJson(
-            "https://api.github.com/repos/$repoSlug/releases?per_page=$perPage",
-            timeoutMs
-        )
-        if (code !in 200..299) {
-            error("GitHub 返回状态码 $code")
+        when (val fetched = fetchReleaseListWithFallback(repoSlug, perPage, timeoutMs, fetcher)) {
+            is FetchOutcome.Success -> fetched.releases.take(perPage)
+            is FetchOutcome.Empty -> emptyList()
+            is FetchOutcome.Failure -> error(fetched.message)
         }
-        parseReleaseListJson(body)
     }
 
-    private fun fetchJson(apiUrl: String, timeoutMs: Int): Pair<Int, String> {
+    private sealed interface FetchOutcome {
+        data class Success(val releases: List<ReleaseUpdateInfo>) : FetchOutcome
+        data object Empty : FetchOutcome
+        data class Failure(val message: String, val httpStatusCode: Int? = null) : FetchOutcome
+    }
+
+    private fun fetchReleaseListWithFallback(
+        repoSlug: String,
+        perPage: Int,
+        timeoutMs: Int,
+        fetcher: (String, Int) -> Pair<Int, String>
+    ): FetchOutcome {
+        var lastCode: Int? = null
+        var lastError: String? = null
+        var sawNotFound = false
+
+        for (url in manifestAndApiUrls(repoSlug, perPage)) {
+            val (code, body) = try {
+                fetcher(url, timeoutMs)
+            } catch (t: Throwable) {
+                lastError = t.message ?: "网络连接失败"
+                continue
+            }
+            if (code in 200..299 && body.isNotBlank()) {
+                val parsed = runCatching { parseReleaseListJson(body) }.getOrNull()
+                if (parsed != null) {
+                    if (parsed.isNotEmpty() || body.trim().startsWith("[")) {
+                        return FetchOutcome.Success(parsed)
+                    }
+                }
+                lastCode = code
+                lastError = "无法解析版本清单"
+                continue
+            }
+            if (code == 404) {
+                sawNotFound = true
+            }
+            lastCode = code
+            lastError = if (code == 403) {
+                "GitHub API 限流 (403)，请稍后重试"
+            } else {
+                "服务器返回状态码 $code"
+            }
+        }
+
+        if (sawNotFound && lastCode == 404) {
+            return FetchOutcome.Empty
+        }
+        return FetchOutcome.Failure(
+            message = lastError ?: "网络连接失败",
+            httpStatusCode = lastCode
+        )
+    }
+
+    private fun fetchJson(urlStr: String, timeoutMs: Int): Pair<Int, String> {
         var conn: HttpURLConnection? = null
         try {
-            conn = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
+            val isGitHubApi = urlStr.startsWith("https://api.github.com/")
+            conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = timeoutMs
                 readTimeout = timeoutMs
-                setRequestProperty("Accept", "application/vnd.github+json")
+                useCaches = false
+                setRequestProperty("Accept", if (isGitHubApi) "application/vnd.github+json" else "application/json")
+                setRequestProperty("Cache-Control", "no-cache")
                 setRequestProperty("User-Agent", "Pinpoint-Android")
             }
             val code = conn.responseCode

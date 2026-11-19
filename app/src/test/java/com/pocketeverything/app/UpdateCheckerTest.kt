@@ -168,4 +168,79 @@ class UpdateCheckerTest {
         assertTrue(UpdateChecker.isSameVersion("1.4.0-3-g1234567", "v1.4.0"))
         assertTrue(UpdateChecker.isSameVersion("1.4.0-alpha.1+build9", "v1.4.0-alpha1"))
     }
+
+    @Test
+    fun `prefers static release-manifest mirrors before GitHub API and falls back cleanly`() {
+        val urls = UpdateChecker.manifestAndApiUrls("yyzmia1/Pinpoint")
+        assertEquals(
+            listOf(
+                "https://raw.githubusercontent.com/yyzmia1/Pinpoint/release-manifest/releases.json",
+                "https://cdn.jsdelivr.net/gh/yyzmia1/Pinpoint@release-manifest/releases.json",
+                "https://api.github.com/repos/yyzmia1/Pinpoint/releases?per_page=15"
+            ),
+            urls
+        )
+
+        val manifestJson = """
+            [
+              {
+                "tag_name": "v1.5.1",
+                "prerelease": false,
+                "published_at": "2026-11-19T08:00:00Z",
+                "html_url": "https://github.com/yyzmia1/Pinpoint/releases/tag/v1.5.1",
+                "body": "Static manifest update",
+                "assets": [
+                  {
+                    "name": "app-release.apk",
+                    "size": 13150000,
+                    "browser_download_url": "https://example.com/v1.5.1.apk"
+                  }
+                ]
+              }
+            ]
+        """.trimIndent()
+
+        // 1. Primary raw.githubusercontent.com succeeds -> never touches GitHub API
+        val hitUrls1 = mutableListOf<String>()
+        val state1 = UpdateChecker.checkLatestRelease(
+            repoSlug = "yyzmia1/Pinpoint",
+            currentVersion = "1.5.0",
+            fetcher = { url, _ ->
+                hitUrls1.add(url)
+                if (url.startsWith("https://raw.githubusercontent.com/")) 200 to manifestJson else 403 to ""
+            }
+        )
+        assertTrue(state1 is com.pocketeverything.app.data.UpdateCheckState.Available)
+        assertEquals("v1.5.1", (state1 as com.pocketeverything.app.data.UpdateCheckState.Available).info.tagName)
+        assertEquals(1, hitUrls1.size)
+
+        // 2. Primary fails (network error), jsDelivr CDN mirror succeeds -> still never hits GitHub API
+        val hitUrls2 = mutableListOf<String>()
+        val history = UpdateChecker.fetchReleaseHistory(
+            repoSlug = "yyzmia1/Pinpoint",
+            fetcher = { url, _ ->
+                hitUrls2.add(url)
+                when {
+                    url.startsWith("https://raw.githubusercontent.com/") -> throw java.io.IOException("timeout")
+                    url.startsWith("https://cdn.jsdelivr.net/") -> 200 to manifestJson
+                    else -> 403 to ""
+                }
+            }
+        ).getOrThrow()
+        assertEquals(1, history.size)
+        assertEquals("v1.5.1", history[0].tagName)
+        assertEquals(2, hitUrls2.size)
+
+        // 3. Both mirrors fail and API returns 403 -> surfaces clear rate-limit error
+        val state3 = UpdateChecker.checkLatestRelease(
+            repoSlug = "yyzmia1/Pinpoint",
+            currentVersion = "1.5.0",
+            fetcher = { url, _ ->
+                if (url.startsWith("https://api.github.com/")) 403 to "" else 503 to ""
+            }
+        )
+        assertTrue(state3 is com.pocketeverything.app.data.UpdateCheckState.Error)
+        assertEquals(403, (state3 as com.pocketeverything.app.data.UpdateCheckState.Error).httpStatusCode)
+        assertTrue(state3.message.contains("403"))
+    }
 }

@@ -1,0 +1,50 @@
+name: Sync Release Manifest
+
+on:
+  release:
+    types: [published, edited, deleted, prereleased, released]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-release-manifest
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Export trimmed releases.json via authenticated GitHub API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p manifest_out
+          gh api "repos/${{ github.repository }}/releases?per_page=25" \
+            --jq '[.[] | select(.draft == false) | {
+              tag_name: .tag_name,
+              html_url: .html_url,
+              body: (.body // ""),
+              published_at: (.published_at // .created_at // ""),
+              prerelease: (.prerelease // false),
+              assets: [(.assets // [])[] | {
+                name: .name,
+                size: .size,
+                browser_download_url: .browser_download_url
+              }]
+            }]' > manifest_out/releases.json
+          ls -lh manifest_out/releases.json
+
+      - name: Publish releases.json to orphan branch release-manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd manifest_out
+          git init -b release-manifest
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add releases.json
+          git commit -m "chore(release-manifest): sync releases.json"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git push --force origin release-manifest
