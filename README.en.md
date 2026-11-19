@@ -29,16 +29,41 @@ Desktop *Everything*-style query syntax · Sub-10 ms CJK substring retrieval ove
   - **Normal**: Standard storage traversal via `MANAGE_EXTERNAL_STORAGE`.
   - **Shizuku**: Non-root `UserService` IPC penetration into restricted `/Android/data` and `/Android/obb` directories, paired with an interactive 3-step setup wizard.
   - **Root**: Full-tree traversal from `/` via `libsu` `RootService`, using POSIX `Os.lstat` and `(st_dev, st_ino)` deduplication to skip symlinks, virtual filesystems, and duplicate bind mounts.
-- **Two-Tier Streaming Pipeline & Priority Queue**: Separates instant Tier-1 path indexing (with unified directory-prefix exclusions and tiered Root `/data` scopes) from customizable-priority Tier-2 streaming extraction (`.txt`, `.md`, `.docx`, `.pdf`), scaling safely up to unlimited file sizes without OOM.
+- **Two-Tier Streaming Pipeline & Automatic Foreground Sync**: Separates instant Tier-1 path indexing (with unified directory-prefix exclusions, tiered Root `/data` scopes, and automatic debounced incremental refresh on foreground resume or system file picker open) from customizable-priority Tier-2 streaming extraction (`.txt`, `.md`, `.docx`, `.pdf`), scaling safely up to unlimited file sizes without OOM.
+- **Mobile WizTree Storage Analyzer & App Residue Cleaner (`StorageAnalyzerScreen`)**: Reuses existing `files_meta` via native SQLite C++ `GROUP BY` / `ORDER BY LIMIT` rollups (zero extra tables, zero duplicate disk scans, zero OOM even on million-file indexes) to power an interactive **Squarified Treemap**, **Directory Tree** (size/count dual sort + proportional `% of Parent` bars), **App Attribution & Uninstalled Residue** leaderboard, and **Extension / Top Large Files** view—paired with symlink-safe cross-permission disk deletion (`DeletionSafetyGuard` enforced on both UI and Binder) and 1-tap search index exclusion.
 - **Universal QuickLook Preview (`ReaderPreviewSheet`)**: Built-in text/code/log viewer (UTF-8/BOM/GB18030 detection), hardware `PdfRenderer` page viewer (including image-only scanned PDFs), zoomable image canvas, `ZIP`/`APK` archive inspector, media metadata viewer, directory drill-down, and hex head inspector.
-- **System File Picker Integration (`ACTION_GET_CONTENT` + SAF `DocumentsProvider`)**: Exposes both a SAF `Pinpoint` root inside Android `DocumentsUI` and a dedicated `Pinpoint 选择` picker (`FilePickerActivity`) with MIME filtering, folder drill-down, multi-select, and FTS5/CJK search; restricted files bridge cleanly via `preview_bridge` while preserving filenames, toggleable in Settings.
-- **Adaptive Material You (Monet) UI & Safe In-App Updater**: Supports Android 12+ wallpaper-driven Monet dynamic color alongside System / Light / Dark modes, 24h throttled silent startup update checks, strict SemVer comparison, version ignore blacklist, system `DownloadManager` APK installation with browser fallback, and an in-app multi-release **Changelog** sheet with Markdown rendering.
+- **System File Picker Integration (`ACTION_GET_CONTENT` + SAF `DocumentsProvider`)**: Exposes both a SAF `Pinpoint` root inside Android `DocumentsUI`'s left drawer and a dedicated `Pinpoint 选择` picker (`FilePickerActivity`) with automatic incremental sync on open, MIME filtering, folder drill-down, multi-select, and FTS5/CJK search; restricted files bridge cleanly via `preview_bridge` while preserving filenames, toggleable in Settings.
+- **Adaptive Material You (Monet) UI & Rate-Limit-Free Static Update Manifest**: Supports Android 12+ wallpaper-driven Monet dynamic color alongside System / Light / Dark modes; update checks and the multi-release Markdown **Changelog** sheet fetch a static `releases.json` from the dedicated `release-manifest` branch (`raw.githubusercontent.com` → `jsDelivr` CDN → GitHub API fallback) to eliminate unauthenticated GitHub API `403` rate limits, complete with 24h silent throttling, strict SemVer comparison, and in-app `DownloadManager` installation with browser fallback.
 
 ---
 
 ## Screenshots & Demo
 
-![Pinpoint Motion Demo — Offline CJK Search, Shizuku Penetration & QuickLook](docs/media/pinpoint-demo.webp)
+![Pinpoint Motion Demo — Offline CJK Search, QuickLook Preview & Mobile WizTree Storage Analyzer](docs/media/pinpoint-demo.webp)
+
+---
+
+## Installation & Usage
+
+### Download & Requirements
+
+- **Download**: Grab the latest signed `app-release.apk` from [Releases](https://github.com/yyzmia1/Pinpoint/releases) (package ID `com.yyzm.pinpoint`; an optional side-by-side debug build `app-debug.apk` with ID `com.yyzm.pinpoint.debug` is also published).
+- **Requirements**: Android 8.0 (API 26) or higher, targeting Android 15 (API 35).
+- **Legacy Package Migration**: If you previously installed `<= v1.2.1` (legacy package ID `com.pocketeverything.app`), manually uninstall the older app before installing newer builds to avoid duplicate launcher icons.
+
+### First Launch & Permission Modes
+
+| Access Mode | Scope | Setup Path |
+| :--- | :--- | :--- |
+| **Normal** | Primary & removable shared storage | Launch Pinpoint and tap **Grant** → enable **All Files Access** (`MANAGE_EXTERNAL_STORAGE`) in system settings → return to auto-build the index. |
+| **Shizuku** | Non-root penetration into `/Android/data` & `/Android/obb` | Start the [Shizuku](https://shizuku.rikka.app/) service → tap the mode pill in the top bar and select **Shizuku** → follow the built-in 3-step wizard to authorize and index. |
+| **Root** | Full `/` traversal & scoped `/data` indexing | Tap the top-bar mode pill and select **Root** → grant superuser permission in Magisk / KernelSU / APatch → optionally allow `/data` subdirectories under **Settings → Scope & Exclusions**. |
+
+### Advanced Usage
+
+- **Query Syntax**: Supports desktop *Everything*-style boolean operators, wildcards, regex, field qualifiers, and size/date filters — see **[Query Syntax](#query-syntax)** below.
+- **Storage Analyzer & Cleanup**: Tap the pie-chart icon in the home top bar (or **Locate in Storage Tree** from any file detail dialog) to inspect folder treemaps, uncover uninstalled app residue, and safely delete files or exclude noisy folders from search.
+- **System File Picker**: When attaching files from external apps, open the left navigation drawer of Android's system file picker and pick **Pinpoint** to search freshly synced files across directories.
 
 
 
@@ -48,17 +73,20 @@ Desktop *Everything*-style query syntax · Sub-10 ms CJK substring retrieval ove
 
 ```mermaid
 flowchart TB
-    UI["Compose UI: SearchScreen / ReaderPreviewSheet / SettingsScreen / ShizukuGuide"]
-    VM["MainViewModel & UpdateChecker"]
+    UI["Compose UI: SearchScreen / StorageAnalyzerScreen / ReaderPreviewSheet / SettingsScreen"]
+    VM["MainViewModel & UpdateChecker (Static Manifest)"]
     IDX["TwoTierIndexManager & FilterEngine"]
-    DB["SqliteSearchDatabase (FTS5 + WAL R/W Split + Zlib Body)"]
+    ANA["WizTreeEngine & AppStorageAttribution"]
+    DB["SqliteSearchDatabase (FTS5 + WAL R/W Split + SQLite GROUP BY)"]
     PAR["ExtractorDispatcher: TxtMd / Docx / Pdf"]
-    PROV["FileSystemProvider: Normal / Shizuku / Root"]
+    PROV["FileSystemProvider & DeletionSafetyGuard: Normal / Shizuku / Root"]
     WALK["PrivilegedTreeWalker + BinaryTreeStreamCodec (PFD Pipe)"]
 
     UI --> VM
     VM --> DB
     VM --> IDX
+    VM --> ANA
+    ANA --> DB
     IDX --> PAR
     IDX --> DB
     IDX --> PROV
@@ -130,7 +158,8 @@ Implemented by recursive-descent `QuerySyntaxParser`:
 .
 ├── .github/workflows/
 │   ├── ci.yml                               # Automatic unit tests, Lint & Debug APK on push/PR
-│   └── release.yml                          # Signed Release & Debug APK publication on v* tags
+│   ├── release.yml                          # Signed Release & Debug APK publication on v* tags
+│   └── sync-release-manifest.yml            # Auto-syncs trimmed releases.json to release-manifest branch on release events
 ├── gradle/libs.versions.toml                # Centralized version catalog
 ├── settings.gradle.kts                      # rootProject.name = "Pinpoint"
 ├── README.md                                # Simplified Chinese documentation
@@ -139,15 +168,16 @@ Implemented by recursive-descent `QuerySyntaxParser`:
     ├── src/main/
     │   ├── aidl/com/pocketeverything/app/ipc/IPrivilegedFsService.aidl
     │   ├── java/com/pocketeverything/app/
-    │   │   ├── data/        # SettingsRepository, UpdateChecker
+    │   │   ├── analyzer/    # WizTreeEngine (SQLite GROUP BY + Treemap), AppStorageAttribution
+    │   │   ├── data/        # SettingsRepository, UpdateChecker (static manifest mirrors)
     │   │   ├── di/          # AppContainer
     │   │   ├── filter/      # FilterConfig, FilterEngine
-    │   │   ├── fs/          # PrivilegedTreeWalker, Root/Shizuku services, BinaryTreeStreamCodec, FileOpener
+    │   │   ├── fs/          # PrivilegedTreeWalker, Root/Shizuku services, DeletionSafetyGuard, FileOpener
     │   │   ├── indexer/     # TwoTierIndexManager, IncrementalSyncWorker, RealtimeMonitorService, BootReceiver
     │   │   ├── parser/      # ExtractorDispatcher, TxtMdExtractor, DocxExtractor, PdfExtractor
     │   │   ├── picker/      # PinpointDocumentsProvider (SAF), MimeFilterHelper
     │   │   ├── search/      # QuerySyntaxParser, SearchQueryAst, CjkTokenizer, SqliteSearchDatabase, SnippetHighlighter
-    │   │   ├── ui/          # SearchScreen, SettingsScreen, ShizukuGuideScreen, ReaderPreviewSheet, FormatUtils
+    │   │   ├── ui/          # SearchScreen, StorageAnalyzerScreen, SettingsScreen, ShizukuGuideScreen, ReaderPreviewSheet
     │   │   └── FilePickerActivity.kt # ACTION_GET_CONTENT picker UI (Pinpoint 选择)
     │   └── res/             # Adaptive monochrome launcher icons, strings, FileProvider paths
     └── src/test/java/com/pocketeverything/app/

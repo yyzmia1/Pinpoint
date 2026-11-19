@@ -29,16 +29,41 @@
   - **普通模式**：基于 `MANAGE_EXTERNAL_STORAGE` 快速扫描内部与外置公开存储目录。
   - **Shizuku 模式**：免 Root 绑定 `UserService` 穿透 `/Android/data` 与 `/Android/obb`，内置三步式实时检测引导向导。
   - **Root 模式**：通过 `libsu` `RootService` 从 `/` 根目录全盘扫描，基于 POSIX `Os.lstat` 与 `(st_dev, st_ino)` 自动跳过符号链接、虚拟文件系统并消除重复挂载。
-- **两级真流式异步建库与智能队列**：一级路径与元数据通过 `ParcelFileDescriptor` 管道边扫边入库并即时开放搜索，支持目录前缀精准排除与 Root `/data` 分级放行；二级队列支持可自定义优先级的低并发流式抽取（`.txt` / `.md` / `.docx` / `.pdf`），体积上限最高开放至 `不限` 且全程防 OOM。
+- **两级真流式异步建库与自动增量同步**：一级路径与元数据通过 `ParcelFileDescriptor` 管道边扫边入库并即时开放搜索，每次切回前台或从系统「打开文档」左侧抽屉开启时自动触发防抖增量更新；二级队列支持可自定义优先级的低并发流式抽取（`.txt` / `.md` / `.docx` / `.pdf`），体积上限最高开放至 `不限` 且全程防 OOM。
+- **移动端 WizTree 空间透视与「软件拉屎」清理 (`StorageAnalyzerScreen`)**：复用现有 `files_meta` 表在 SQLite 原生 C++ 层完成 `GROUP BY` / `ORDER BY LIMIT` 聚合（零新增表、零重复扫盘、海量文件零 OOM），提供 **交互式 Squarified Treemap 矩形树图**、**目录树（体积 / 文件数双排序 + 占比底纹条）**、**应用归属与已卸载残留榜** 与 **扩展名 / Top 大文件榜**；支持普通 / Shizuku / Root 跨权限不跟随软链接安全物理真删（客户端与服务端双重 `DeletionSafetyGuard` 系统目录硬拦截）及一键「仅排除出搜索库」。
 - **全类型 QuickLook 内置预览 (`ReaderPreviewSheet`)**：支持高亮文本/代码/日志预览（自动探测 UTF-8 / BOM / GB18030）、原生 `PdfRenderer` 逐页渲染（覆盖扫描版 PDF）、双指缩放画布切换图片、压缩包目录浏览（`ZIP` / `APK`）、音视频元数据与首帧查看、目录子项钻取及未知二进制文件头十六进制检视。
-- **系统文件选择器双入口（`ACTION_GET_CONTENT` + SAF `DocumentsProvider`）**：在微信、QQ、浏览器等外部应用选文时，可通过系统 `DocumentsUI` 的 `Pinpoint` 文档源或独立 `Pinpoint 选择` 面板直接完成全盘检索、MIME 筛选、目录钻取与多选；受限目录文件经 `preview_bridge` 独立子目录桥接并保留原始文件名，支持在设置中一键开关。
-- **莫奈动态取色（Material You）与规范内建更新**：支持 Android 12+ 壁纸莫奈动态取色（默认开启，可随时关闭回落至标准对比度配色）及跟随系统 / 白天 / 黑夜切换；内置 24 小时静默节流检查更新、严格 SemVer 版本比对、版本忽略黑名单、`DownloadManager` 应用内下载安装 + 浏览器兜底跳转，以及全版本 Markdown **更新日志（Changelog）** 面板。
+- **系统文件选择器双入口（`ACTION_GET_CONTENT` + SAF `DocumentsProvider`）**：在微信、QQ、浏览器等外部应用选文时，可通过系统 `DocumentsUI` 左侧抽屉的 `Pinpoint` 文档源或独立 `Pinpoint 选择` 面板直接完成全盘检索、MIME 筛选、目录钻取与多选（开启即自动增量同步）；受限目录文件经 `preview_bridge` 独立子目录桥接并保留原始文件名，支持在设置中一键开关。
+- **莫奈动态取色（Material You）与零 403 静态更新清单**：支持 Android 12+ 壁纸莫奈动态取色（默认开启，可随时关闭回落至标准对比度配色）及跟随系统 / 白天 / 黑夜切换；版本检查与全版本 Markdown **更新日志（Changelog）** 优先读取独立 `release-manifest` 分支的 `releases.json`（`raw.githubusercontent.com` → `jsDelivr` CDN → GitHub API 三级回退），彻底规避未认证 GitHub API 403 限流，并内置 24 小时静默节流、严格 SemVer 比对、`DownloadManager` 应用内下载安装与浏览器兜底跳转。
 
 ---
 
 ## 效果展示
 
-![Pinpoint 功能动态演示 — 离线中文检索、Shizuku 穿透与 QuickLook 预览](docs/media/pinpoint-demo.webp)
+![Pinpoint 功能动态演示 — 离线中文检索、QuickLook 预览与移动端 WizTree 空间透视](docs/media/pinpoint-demo.webp)
+
+---
+
+## 安装与使用
+
+### 下载与环境要求
+
+- **安装包获取**：前往 [Releases](https://github.com/yyzmia1/Pinpoint/releases) 页面下载最新正式版 `app-release.apk`（包名 `com.yyzm.pinpoint`；如需并行体验测试版，可下载 `app-debug.apk`，包名 `com.yyzm.pinpoint.debug`）。
+- **系统要求**：Android 8.0（API 26）及以上，完整适配至 Android 15（API 35）。
+- **旧包名卸载提示**：若设备上仍留存 `<= v1.2.1` 版本（旧包名 `com.pocketeverything.app`），安装新版前请先手动卸载旧包，避免桌面出现重复应用图标。
+
+### 首次启动与三级权限开启
+
+| 运行模式 | 适用范围 | 开启路径 |
+| :--- | :--- | :--- |
+| **普通模式（Normal）** | 内部存储与外置公开目录 | 打开应用点击「授权」→ 在系统设置中开启 **所有文件访问权限**（`MANAGE_EXTERNAL_STORAGE`）→ 返回自动建库。 |
+| **Shizuku 模式** | 免 Root 穿透 `/Android/data` 与 `/Android/obb` | 先启动 [Shizuku](https://shizuku.rikka.app/) 服务 → 点击首页顶栏模式胶囊切换为 **Shizuku** → 按内置三步向导一键授权并自动建库。 |
+| **Root 模式** | `/` 全盘及分级 `/data` 索引 | 点击首页顶栏模式胶囊切换为 **Root** → 在 Magisk / KernelSU / APatch 中授予超级用户权限 → 按需在「设置 → 目录范围与排除」放行 `/data` 子目录。 |
+
+### 进阶使用
+
+- **复合查询语法**：支持桌面端 *Everything* 风格布尔运算、通配符、正则、字段限定与大小/日期筛选，详见下方 **[查询语法速查](#查询语法速查)**。
+- **空间透视与清理**：点击首页顶栏饼图图标一键进入 **空间透视**（或在任意文件详情弹窗点击「在空间树中定位」），支持交互式矩形树图下钻、识别已卸载应用残留并执行物理真删或一键排除出搜索库。
+- **外部应用选文**：在微信、浏览器等应用调用系统文件选择器时，展开「打开文档」左侧抽屉选择 **Pinpoint**，即可在自动增量更新后直接跨目录检索并回传文件。
 
 
 
@@ -48,17 +73,20 @@
 
 ```mermaid
 flowchart TB
-    UI["Compose UI: SearchScreen / ReaderPreviewSheet / SettingsScreen / ShizukuGuide"]
-    VM["MainViewModel & UpdateChecker"]
+    UI["Compose UI: SearchScreen / StorageAnalyzerScreen / ReaderPreviewSheet / SettingsScreen"]
+    VM["MainViewModel & UpdateChecker (Static Manifest)"]
     IDX["TwoTierIndexManager & FilterEngine"]
-    DB["SqliteSearchDatabase (FTS5 + WAL R/W Split + Zlib Body)"]
+    ANA["WizTreeEngine & AppStorageAttribution"]
+    DB["SqliteSearchDatabase (FTS5 + WAL R/W Split + SQLite GROUP BY)"]
     PAR["ExtractorDispatcher: TxtMd / Docx / Pdf"]
-    PROV["FileSystemProvider: Normal / Shizuku / Root"]
+    PROV["FileSystemProvider & DeletionSafetyGuard: Normal / Shizuku / Root"]
     WALK["PrivilegedTreeWalker + BinaryTreeStreamCodec (PFD Pipe)"]
 
     UI --> VM
     VM --> DB
     VM --> IDX
+    VM --> ANA
+    ANA --> DB
     IDX --> PAR
     IDX --> DB
     IDX --> PROV
@@ -130,7 +158,8 @@ flowchart TB
 .
 ├── .github/workflows/
 │   ├── ci.yml                               # 日常推送/PR 自动运行单测、Lint 与 Debug 测试包构建
-│   └── release.yml                          # 推送 v* 标签时自动校验签名并发布正式 Release
+│   ├── release.yml                          # 推送 v* 标签时自动校验签名并发布正式 Release
+│   └── sync-release-manifest.yml            # 发布 Release 后自动同步精简版 releases.json 至 release-manifest 分支
 ├── gradle/libs.versions.toml                # 统一依赖版本清单
 ├── settings.gradle.kts                      # rootProject.name = "Pinpoint"
 ├── README.md                                # 简体中文工程文档
@@ -139,15 +168,16 @@ flowchart TB
     ├── src/main/
     │   ├── aidl/com/pocketeverything/app/ipc/IPrivilegedFsService.aidl
     │   ├── java/com/pocketeverything/app/
-    │   │   ├── data/        # SettingsRepository（设置持久化）, UpdateChecker（版本检测）
+    │   │   ├── analyzer/    # WizTreeEngine（SQLite 原生聚合 + Treemap）, AppStorageAttribution（应用归属与残留）
+    │   │   ├── data/        # SettingsRepository（设置持久化）, UpdateChecker（静态多源版本检测）
     │   │   ├── di/          # AppContainer（依赖容器）
     │   │   ├── filter/      # FilterConfig, FilterEngine（目录过滤与白名单策略）
-    │   │   ├── fs/          # PrivilegedTreeWalker, Root/Shizuku 服务, BinaryTreeStreamCodec, FileOpener
+    │   │   ├── fs/          # PrivilegedTreeWalker, Root/Shizuku 服务, DeletionSafetyGuard, FileOpener
     │   │   ├── indexer/     # TwoTierIndexManager, IncrementalSyncWorker, RealtimeMonitorService, BootReceiver
     │   │   ├── parser/      # ExtractorDispatcher, TxtMdExtractor, DocxExtractor, PdfExtractor
     │   │   ├── picker/      # PinpointDocumentsProvider（SAF 根）, MimeFilterHelper（类型筛选）
     │   │   ├── search/      # QuerySyntaxParser, SearchQueryAst, CjkTokenizer, SqliteSearchDatabase, SnippetHighlighter
-    │   │   ├── ui/          # SearchScreen, SettingsScreen, ShizukuGuideScreen, ReaderPreviewSheet, FormatUtils
+    │   │   ├── ui/          # SearchScreen, StorageAnalyzerScreen, SettingsScreen, ShizukuGuideScreen, ReaderPreviewSheet
     │   │   └── FilePickerActivity.kt # ACTION_GET_CONTENT 系统选文件界面（Pinpoint 选择）
     │   └── res/             # 自适应单色桌面图标、字符串资源、FileProvider 路径配置
     └── src/test/java/com/pocketeverything/app/
