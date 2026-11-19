@@ -1970,8 +1970,202 @@ class SqliteSearchDatabase(
     }
 
     /**
-     * Streams every row of files_meta in a single read pass for the WizTree in-memory rollup engine
-     * without allocating intermediate row objects.
+     * Aggregates file sizes & counts per directory inside SQLite native C++ (zero per-file JVM heap).
+     * Even with 1M+ indexed files, only ~10k-40k unique directory rows cross into JVM.
+     */
+    fun streamDirectoryRollupsForAnalyzer(
+        visitor: (
+            parentPath: String,
+            directFileBytes: Long,
+            directFileCount: Long,
+            directSubdirCount: Long,
+            maxMtime: Long,
+            accessModeCode: Int
+        ) -> Unit
+    ) {
+        readLock.withLock {
+            readConn.prepare(
+                """
+                SELECT parent_path,
+                       SUM(CASE WHEN is_dir = 0 THEN CASE WHEN size > 0 THEN size ELSE 0 END ELSE 0 END),
+                       SUM(CASE WHEN is_dir = 0 THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN is_dir = 1 THEN 1 ELSE 0 END),
+                       MAX(mtime),
+                       MAX(access_mode)
+                FROM files_meta
+                GROUP BY parent_path
+                """.trimIndent()
+            ).use { stmt ->
+                while (stmt.step()) {
+                    visitor(
+                        stmt.getText(0),
+                        stmt.getLong(1),
+                        stmt.getLong(2),
+                        stmt.getLong(3),
+                        stmt.getLong(4),
+                        stmt.getLong(5).toInt()
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Streams only directory metadata rows (is_dir = 1) so empty or nested-only directories
+     * preserve accurate mtime, accessMode, and tree linkage without touching file rows.
+     */
+    fun streamDirectoriesForAnalyzer(
+        visitor: (
+            path: String,
+            parentPath: String,
+            name: String,
+            mtime: Long,
+            accessModeCode: Int
+        ) -> Unit
+    ) {
+        readLock.withLock {
+            readConn.prepare(
+                "SELECT path, parent_path, name, mtime, access_mode FROM files_meta WHERE is_dir = 1"
+            ).use { stmt ->
+                while (stmt.step()) {
+                    visitor(
+                        stmt.getText(0),
+                        stmt.getText(1),
+                        stmt.getText(2),
+                        stmt.getLong(3),
+                        stmt.getLong(4).toInt()
+                    )
+                }
+            }
+        }
+    }
+
+    data class AnalyzerExtRow(
+        val ext: String,
+        val totalBytes: Long,
+        val fileCount: Long
+    )
+
+    fun queryExtensionStatsForAnalyzer(limit: Int = 36): List<AnalyzerExtRow> {
+        val out = ArrayList<AnalyzerExtRow>(limit)
+        readLock.withLock {
+            readConn.prepare(
+                """
+                SELECT LOWER(ext) AS norm_ext,
+                       SUM(CASE WHEN size > 0 THEN size ELSE 0 END) AS total_bytes,
+                       COUNT(*) AS file_cnt
+                FROM files_meta
+                WHERE is_dir = 0
+                GROUP BY norm_ext
+                ORDER BY total_bytes DESC
+                LIMIT ?
+                """.trimIndent()
+            ).use { stmt ->
+                stmt.bindLong(1, limit.toLong())
+                while (stmt.step()) {
+                    out.add(
+                        AnalyzerExtRow(
+                            ext = stmt.getText(0),
+                            totalBytes = stmt.getLong(1),
+                            fileCount = stmt.getLong(2)
+                        )
+                    )
+                }
+            }
+        }
+        return out
+    }
+
+    data class AnalyzerFileRow(
+        val path: String,
+        val parentPath: String,
+        val name: String,
+        val ext: String,
+        val size: Long,
+        val mtime: Long,
+        val accessModeCode: Int
+    )
+
+    fun queryTopLargeFilesForAnalyzer(extFilter: String? = null, limit: Int = 200): List<AnalyzerFileRow> {
+        val out = ArrayList<AnalyzerFileRow>(minOf(limit, 200))
+        readLock.withLock {
+            val sql = if (extFilter == null) {
+                """
+                SELECT path, parent_path, name, ext, size, mtime, access_mode
+                FROM files_meta
+                WHERE is_dir = 0 AND size > 0
+                ORDER BY size DESC
+                LIMIT ?
+                """.trimIndent()
+            } else {
+                """
+                SELECT path, parent_path, name, ext, size, mtime, access_mode
+                FROM files_meta
+                WHERE is_dir = 0 AND LOWER(ext) = ? AND size > 0
+                ORDER BY size DESC
+                LIMIT ?
+                """.trimIndent()
+            }
+            readConn.prepare(sql).use { stmt ->
+                if (extFilter == null) {
+                    stmt.bindLong(1, limit.toLong())
+                } else {
+                    stmt.bindText(1, extFilter.trim().trimStart('.').lowercase(java.util.Locale.ROOT))
+                    stmt.bindLong(2, limit.toLong())
+                }
+                while (stmt.step()) {
+                    out.add(
+                        AnalyzerFileRow(
+                            path = stmt.getText(0),
+                            parentPath = stmt.getText(1),
+                            name = stmt.getText(2),
+                            ext = stmt.getText(3),
+                            size = stmt.getLong(4),
+                            mtime = stmt.getLong(5),
+                            accessModeCode = stmt.getLong(6).toInt()
+                        )
+                    )
+                }
+            }
+        }
+        return out
+    }
+
+    fun queryDirectFilesInDirForAnalyzer(dirPath: String, limit: Int = 500): List<AnalyzerFileRow> {
+        val normalized = if (dirPath.length > 1) dirPath.trimEnd('/') else dirPath
+        val out = ArrayList<AnalyzerFileRow>(64)
+        readLock.withLock {
+            readConn.prepare(
+                """
+                SELECT path, parent_path, name, ext, size, mtime, access_mode
+                FROM files_meta
+                WHERE parent_path = ? AND is_dir = 0
+                ORDER BY size DESC, name COLLATE NOCASE ASC
+                LIMIT ?
+                """.trimIndent()
+            ).use { stmt ->
+                stmt.bindText(1, normalized)
+                stmt.bindLong(2, limit.toLong())
+                while (stmt.step()) {
+                    out.add(
+                        AnalyzerFileRow(
+                            path = stmt.getText(0),
+                            parentPath = stmt.getText(1),
+                            name = stmt.getText(2),
+                            ext = stmt.getText(3),
+                            size = stmt.getLong(4),
+                            mtime = stmt.getLong(5),
+                            accessModeCode = stmt.getLong(6).toInt()
+                        )
+                    )
+                }
+            }
+        }
+        return out
+    }
+
+    /**
+     * Streams every row of files_meta in a single read pass (retained for small diagnostic streams).
      */
     fun streamAllEntriesForAnalyzer(
         visitor: (

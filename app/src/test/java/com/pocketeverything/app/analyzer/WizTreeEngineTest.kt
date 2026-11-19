@@ -101,10 +101,16 @@ class WizTreeEngineTest {
             assertEquals("无后缀", extMap[""]?.displayLabel)
             assertEquals(600L, extMap[""]?.totalBytes)
 
-            // Global top large files & extension filtering
+            // Global top large files & on-demand SQLite extension filtering + on-demand direct files
             assertEquals("main.obb", snap.topLargeFiles.first().name)
-            assertEquals(listOf("movie.mp4"), snap.largeFilesForExt("mp4").map { it.name })
-            assertEquals(4, snap.largeFilesForExt("txt").size)
+            assertEquals(listOf("movie.mp4"), WizTreeEngine.loadLargeFilesForExtension(db, "mp4", resolver).map { it.name })
+            assertEquals(4, WizTreeEngine.loadLargeFilesForExtension(db, "txt", resolver).size)
+
+            val downloadNode = snap.dirNodes["/storage/emulated/0/Download"]!!
+            assertEquals(4L, downloadNode.directFileCount)
+            val downloadChildren = WizTreeEngine.loadChildrenForDirectory(db, downloadNode, AnalyzerTreeSort.SIZE_DESC)
+            assertEquals(4, downloadChildren.size)
+            assertTrue(downloadChildren.all { !it.isDir })
         }
     }
 

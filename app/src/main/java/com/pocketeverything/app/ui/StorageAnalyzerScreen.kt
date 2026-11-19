@@ -137,8 +137,10 @@ data class StorageAnalyzerUiState(
     val snapshot: WizTreeSnapshot? = null,
     val selectedTab: AnalyzerTab = AnalyzerTab.TREE,
     val currentDirPath: String? = null,
+    val activeDirChildren: List<TreeChildEntry> = emptyList(),
     val treeSort: AnalyzerTreeSort = AnalyzerTreeSort.SIZE_DESC,
     val selectedExtFilter: String? = null,
+    val activeLargeFiles: List<LargeFileEntry> = emptyList(),
     val onlyUninstalledApps: Boolean = false,
     val showTreemap: Boolean = true,
     val deletingPath: String? = null,
@@ -150,6 +152,16 @@ data class StorageAnalyzerUiState(
             val snap = snapshot ?: return null
             val target = currentDirPath ?: snap.defaultRootPath ?: return null
             return snap.dirNodes[target] ?: snap.defaultRootPath?.let { snap.dirNodes[it] }
+        }
+
+    val effectiveDirChildren: List<TreeChildEntry>
+        get() = if (activeDirChildren.isNotEmpty()) activeDirChildren else activeDirNode?.childrenSorted(treeSort).orEmpty()
+
+    val effectiveLargeFiles: List<LargeFileEntry>
+        get() = if (activeLargeFiles.isNotEmpty() || selectedExtFilter != null) {
+            activeLargeFiles
+        } else {
+            snapshot?.topLargeFiles.orEmpty()
         }
 
     val canNavigateUpInTree: Boolean
@@ -202,10 +214,12 @@ fun StorageAnalyzerScreen(
 
     val snapshot = state.snapshot
     val activeDir = state.activeDirNode
+    val activeChildren = state.effectiveDirChildren
+    val activeLargeFiles = state.effectiveLargeFiles
     val dark = !MaterialTheme.colorScheme.isLightScheme
 
-    val treemapInputs = remember(snapshot, state.selectedTab, activeDir, state.onlyUninstalledApps) {
-        buildTreemapInputs(snapshot, state.selectedTab, activeDir, state.onlyUninstalledApps)
+    val treemapInputs = remember(snapshot, state.selectedTab, activeChildren, state.onlyUninstalledApps) {
+        buildTreemapInputs(snapshot, state.selectedTab, activeChildren, state.onlyUninstalledApps)
     }
 
     Column(
@@ -290,7 +304,7 @@ fun StorageAnalyzerScreen(
                         if (tile.isOtherBucket) return@SquarifiedTreemapCard
                         haptics.click()
                         if (state.selectedTab == AnalyzerTab.TREE) {
-                            val child = activeDir?.childrenBySize?.firstOrNull { it.path == tile.id }
+                            val child = activeChildren.firstOrNull { it.path == tile.id }
                             if (child != null) {
                                 sheetTarget = AnalyzerActionTarget(
                                     path = child.path,
@@ -314,6 +328,7 @@ fun StorageAnalyzerScreen(
                     TreeTabBody(
                         snapshot = snapshot,
                         activeDir = activeDir,
+                        children = activeChildren,
                         sort = state.treeSort,
                         appIcons = state.appIcons,
                         useMonospaceFont = useMonospaceFont,
@@ -387,6 +402,7 @@ fun StorageAnalyzerScreen(
                 AnalyzerTab.FILES -> {
                     FilesTabBody(
                         snapshot = snapshot,
+                        files = activeLargeFiles,
                         selectedExt = state.selectedExtFilter,
                         useMonospaceFont = useMonospaceFont,
                         dark = dark,
@@ -762,6 +778,7 @@ private fun SquarifiedTreemapCard(
 private fun TreeTabBody(
     snapshot: WizTreeSnapshot,
     activeDir: DirNodeStat?,
+    children: List<TreeChildEntry>,
     sort: AnalyzerTreeSort,
     appIcons: Map<String, ImageBitmap>,
     useMonospaceFont: Boolean,
@@ -772,7 +789,6 @@ private fun TreeTabBody(
     onRowMore: (TreeChildEntry) -> Unit
 ) {
     if (activeDir == null) return
-    val children = remember(activeDir, sort) { activeDir.childrenSorted(sort) }
     val listState = rememberLazyListState()
     LaunchedEffect(activeDir.path, sort) {
         listState.scrollToItem(0)
@@ -1241,6 +1257,7 @@ private fun AppsTabBody(
 @Composable
 private fun FilesTabBody(
     snapshot: WizTreeSnapshot,
+    files: List<LargeFileEntry>,
     selectedExt: String?,
     useMonospaceFont: Boolean,
     dark: Boolean,
@@ -1248,7 +1265,6 @@ private fun FilesTabBody(
     onFileClick: (LargeFileEntry) -> Unit,
     onFileMore: (LargeFileEntry) -> Unit
 ) {
-    val files = remember(snapshot, selectedExt) { snapshot.largeFilesForExt(selectedExt) }
     val listState = rememberLazyListState()
     LaunchedEffect(selectedExt) {
         listState.scrollToItem(0)
@@ -1721,13 +1737,13 @@ private fun AnalyzerEmptyState(
 private fun buildTreemapInputs(
     snapshot: WizTreeSnapshot?,
     tab: AnalyzerTab,
-    activeDir: DirNodeStat?,
+    activeChildren: List<TreeChildEntry>,
     onlyUninstalled: Boolean
 ): List<TreemapInput> {
     if (snapshot == null) return emptyList()
     return when (tab) {
         AnalyzerTab.TREE -> {
-            activeDir?.childrenBySize.orEmpty()
+            activeChildren
                 .filter { it.totalBytes > 0L }
                 .map { child ->
                     TreemapInput(

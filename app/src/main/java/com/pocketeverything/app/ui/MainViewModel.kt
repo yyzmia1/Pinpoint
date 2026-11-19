@@ -153,6 +153,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val analyzerState: StateFlow<StorageAnalyzerUiState> = _analyzerState.asStateFlow()
 
     private var analyzerBuildJob: Job? = null
+    private var analyzerChildrenJob: Job? = null
+    private var analyzerLargeFilesJob: Job? = null
     private var analyzerBuiltGeneration: Long = -1L
     private val appInfoResolver by lazy { AndroidAppInfoResolver(app) }
 
@@ -967,17 +969,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         val currentGen = indexProgress.value.syncGeneration
-        val hasSnapshot = _analyzerState.value.snapshot != null
-        if (!hasSnapshot || analyzerBuiltGeneration != currentGen) {
+        val existingSnap = _analyzerState.value.snapshot
+        if (existingSnap == null || analyzerBuiltGeneration != currentGen) {
             refreshStorageAnalyzer(preferredDirPath = normalizedTarget)
+        } else if (normalizedTarget != null && normalizedTarget in existingSnap.dirNodes) {
+            loadActiveAnalyzerDirChildren(existingSnap.dirNodes[normalizedTarget]!!, _analyzerState.value.treeSort)
         }
     }
 
     fun refreshStorageAnalyzer(preferredDirPath: String? = null) {
         analyzerBuildJob?.cancel()
+        analyzerChildrenJob?.cancel()
+        analyzerLargeFilesJob?.cancel()
         analyzerBuildJob = viewModelScope.launch {
             _analyzerState.update { it.copy(isLoading = true, errorMessage = null) }
             val genAtStart = indexProgress.value.syncGeneration
+            val currentSort = _analyzerState.value.treeSort
+            val currentExt = _analyzerState.value.selectedExtFilter
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val roots = StorageRootsHelper.getNormalStorageRoots(app)
@@ -986,6 +994,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         appInfoResolver = appInfoResolver,
                         preferredRoots = roots
                     )
+                    val desiredDir = preferredDirPath ?: _analyzerState.value.currentDirPath
+                    val resolvedDir = when {
+                        desiredDir != null && desiredDir in snap.dirNodes -> desiredDir
+                        else -> snap.defaultRootPath
+                    }
+                    val dirChildren = resolvedDir?.let { snap.dirNodes[it] }?.let { node ->
+                        WizTreeEngine.loadChildrenForDirectory(db, node, currentSort)
+                    }.orEmpty()
+                    val largeFiles = if (currentExt == null) {
+                        snap.topLargeFiles
+                    } else {
+                        WizTreeEngine.loadLargeFilesForExtension(db, currentExt, appInfoResolver)
+                    }
                     val topPkgs = snap.appRankings
                         .asSequence()
                         .filter { it.isInstalled }
@@ -993,21 +1014,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         .map { it.packageName }
                         .toList()
                     val icons = appInfoResolver.loadIconsForPackages(topPkgs)
-                    snap to icons
+                    Triple(Triple(snap, resolvedDir, dirChildren), largeFiles, icons)
                 }
             }
-            result.onSuccess { (snap, icons) ->
+            result.onSuccess { (core, largeFiles, icons) ->
+                val (snap, resolvedDir, dirChildren) = core
                 analyzerBuiltGeneration = genAtStart
                 _analyzerState.update { cur ->
-                    val desiredDir = preferredDirPath ?: cur.currentDirPath
-                    val resolvedDir = when {
-                        desiredDir != null && desiredDir in snap.dirNodes -> desiredDir
-                        else -> snap.defaultRootPath
-                    }
                     cur.copy(
                         isLoading = false,
                         snapshot = snap,
                         currentDirPath = resolvedDir,
+                        activeDirChildren = dirChildren,
+                        activeLargeFiles = largeFiles,
                         appIcons = icons,
                         errorMessage = null
                     )
@@ -1024,6 +1043,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun loadActiveAnalyzerDirChildren(dirNode: com.pocketeverything.app.analyzer.DirNodeStat, sort: AnalyzerTreeSort) {
+        analyzerChildrenJob?.cancel()
+        // Immediately show subdirectories while direct files load (< 1ms) so navigation feels instantaneous.
+        _analyzerState.update { it.copy(activeDirChildren = dirNode.childrenSorted(sort)) }
+        analyzerChildrenJob = viewModelScope.launch {
+            val merged = withContext(Dispatchers.IO) {
+                runCatching { WizTreeEngine.loadChildrenForDirectory(db, dirNode, sort) }
+                    .getOrElse { dirNode.childrenSorted(sort) }
+            }
+            if (_analyzerState.value.currentDirPath == dirNode.path) {
+                _analyzerState.update { it.copy(activeDirChildren = merged) }
+            }
+        }
+    }
+
     fun selectAnalyzerTab(tab: AnalyzerTab) {
         _analyzerState.update { it.copy(selectedTab = tab) }
     }
@@ -1031,9 +1065,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun navigateAnalyzerDir(path: String) {
         val snap = _analyzerState.value.snapshot ?: return
         val normalized = WizTreeEngine.normalizeDirPath(path)
-        if (normalized in snap.dirNodes) {
-            _analyzerState.update { it.copy(currentDirPath = normalized) }
-        }
+        val node = snap.dirNodes[normalized] ?: return
+        _analyzerState.update { it.copy(currentDirPath = normalized) }
+        loadActiveAnalyzerDirChildren(node, _analyzerState.value.treeSort)
     }
 
     fun navigateAnalyzerUp(): Boolean {
@@ -1042,26 +1076,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val active = cur.activeDirNode ?: return false
         if (active.path in snap.rootPaths) return false
         val parent = active.parentPath
-        if (parent.isNotEmpty() && parent in snap.dirNodes) {
-            _analyzerState.update { it.copy(currentDirPath = parent) }
-            return true
-        }
-        return false
+        val parentNode = snap.dirNodes[parent] ?: return false
+        _analyzerState.update { it.copy(currentDirPath = parent) }
+        loadActiveAnalyzerDirChildren(parentNode, cur.treeSort)
+        return true
     }
 
     fun toggleAnalyzerTreeSort() {
-        _analyzerState.update { cur ->
-            val next = if (cur.treeSort == AnalyzerTreeSort.SIZE_DESC) {
-                AnalyzerTreeSort.COUNT_DESC
-            } else {
-                AnalyzerTreeSort.SIZE_DESC
-            }
-            cur.copy(treeSort = next)
+        val cur = _analyzerState.value
+        val next = if (cur.treeSort == AnalyzerTreeSort.SIZE_DESC) {
+            AnalyzerTreeSort.COUNT_DESC
+        } else {
+            AnalyzerTreeSort.SIZE_DESC
         }
+        val resorted = com.pocketeverything.app.analyzer.sortTreeChildren(cur.effectiveDirChildren, next)
+        _analyzerState.update { it.copy(treeSort = next, activeDirChildren = resorted) }
     }
 
     fun selectAnalyzerExtFilter(ext: String?) {
         _analyzerState.update { it.copy(selectedExtFilter = ext) }
+        analyzerLargeFilesJob?.cancel()
+        val snap = _analyzerState.value.snapshot ?: return
+        if (ext == null) {
+            _analyzerState.update { it.copy(activeLargeFiles = snap.topLargeFiles) }
+            return
+        }
+        analyzerLargeFilesJob = viewModelScope.launch {
+            val list = withContext(Dispatchers.IO) {
+                runCatching { WizTreeEngine.loadLargeFilesForExtension(db, ext, appInfoResolver) }
+                    .getOrDefault(emptyList())
+            }
+            if (_analyzerState.value.selectedExtFilter == ext) {
+                _analyzerState.update { it.copy(activeLargeFiles = list) }
+            }
+        }
     }
 
     fun toggleAnalyzerUninstalledOnly(enabled: Boolean) {
