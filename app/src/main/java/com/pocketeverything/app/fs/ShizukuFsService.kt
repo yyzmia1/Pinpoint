@@ -34,5 +34,7 @@ class ShizukuFsService : IPrivilegedFsService.Stub() {
 
     override fun exists(path: String): Boolean = delegate.exists(path)
 
+    override fun deletePath(path: String): Boolean = delegate.deletePath(path)
+
     override fun destroy() = delegate.destroy()
 }

@@ -101,6 +101,20 @@ class TwoTierIndexManager(
     }
 
     /**
+     * Notifies search and analyzer observers after an out-of-band DB mutation (e.g. WizTree deletion).
+     */
+    fun notifyExternalMutation() {
+        val stats = runCatching { db.getStats() }.getOrNull()
+        _progress.update { cur ->
+            cur.copy(
+                stats = stats ?: cur.stats,
+                tier2PendingCount = stats?.pendingDocs ?: cur.tier2PendingCount,
+                syncGeneration = cur.syncGeneration + 1L
+            )
+        }
+    }
+
+    /**
      * Triggered on app launch: performs a quick hot-directory mtime delta check if index already exists,
      * or runs a full initial scan if database is empty.
      */

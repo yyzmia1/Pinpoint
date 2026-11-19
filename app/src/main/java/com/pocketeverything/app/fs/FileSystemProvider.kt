@@ -110,6 +110,7 @@ interface FileSystemProvider {
     suspend fun statPaths(paths: List<String>): Map<String, Long>
     suspend fun <T> openFileStream(path: String, maxBytes: Long, block: suspend (InputStream) -> T): T
     suspend fun copyFileTo(path: String, targetFile: File, maxBytes: Long): Boolean
+    suspend fun deletePath(path: String): Boolean = false
 }
 
 class NormalFileProvider(
@@ -254,6 +255,10 @@ class NormalFileProvider(
             }
             true
         }.getOrDefault(false)
+    }
+
+    override suspend fun deletePath(path: String): Boolean = withContext(Dispatchers.IO) {
+        DeletionSafetyGuard.deleteRecursivelyNoFollow(path)
     }
 }
 
@@ -585,6 +590,17 @@ class PrivilegedFileProvider(
             }
             targetFile.exists() && targetFile.length() > 0L
         }.getOrDefault(false)
+    }
+
+    override suspend fun deletePath(path: String): Boolean = withContext(Dispatchers.IO) {
+        val check = DeletionSafetyGuard.evaluate(path)
+        if (check.risk == DeletionRisk.BLOCKED) return@withContext false
+        val svc = ensureBound()
+        try {
+            svc.deletePath(check.normalizedPath)
+        } catch (t: Throwable) {
+            abortIpc(t)
+        }
     }
 
     fun unbind() {

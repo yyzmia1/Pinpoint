@@ -62,7 +62,10 @@ import com.pocketeverything.app.ui.ReaderPreviewSheet
 import com.pocketeverything.app.ui.SearchScreen
 import com.pocketeverything.app.ui.SettingsScreen
 import com.pocketeverything.app.ui.ShizukuGuideScreen
+import com.pocketeverything.app.ui.StorageAnalyzerActions
+import com.pocketeverything.app.ui.StorageAnalyzerScreen
 import com.pocketeverything.app.ui.ThemeSettingsScreen
+import com.pocketeverything.app.ui.AnalyzerTab
 import com.pocketeverything.app.ui.UpdateAvailableDialog
 import com.pocketeverything.app.ui.WelcomeGuideOverlay
 import com.pocketeverything.app.ui.theme.PocketEverythingTheme
@@ -71,7 +74,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 private enum class AppPage {
-    SEARCH, SETTINGS, THEME_SETTINGS, SHIZUKU_GUIDE
+    SEARCH, STORAGE_ANALYZER, SETTINGS, THEME_SETTINGS, SHIZUKU_GUIDE
 }
 
 class MainActivity : ComponentActivity() {
@@ -213,6 +216,7 @@ class MainActivity : ComponentActivity() {
                 val previewPayload by viewModel.previewPayload.collectAsState()
                 val previewLoadingItem by viewModel.previewLoadingItem.collectAsState()
                 val detailItem by viewModel.detailItem.collectAsState()
+                val analyzerState by viewModel.analyzerState.collectAsState()
 
                 var currentPage by remember { mutableStateOf(AppPage.SEARCH) }
                 var previousPage by remember { mutableStateOf(AppPage.SEARCH) }
@@ -220,10 +224,17 @@ class MainActivity : ComponentActivity() {
                 val snackbarHostState = remember { SnackbarHostState() }
 
                 BackHandler(enabled = currentPage != AppPage.SEARCH) {
+                    if (currentPage == AppPage.STORAGE_ANALYZER &&
+                        analyzerState.selectedTab == AnalyzerTab.TREE &&
+                        viewModel.navigateAnalyzerUp()
+                    ) {
+                        return@BackHandler
+                    }
                     currentPage = when (currentPage) {
                         AppPage.SHIZUKU_GUIDE -> previousPage
                         AppPage.THEME_SETTINGS -> AppPage.SETTINGS
                         AppPage.SETTINGS -> AppPage.SEARCH
+                        AppPage.STORAGE_ANALYZER -> AppPage.SEARCH
                         AppPage.SEARCH -> AppPage.SEARCH
                     }
                 }
@@ -290,6 +301,10 @@ class MainActivity : ComponentActivity() {
                                 onToggleTheme = { viewModel.toggleDayNight(isDarkTheme) },
                                 onQuickSync = { viewModel.triggerQuickSync() },
                                 onFullScan = { viewModel.triggerFullRebuild(clearFirst = false) },
+                                onOpenStorageAnalyzer = {
+                                    viewModel.openStorageAnalyzer()
+                                    currentPage = AppPage.STORAGE_ANALYZER
+                                },
                                 onOpenSettings = { currentPage = AppPage.SETTINGS },
                                 onOpenShizukuGuide = {
                                     previousPage = AppPage.SEARCH
@@ -307,6 +322,37 @@ class MainActivity : ComponentActivity() {
                                 onCancelScan = { viewModel.cancelScan() },
                                 onDismissScanError = { viewModel.dismissScanError() },
                                 onTargetsMeasured = { onboardingTargets = it }
+                            )
+                        }
+                        AppPage.STORAGE_ANALYZER -> {
+                            val analyzerActions = remember(viewModel) {
+                                object : StorageAnalyzerActions {
+                                    override fun onBack() {
+                                        if (viewModel.analyzerState.value.selectedTab == AnalyzerTab.TREE &&
+                                            viewModel.navigateAnalyzerUp()
+                                        ) {
+                                            return
+                                        }
+                                        currentPage = AppPage.SEARCH
+                                    }
+                                    override fun onRefresh() = viewModel.refreshStorageAnalyzer()
+                                    override fun onSelectTab(tab: AnalyzerTab) = viewModel.selectAnalyzerTab(tab)
+                                    override fun onNavigateDir(path: String) = viewModel.navigateAnalyzerDir(path)
+                                    override fun onToggleTreeSort() = viewModel.toggleAnalyzerTreeSort()
+                                    override fun onSelectExtFilter(ext: String?) = viewModel.selectAnalyzerExtFilter(ext)
+                                    override fun onToggleUninstalledOnly(enabled: Boolean) = viewModel.toggleAnalyzerUninstalledOnly(enabled)
+                                    override fun onToggleTreemap() = viewModel.toggleAnalyzerTreemap()
+                                    override fun onOpenFile(path: String) = viewModel.openAnalyzerFile(path)
+                                    override fun onDeletePath(path: String, accessMode: AccessMode, isDir: Boolean) =
+                                        viewModel.deletePathFromAnalyzer(path, accessMode, isDir)
+                                    override fun onExcludeDir(dirPath: String) = viewModel.excludeDirFromAnalyzer(dirPath)
+                                    override fun onCopyPath(path: String) = viewModel.copyText("路径", path)
+                                }
+                            }
+                            StorageAnalyzerScreen(
+                                state = analyzerState,
+                                useMonospaceFont = settings.useMonospaceFont,
+                                actions = analyzerActions
                             )
                         }
                         AppPage.SETTINGS -> {
@@ -425,6 +471,11 @@ class MainActivity : ComponentActivity() {
                         onRefreshParent = {
                             val targetDir = if (item.isDir) item.path else item.parentPath
                             viewModel.refreshDirectory(targetDir)
+                        },
+                        onLocateInStorageTree = {
+                            val targetDir = if (item.isDir) item.path else item.parentPath
+                            viewModel.openStorageAnalyzer(initialDirPath = targetDir)
+                            currentPage = AppPage.STORAGE_ANALYZER
                         }
                     )
                 }

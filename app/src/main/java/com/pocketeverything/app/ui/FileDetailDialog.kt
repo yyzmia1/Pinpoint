@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Refresh
@@ -37,7 +38,8 @@ fun FileDetailDialog(
     onCopyPath: () -> Unit,
     onCopyName: () -> Unit,
     onShare: () -> Unit,
-    onRefreshParent: () -> Unit
+    onRefreshParent: () -> Unit,
+    onLocateInStorageTree: () -> Unit = {}
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -142,6 +144,17 @@ fun FileDetailDialog(
                             Text("刷新目录")
                         }
                     }
+                }
+                OutlinedButton(
+                    onClick = {
+                        onDismiss()
+                        onLocateInStorageTree()
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.AccountTree, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("在空间树中定位")
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),

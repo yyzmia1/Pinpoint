@@ -29,6 +29,11 @@ import java.io.FileOutputStream
 import kotlin.math.max
 import com.pocketeverything.app.filter.FilterConfig
 import com.pocketeverything.app.filter.FilterEngine
+import com.pocketeverything.app.analyzer.AnalyzerTreeSort
+import com.pocketeverything.app.analyzer.AndroidAppInfoResolver
+import com.pocketeverything.app.analyzer.WizTreeEngine
+import com.pocketeverything.app.fs.DeletionRisk
+import com.pocketeverything.app.fs.DeletionSafetyGuard
 import com.pocketeverything.app.fs.ModeAvailability
 import com.pocketeverything.app.fs.StorageRootsHelper
 import com.pocketeverything.app.indexer.IndexProgressState
@@ -56,6 +61,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
@@ -142,6 +148,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _pendingModeSwitch = MutableStateFlow<PendingModeSwitch?>(null)
     val pendingModeSwitch: StateFlow<PendingModeSwitch?> = _pendingModeSwitch.asStateFlow()
+
+    private val _analyzerState = MutableStateFlow(StorageAnalyzerUiState())
+    val analyzerState: StateFlow<StorageAnalyzerUiState> = _analyzerState.asStateFlow()
+
+    private var analyzerBuildJob: Job? = null
+    private var analyzerBuiltGeneration: Long = -1L
+    private val appInfoResolver by lazy { AndroidAppInfoResolver(app) }
 
     private val _messages = MutableSharedFlow<UiNotice>(extraBufferCapacity = 8)
     val messages: SharedFlow<UiNotice> = _messages.asSharedFlow()
@@ -941,6 +954,219 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun copyText(label: String, text: String) {
         container.fileOpener.copyToClipboard(label, text)
         emitMessage("已复制：$text")
+    }
+
+    fun openStorageAnalyzer(initialDirPath: String? = null) {
+        val normalizedTarget = initialDirPath?.let { WizTreeEngine.normalizeDirPath(it) }?.takeIf { it.isNotEmpty() }
+        if (normalizedTarget != null) {
+            _analyzerState.update {
+                it.copy(
+                    selectedTab = AnalyzerTab.TREE,
+                    currentDirPath = normalizedTarget
+                )
+            }
+        }
+        val currentGen = indexProgress.value.syncGeneration
+        val hasSnapshot = _analyzerState.value.snapshot != null
+        if (!hasSnapshot || analyzerBuiltGeneration != currentGen) {
+            refreshStorageAnalyzer(preferredDirPath = normalizedTarget)
+        }
+    }
+
+    fun refreshStorageAnalyzer(preferredDirPath: String? = null) {
+        analyzerBuildJob?.cancel()
+        analyzerBuildJob = viewModelScope.launch {
+            _analyzerState.update { it.copy(isLoading = true, errorMessage = null) }
+            val genAtStart = indexProgress.value.syncGeneration
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val roots = StorageRootsHelper.getNormalStorageRoots(app)
+                    val snap = WizTreeEngine.buildFromDatabase(
+                        db = db,
+                        appInfoResolver = appInfoResolver,
+                        preferredRoots = roots
+                    )
+                    val topPkgs = snap.appRankings
+                        .asSequence()
+                        .filter { it.isInstalled }
+                        .take(48)
+                        .map { it.packageName }
+                        .toList()
+                    val icons = appInfoResolver.loadIconsForPackages(topPkgs)
+                    snap to icons
+                }
+            }
+            result.onSuccess { (snap, icons) ->
+                analyzerBuiltGeneration = genAtStart
+                _analyzerState.update { cur ->
+                    val desiredDir = preferredDirPath ?: cur.currentDirPath
+                    val resolvedDir = when {
+                        desiredDir != null && desiredDir in snap.dirNodes -> desiredDir
+                        else -> snap.defaultRootPath
+                    }
+                    cur.copy(
+                        isLoading = false,
+                        snapshot = snap,
+                        currentDirPath = resolvedDir,
+                        appIcons = icons,
+                        errorMessage = null
+                    )
+                }
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                _analyzerState.update {
+                    it.copy(
+                        isLoading = false,
+                        errorMessage = err.message ?: "空间分析失败"
+                    )
+                }
+            }
+        }
+    }
+
+    fun selectAnalyzerTab(tab: AnalyzerTab) {
+        _analyzerState.update { it.copy(selectedTab = tab) }
+    }
+
+    fun navigateAnalyzerDir(path: String) {
+        val snap = _analyzerState.value.snapshot ?: return
+        val normalized = WizTreeEngine.normalizeDirPath(path)
+        if (normalized in snap.dirNodes) {
+            _analyzerState.update { it.copy(currentDirPath = normalized) }
+        }
+    }
+
+    fun navigateAnalyzerUp(): Boolean {
+        val cur = _analyzerState.value
+        val snap = cur.snapshot ?: return false
+        val active = cur.activeDirNode ?: return false
+        if (active.path in snap.rootPaths) return false
+        val parent = active.parentPath
+        if (parent.isNotEmpty() && parent in snap.dirNodes) {
+            _analyzerState.update { it.copy(currentDirPath = parent) }
+            return true
+        }
+        return false
+    }
+
+    fun toggleAnalyzerTreeSort() {
+        _analyzerState.update { cur ->
+            val next = if (cur.treeSort == AnalyzerTreeSort.SIZE_DESC) {
+                AnalyzerTreeSort.COUNT_DESC
+            } else {
+                AnalyzerTreeSort.SIZE_DESC
+            }
+            cur.copy(treeSort = next)
+        }
+    }
+
+    fun selectAnalyzerExtFilter(ext: String?) {
+        _analyzerState.update { it.copy(selectedExtFilter = ext) }
+    }
+
+    fun toggleAnalyzerUninstalledOnly(enabled: Boolean) {
+        _analyzerState.update { it.copy(onlyUninstalledApps = enabled) }
+    }
+
+    fun toggleAnalyzerTreemap() {
+        _analyzerState.update { it.copy(showTreemap = !it.showTreemap) }
+    }
+
+    fun openAnalyzerFile(path: String) {
+        viewModelScope.launch {
+            val row = withContext(Dispatchers.IO) { db.getFileMetaByPath(path) }
+            if (row == null) {
+                emitMessage("文件不在当前索引中，请先刷新")
+                return@launch
+            }
+            val item = SearchResultItem(
+                id = row.id,
+                name = row.name,
+                path = row.path,
+                parentPath = row.parentPath,
+                ext = row.ext,
+                size = row.size,
+                mtime = row.mtime,
+                isDir = row.isDir,
+                accessMode = row.accessMode,
+                tier2Status = row.tier2Status,
+                matchedNameRanges = emptyList(),
+                matchedPathRanges = emptyList(),
+                snippets = emptyList(),
+                contentMatchCount = 0,
+                score = 0.0
+            )
+            onItemClicked(item)
+        }
+    }
+
+    fun deletePathFromAnalyzer(path: String, preferredMode: AccessMode, isDir: Boolean) {
+        val check = DeletionSafetyGuard.evaluate(path)
+        if (check.risk == DeletionRisk.BLOCKED) {
+            emitMessage(check.reason ?: "受保护路径，禁止删除")
+            return
+        }
+        viewModelScope.launch {
+            _analyzerState.update { it.copy(deletingPath = check.normalizedPath) }
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching {
+                    val activeMode = settings.value.accessMode
+                    val modesToTry = linkedSetOf(activeMode, preferredMode, AccessMode.NORMAL)
+                    var deleted = false
+                    var lastErr: String? = null
+                    for (mode in modesToTry) {
+                        val provider = container.providerFor(mode)
+                        val avail = provider.checkAvailability()
+                        if (avail !is ModeAvailability.Ready) continue
+                        val ok = runCatching { provider.deletePath(check.normalizedPath) }
+                            .onFailure { lastErr = it.message }
+                            .getOrDefault(false)
+                        if (ok) {
+                            deleted = true
+                            break
+                        }
+                    }
+                    if (!deleted) {
+                        throw IllegalStateException(lastErr ?: "权限不足或路径被占用，删除失败")
+                    }
+                    val removedRows = db.deleteSubtree(check.normalizedPath)
+                    indexManager.notifyExternalMutation()
+                    removedRows
+                }
+            }
+            _analyzerState.update { it.copy(deletingPath = null) }
+            outcome.onSuccess { removedRows ->
+                val targetName = check.normalizedPath.substringAfterLast('/').ifEmpty { check.normalizedPath }
+                val typeText = if (isDir) "目录" else "文件"
+                emitMessage("已永久删除$typeText「$targetName」（同步清理 $removedRows 条索引）")
+                val fallbackDir = if (isDir && _analyzerState.value.currentDirPath == check.normalizedPath) {
+                    WizTreeEngine.parentOf(check.normalizedPath)
+                } else {
+                    _analyzerState.value.currentDirPath
+                }
+                refreshStorageAnalyzer(preferredDirPath = fallbackDir)
+            }.onFailure { err ->
+                emitMessage("删除失败：${err.message ?: "请检查权限"}")
+            }
+        }
+    }
+
+    fun excludeDirFromAnalyzer(dirPath: String) {
+        val normalized = FilterConfig.normalizePaths(listOf(dirPath)).firstOrNull().orEmpty()
+        if (normalized.isEmpty()) return
+        val curFilter = settings.value.filterConfig
+        if (normalized in curFilter.customExcludedPaths) {
+            emitMessage("该目录已在排除列表中")
+            return
+        }
+        val updated = curFilter.copy(
+            customExcludedPaths = curFilter.customExcludedPaths + normalized
+        )
+        updateFilterConfig(updated)
+        viewModelScope.launch {
+            delay(350L)
+            refreshStorageAnalyzer()
+        }
     }
 
     override fun onCleared() {

@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.PieChart
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SearchOff
@@ -124,6 +125,7 @@ fun SearchScreen(
     onToggleTheme: () -> Unit,
     onQuickSync: () -> Unit,
     onFullScan: () -> Unit,
+    onOpenStorageAnalyzer: () -> Unit = {},
     onOpenSettings: () -> Unit,
     onOpenShizukuGuide: () -> Unit,
     onRefreshModes: () -> Unit = {},
@@ -186,6 +188,10 @@ fun SearchScreen(
                 onQuickSync = {
                     haptics.click()
                     onQuickSync()
+                },
+                onOpenStorageAnalyzer = {
+                    haptics.tick()
+                    onOpenStorageAnalyzer()
                 },
                 onOpenSettings = {
                     haptics.tick()
@@ -352,6 +358,7 @@ private fun HeaderBar(
     onModeClick: () -> Unit,
     onToggleTheme: () -> Unit,
     onQuickSync: () -> Unit,
+    onOpenStorageAnalyzer: () -> Unit,
     onOpenSettings: () -> Unit,
     onModePillBounds: (Rect) -> Unit
 ) {
@@ -407,6 +414,14 @@ private fun HeaderBar(
         }
 
         val actionTint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.82f)
+        IconButton(onClick = onOpenStorageAnalyzer, modifier = Modifier.size(36.dp)) {
+            Icon(
+                imageVector = Icons.Default.PieChart,
+                contentDescription = "空间透视",
+                tint = actionTint,
+                modifier = Modifier.size(19.dp)
+            )
+        }
         IconButton(onClick = onToggleTheme, modifier = Modifier.size(36.dp)) {
             Icon(
                 imageVector = if (isDarkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,

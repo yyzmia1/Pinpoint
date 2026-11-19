@@ -1969,6 +1969,42 @@ class SqliteSearchDatabase(
         }
     }
 
+    /**
+     * Streams every row of files_meta in a single read pass for the WizTree in-memory rollup engine
+     * without allocating intermediate row objects.
+     */
+    fun streamAllEntriesForAnalyzer(
+        visitor: (
+            path: String,
+            parentPath: String,
+            name: String,
+            ext: String,
+            size: Long,
+            mtime: Long,
+            isDir: Boolean,
+            accessModeCode: Int
+        ) -> Unit
+    ) {
+        readLock.withLock {
+            readConn.prepare(
+                "SELECT path, parent_path, name, ext, size, mtime, is_dir, access_mode FROM files_meta"
+            ).use { stmt ->
+                while (stmt.step()) {
+                    visitor(
+                        stmt.getText(0),
+                        stmt.getText(1),
+                        stmt.getText(2),
+                        stmt.getText(3),
+                        stmt.getLong(4),
+                        stmt.getLong(5),
+                        stmt.getLong(6) != 0L,
+                        stmt.getLong(7).toInt()
+                    )
+                }
+            }
+        }
+    }
+
     private fun toSearchResultItem(
         row: FileMetaRow,
         highlightRules: List<HighlightRule>,
