@@ -3,6 +3,7 @@ package com.pocketeverything.app.picker
 import android.content.Context
 import android.database.Cursor
 import android.database.MatrixCursor
+import android.net.Uri
 import android.os.CancellationSignal
 import android.os.Environment
 import android.os.OperationCanceledException
@@ -14,6 +15,7 @@ import com.pocketeverything.app.PocketEverythingApp
 import com.pocketeverything.app.R
 import com.pocketeverything.app.di.AppContainer
 import com.pocketeverything.app.fs.StorageRootsHelper
+import com.pocketeverything.app.indexer.TwoTierIndexManager
 import com.pocketeverything.app.search.FileMetaRow
 import com.pocketeverything.app.search.QuickScope
 import com.pocketeverything.app.search.SearchResultItem
@@ -391,6 +393,18 @@ class PinpointDocumentsProvider : DocumentsProvider() {
         val cols = PinpointDocContract.resolveDocumentProjection(projection)
         val parsed = PinpointDocId.parse(parentDocumentId)
             ?: throw FileNotFoundException("Invalid parentDocumentId: $parentDocumentId")
+        if (parsed is PinpointDocId.File) {
+            throw FileNotFoundException("Document is not a directory: $parentDocumentId")
+        }
+
+        val authority = "${ctx.packageName}.documents"
+        val notifyUri = DocumentsContract.buildChildDocumentsUri(authority, parentDocumentId)
+        syncBeforeQuery(
+            ctx = ctx,
+            container = container,
+            notifyUri = notifyUri,
+            alsoNotifyRoot = parsed is PinpointDocId.Root
+        )
 
         val cursor = MatrixCursor(cols)
         when (parsed) {
@@ -461,6 +475,7 @@ class PinpointDocumentsProvider : DocumentsProvider() {
             }
             is PinpointDocId.File -> throw FileNotFoundException("Document is not a directory: $parentDocumentId")
         }
+        ctx.contentResolver?.let { cr -> cursor.setNotificationUri(cr, notifyUri) }
         return cursor
     }
 
@@ -468,7 +483,12 @@ class PinpointDocumentsProvider : DocumentsProvider() {
         if (rootId != PinpointDocContract.ROOT_ID) {
             throw FileNotFoundException("Unknown rootId: $rootId")
         }
+        val ctx = context ?: throw FileNotFoundException("Context unavailable")
         val container = requireContainer()
+        val authority = "${ctx.packageName}.documents"
+        val notifyUri = DocumentsContract.buildRecentDocumentsUri(authority, rootId)
+        syncBeforeQuery(ctx = ctx, container = container, notifyUri = notifyUri)
+
         val cols = PinpointDocContract.resolveDocumentProjection(projection)
         val cursor = MatrixCursor(cols)
         val recentItems = container.database.search(
@@ -486,6 +506,7 @@ class PinpointDocumentsProvider : DocumentsProvider() {
                 )
             )
         }
+        ctx.contentResolver?.let { cr -> cursor.setNotificationUri(cr, notifyUri) }
         return cursor
     }
 
@@ -497,7 +518,12 @@ class PinpointDocumentsProvider : DocumentsProvider() {
         if (rootId != PinpointDocContract.ROOT_ID) {
             throw FileNotFoundException("Unknown rootId: $rootId")
         }
+        val ctx = context ?: throw FileNotFoundException("Context unavailable")
         val container = requireContainer()
+        val authority = "${ctx.packageName}.documents"
+        val notifyUri = DocumentsContract.buildSearchDocumentsUri(authority, rootId, query)
+        syncBeforeQuery(ctx = ctx, container = container, notifyUri = notifyUri)
+
         val cols = PinpointDocContract.resolveDocumentProjection(projection)
         val cursor = MatrixCursor(cols)
         val items = container.database.search(
@@ -512,7 +538,30 @@ class PinpointDocumentsProvider : DocumentsProvider() {
                 )
             )
         }
+        ctx.contentResolver?.let { cr -> cursor.setNotificationUri(cr, notifyUri) }
         return cursor
+    }
+
+    private fun syncBeforeQuery(
+        ctx: Context,
+        container: AppContainer,
+        notifyUri: Uri,
+        alsoNotifyRoot: Boolean = false
+    ) {
+        val appCtx = ctx.applicationContext ?: ctx
+        val authority = "${appCtx.packageName}.documents"
+        syncIndexForProviderQuery(
+            indexManager = container.indexManager,
+            onDeferredChange = {
+                val cr = appCtx.contentResolver ?: return@syncIndexForProviderQuery
+                runCatching {
+                    cr.notifyChange(notifyUri, null)
+                    if (alsoNotifyRoot) {
+                        cr.notifyChange(DocumentsContract.buildRootsUri(authority), null)
+                    }
+                }
+            }
+        )
     }
 
     override fun isChildDocument(parentDocumentId: String?, documentId: String?): Boolean {
@@ -551,5 +600,20 @@ class PinpointDocumentsProvider : DocumentsProvider() {
         } catch (t: Throwable) {
             throw FileNotFoundException(t.message ?: "无法读取文件：${meta.path}").apply { initCause(t) }
         }
+    }
+
+    companion object {
+        const val PROVIDER_SYNC_MAX_WAIT_MS = 1_200L
+
+        internal fun syncIndexForProviderQuery(
+            indexManager: TwoTierIndexManager,
+            minIntervalMs: Long = TwoTierIndexManager.DEFAULT_FOREGROUND_SYNC_INTERVAL_MS,
+            maxWaitMs: Long = PROVIDER_SYNC_MAX_WAIT_MS,
+            onDeferredChange: (() -> Unit)? = null
+        ): Job? = indexManager.triggerForegroundSync(
+            minIntervalMs = minIntervalMs,
+            maxWaitMs = maxWaitMs,
+            onChanged = onDeferredChange
+        )
     }
 }

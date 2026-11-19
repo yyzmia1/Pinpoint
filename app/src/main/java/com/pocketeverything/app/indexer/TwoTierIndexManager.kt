@@ -27,12 +27,15 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 
 enum class Tier1Phase { IDLE, QUICK_SYNC, FULL_SCAN }
 enum class Tier2Phase { IDLE, EXTRACTING }
@@ -44,6 +47,7 @@ data class IndexProgressState(
     val tier2ProcessedCount: Int = 0,
     val tier2PendingCount: Long = 0,
     val lastScanDurationMs: Long = 0L,
+    val syncGeneration: Long = 0L,
     val statusMessage: String = "就绪",
     val errorMessage: String? = null,
     val stats: DatabaseStats = DatabaseStats(0, 0, 0, 0, 0, 0, 0)
@@ -60,31 +64,40 @@ class TwoTierIndexManager(
     private val settingsRepo: SettingsRepository,
     private val providerResolver: (AccessMode) -> FileSystemProvider,
     private val extractorDispatcher: ExtractorDispatcher = ExtractorDispatcher(),
-    private val storageRootsResolver: () -> List<String> = { StorageRootsHelper.getNormalStorageRoots(context) }
+    private val storageRootsResolver: () -> List<String> = { StorageRootsHelper.getNormalStorageRoots(context) },
+    private val clockMs: () -> Long = { System.nanoTime() / 1_000_000L }
 ) {
     private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
         if (throwable is CancellationException) return@CoroutineExceptionHandler
-        _progress.value = _progress.value.copy(
-            tier1Phase = Tier1Phase.IDLE,
-            tier2Phase = Tier2Phase.IDLE,
-            errorMessage = throwable.message ?: "索引任务异常",
-            statusMessage = "同步中断：${throwable.message ?: "请重试"}"
-        )
+        _progress.update {
+            it.copy(
+                tier1Phase = Tier1Phase.IDLE,
+                tier2Phase = Tier2Phase.IDLE,
+                errorMessage = throwable.message ?: "索引任务异常",
+                statusMessage = "同步中断：${throwable.message ?: "请重试"}"
+            )
+        }
     }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + exceptionHandler)
     private val tier1Mutex = Mutex()
+    private val triggerLock = Any()
+    @Volatile
     private var tier1Job: Job? = null
     private var tier2Job: Job? = null
+    private var hasSyncedAtLeastOnce: Boolean = false
+    private var lastSyncClockMs: Long = 0L
 
     private val _progress = MutableStateFlow(IndexProgressState())
     val progress: StateFlow<IndexProgressState> = _progress.asStateFlow()
 
     fun refreshStats() {
         val stats = runCatching { db.getStats() }.getOrNull() ?: return
-        _progress.value = _progress.value.copy(
-            stats = stats,
-            tier2PendingCount = stats.pendingDocs
-        )
+        _progress.update {
+            it.copy(
+                stats = stats,
+                tier2PendingCount = stats.pendingDocs
+            )
+        }
     }
 
     /**
@@ -92,42 +105,106 @@ class TwoTierIndexManager(
      * or runs a full initial scan if database is empty.
      */
     fun triggerStartupSync() {
-        scope.launch {
-            if (tier1Job?.isActive == true) return@launch
-            val currentStats = runCatching { db.getStats() }.getOrElse { DatabaseStats(0, 0, 0, 0, 0, 0, 0) }
-            if (currentStats.totalEntries == 0L) {
-                startFullScan(clearExisting = false)
-            } else {
-                _progress.value = _progress.value.copy(
-                    stats = currentStats,
-                    tier2PendingCount = currentStats.pendingDocs
-                )
-                startQuickHotDirsRefresh()
-            }
+        synchronized(triggerLock) {
+            if (tier1Job?.isActive == true) return
+            hasSyncedAtLeastOnce = true
+            lastSyncClockMs = clockMs()
+            tier1Job = launchQuickSyncLocked(silentIfUnavailable = false)
         }
     }
 
-    fun isTier1Busy(): Boolean = tier1Job?.isActive == true && _progress.value.tier1Phase != Tier1Phase.IDLE
+    /**
+     * Throttled incremental sync for foreground resume and SAF DocumentsProvider queries.
+     * Reuses any active Tier-1 scan, skips within [minIntervalMs] cooldown, and optionally
+     * waits up to [maxWaitMs]. When a scan continues past [maxWaitMs] and mutates the index,
+     * [onChanged] is invoked on completion so callers (e.g. DocumentsUI) can refresh.
+     */
+    fun triggerForegroundSync(
+        minIntervalMs: Long = DEFAULT_FOREGROUND_SYNC_INTERVAL_MS,
+        maxWaitMs: Long = 0L,
+        onChanged: (() -> Unit)? = null
+    ): Job? {
+        val genBefore = _progress.value.syncGeneration
+        val targetJob: Job = synchronized(triggerLock) {
+            val active = tier1Job
+            if (active?.isActive == true) {
+                active
+            } else {
+                val now = clockMs()
+                val withinCooldown = hasSyncedAtLeastOnce &&
+                    minIntervalMs > 0L &&
+                    (now - lastSyncClockMs) < minIntervalMs
+                if (withinCooldown) {
+                    return null
+                }
+                hasSyncedAtLeastOnce = true
+                lastSyncClockMs = now
+                launchQuickSyncLocked(silentIfUnavailable = true).also { tier1Job = it }
+            }
+        }
+
+        if (maxWaitMs > 0L) {
+            val completedInTime = runCatching {
+                runBlocking {
+                    withTimeoutOrNull(maxWaitMs) {
+                        targetJob.join()
+                        true
+                    } ?: false
+                }
+            }.getOrDefault(false)
+
+            if (completedInTime) {
+                return targetJob
+            }
+        }
+
+        if (onChanged != null) {
+            targetJob.invokeOnCompletion { cause ->
+                if (cause == null && _progress.value.syncGeneration != genBefore) {
+                    runCatching { onChanged() }
+                }
+            }
+        }
+        return targetJob
+    }
+
+    fun isTier1Busy(): Boolean = synchronized(triggerLock) {
+        tier1Job?.isActive == true
+    } || _progress.value.tier1Phase != Tier1Phase.IDLE
 
     fun clearErrorMessage() {
-        _progress.value = _progress.value.copy(errorMessage = null)
+        _progress.update { it.copy(errorMessage = null) }
     }
 
     fun cancelCurrentScan() {
-        tier1Job?.cancel()
-        tier1Job = null
-        _progress.value = _progress.value.copy(
-            tier1Phase = Tier1Phase.IDLE,
-            statusMessage = "已取消扫描",
-            errorMessage = null
-        )
+        synchronized(triggerLock) {
+            tier1Job?.cancel()
+            tier1Job = null
+        }
+        _progress.update {
+            it.copy(
+                tier1Phase = Tier1Phase.IDLE,
+                statusMessage = "已取消扫描",
+                errorMessage = null
+            )
+        }
         scope.launch { refreshStats() }
     }
 
     fun pruneByCurrentFilter(): PruneSummary {
         val settings = settingsRepo.settings.value
         val summary = db.pruneMatchingFilterDetailed(FilterEngine(settings.filterConfig), settings.accessMode)
-        refreshStats()
+        val mutated = summary.removedEntries > 0 || summary.clearedDocBodies > 0 || summary.requeuedDocs > 0
+        val stats = runCatching { db.getStats() }.getOrNull()
+        if (stats != null || mutated) {
+            _progress.update { cur ->
+                cur.copy(
+                    stats = stats ?: cur.stats,
+                    tier2PendingCount = stats?.pendingDocs ?: cur.tier2PendingCount,
+                    syncGeneration = if (mutated) cur.syncGeneration + 1L else cur.syncGeneration
+                )
+            }
+        }
         if (summary.requeuedDocs > 0) {
             ensureTier2Running()
         }
@@ -135,29 +212,63 @@ class TwoTierIndexManager(
     }
 
     fun startQuickHotDirsRefresh(silentIfUnavailable: Boolean = false): Job {
-        val active = tier1Job
-        if (active?.isActive == true && _progress.value.tier1Phase != Tier1Phase.IDLE) {
-            return active
+        synchronized(triggerLock) {
+            val active = tier1Job
+            if (active?.isActive == true) {
+                return active
+            }
+            val job = launchQuickSyncLocked(silentIfUnavailable)
+            tier1Job = job
+            return job
         }
-        val job = scope.launch {
+    }
+
+    private fun finishTier1JobIfMatching(job: Job?, recordCooldown: Boolean) {
+        synchronized(triggerLock) {
+            if (job != null && tier1Job === job) {
+                tier1Job = null
+            }
+            if (recordCooldown) {
+                hasSyncedAtLeastOnce = true
+                lastSyncClockMs = clockMs()
+            }
+        }
+    }
+
+    private fun launchQuickSyncLocked(silentIfUnavailable: Boolean): Job = scope.launch {
+        var cancelled = false
+        try {
             tier1Mutex.withLock {
                 val startMs = System.currentTimeMillis()
+                var changedCount = 0
+                var removedCount = 0
                 try {
                     val settings = settingsRepo.settings.value
                     val mode = settings.accessMode
                     val provider = providerResolver(mode)
                     val availability = provider.checkAvailability()
                     if (availability !is ModeAvailability.Ready) {
-                        refreshStats()
+                        val stats = runCatching { db.getStats() }.getOrNull()
+                        finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = true)
                         if (silentIfUnavailable) {
-                            _progress.value = _progress.value.copy(tier1Phase = Tier1Phase.IDLE)
+                            _progress.update { cur ->
+                                cur.copy(
+                                    tier1Phase = Tier1Phase.IDLE,
+                                    stats = stats ?: cur.stats,
+                                    tier2PendingCount = stats?.pendingDocs ?: cur.tier2PendingCount
+                                )
+                            }
                         } else {
                             val reason = availabilityReason(availability)
-                            _progress.value = _progress.value.copy(
-                                tier1Phase = Tier1Phase.IDLE,
-                                errorMessage = reason,
-                                statusMessage = reason
-                            )
+                            _progress.update { cur ->
+                                cur.copy(
+                                    tier1Phase = Tier1Phase.IDLE,
+                                    stats = stats ?: cur.stats,
+                                    tier2PendingCount = stats?.pendingDocs ?: cur.tier2PendingCount,
+                                    errorMessage = reason,
+                                    statusMessage = reason
+                                )
+                            }
                         }
                         return@withLock
                     }
@@ -168,12 +279,16 @@ class TwoTierIndexManager(
                         return@withLock
                     }
 
-                    _progress.value = _progress.value.copy(
-                        tier1Phase = Tier1Phase.QUICK_SYNC,
-                        tier1ScannedCount = 0,
-                        statusMessage = "正在增量校验全部可写目录…",
-                        errorMessage = null
-                    )
+                    _progress.update { cur ->
+                        cur.copy(
+                            tier1Phase = Tier1Phase.QUICK_SYNC,
+                            tier1ScannedCount = 0,
+                            stats = currentDbStats,
+                            tier2PendingCount = currentDbStats.pendingDocs,
+                            statusMessage = "正在增量校验全部可写目录…",
+                            errorMessage = null
+                        )
+                    }
 
                     val filter = FilterEngine(settings.filterConfig)
                     val includeData = filter.isDataPotentiallyIndexed(mode)
@@ -213,7 +328,6 @@ class TwoTierIndexManager(
                         }
                     }
 
-                    var removedCount = 0
                     // Remove only top-most missing subdirs so nested deletions don't double-scan
                     val sortedMissing = missingSubdirs.sortedBy { it.length }
                     val deletedRoots = ArrayList<String>()
@@ -224,7 +338,6 @@ class TwoTierIndexManager(
                         }
                     }
 
-                    var changedCount = 0
                     if (dirtyDirs.isNotEmpty()) {
                         val dirtySet = dirtyDirs.toHashSet()
                         val listedDirs = HashSet<String>(dirtyDirs.size)
@@ -242,10 +355,12 @@ class TwoTierIndexManager(
                                 }
                             }
                             changedCount += db.upsertFileBatch(batch.map { it.toUpsertEntry(filter) })
-                            _progress.value = _progress.value.copy(
-                                tier1ScannedCount = changedCount,
-                                statusMessage = "正在增量更新变动目录：已处理 $changedCount 项"
-                            )
+                            _progress.update { cur ->
+                                cur.copy(
+                                    tier1ScannedCount = changedCount,
+                                    statusMessage = "正在增量更新变动目录：已处理 $changedCount 项"
+                                )
+                            }
                         }
                         // Only prune children of directories that were actually listed (never on list() == null / EACCES).
                         for (dirty in listedDirs) {
@@ -254,10 +369,12 @@ class TwoTierIndexManager(
                         if (newSubdirs.isNotEmpty()) {
                             provider.scanDirectories(newSubdirs.distinct(), filter) { batch ->
                                 changedCount += db.upsertFileBatch(batch.map { it.toUpsertEntry(filter) })
-                                _progress.value = _progress.value.copy(
-                                    tier1ScannedCount = changedCount,
-                                    statusMessage = "正在索引新增目录：已更新 $changedCount 项"
-                                )
+                                _progress.update { cur ->
+                                    cur.copy(
+                                        tier1ScannedCount = changedCount,
+                                        statusMessage = "正在索引新增目录：已更新 $changedCount 项"
+                                    )
+                                }
                             }
                         }
                         val updatedDirMtimes = listedDirs.mapNotNull { d ->
@@ -316,52 +433,85 @@ class TwoTierIndexManager(
 
                     val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
                     val updatedStats = db.getStats()
+                    val mutated = changedCount > 0 || removedCount > 0
                     val msg = if (dirtyDirs.isEmpty() && removedCount == 0 && changedCount == 0) {
                         "增量校验完成：检查 ${trackedDirs.size} 个目录，均无变动 (${elapsed}ms)"
                     } else {
                         "增量同步完成：更新 $changedCount / 清理 $removedCount 项 (${elapsed}ms)"
                     }
-                    _progress.value = _progress.value.copy(
-                        tier1Phase = Tier1Phase.IDLE,
-                        tier1ScannedCount = changedCount,
-                        lastScanDurationMs = elapsed,
-                        stats = updatedStats,
-                        tier2PendingCount = updatedStats.pendingDocs,
-                        statusMessage = msg
-                    )
+                    // Clear tier1Job and update cooldown before publishing IDLE so immediate callers never hit tail-race.
+                    finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = true)
+                    _progress.update { cur ->
+                        cur.copy(
+                            tier1Phase = Tier1Phase.IDLE,
+                            tier1ScannedCount = changedCount,
+                            lastScanDurationMs = elapsed,
+                            stats = updatedStats,
+                            tier2PendingCount = updatedStats.pendingDocs,
+                            syncGeneration = if (mutated) cur.syncGeneration + 1L else cur.syncGeneration,
+                            statusMessage = msg
+                        )
+                    }
                     ensureTier2Running()
                 } catch (ce: CancellationException) {
-                    _progress.value = _progress.value.copy(
-                        tier1Phase = Tier1Phase.IDLE,
-                        statusMessage = "已取消增量同步"
-                    )
+                    cancelled = true
+                    val mutated = changedCount > 0 || removedCount > 0
+                    finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = false)
+                    _progress.update { cur ->
+                        cur.copy(
+                            tier1Phase = Tier1Phase.IDLE,
+                            syncGeneration = if (mutated) cur.syncGeneration + 1L else cur.syncGeneration,
+                            statusMessage = "已取消增量同步"
+                        )
+                    }
                     throw ce
                 } catch (t: Throwable) {
                     val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
                     val reason = formatEngineeringError(t, "增量同步")
-                    _progress.value = _progress.value.copy(
-                        tier1Phase = Tier1Phase.IDLE,
-                        lastScanDurationMs = elapsed,
-                        errorMessage = reason,
-                        statusMessage = reason
-                    )
+                    val mutated = changedCount > 0 || removedCount > 0
+                    val stats = runCatching { db.getStats() }.getOrNull()
+                    finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = true)
+                    _progress.update { cur ->
+                        cur.copy(
+                            tier1Phase = Tier1Phase.IDLE,
+                            lastScanDurationMs = elapsed,
+                            stats = stats ?: cur.stats,
+                            tier2PendingCount = stats?.pendingDocs ?: cur.tier2PendingCount,
+                            syncGeneration = if (mutated) cur.syncGeneration + 1L else cur.syncGeneration,
+                            errorMessage = reason,
+                            statusMessage = reason
+                        )
+                    }
                 }
             }
+        } catch (ce: CancellationException) {
+            cancelled = true
+            throw ce
+        } finally {
+            finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = !cancelled)
         }
-        tier1Job = job
-        return job
     }
 
     fun startFullScan(clearExisting: Boolean = false): Job {
-        tier1Job?.cancel()
-        tier2Job?.cancel()
-        val job = scope.launch {
-            tier1Mutex.withLock {
-                runFullScanInternal(clearExisting)
+        synchronized(triggerLock) {
+            tier1Job?.cancel()
+            tier2Job?.cancel()
+            val job = scope.launch {
+                var cancelled = false
+                try {
+                    tier1Mutex.withLock {
+                        runFullScanInternal(clearExisting)
+                    }
+                } catch (ce: CancellationException) {
+                    cancelled = true
+                    throw ce
+                } finally {
+                    finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = !cancelled)
+                }
             }
+            tier1Job = job
+            return job
         }
-        tier1Job = job
-        return job
     }
 
     private suspend fun runFullScanInternal(clearExisting: Boolean) {
@@ -370,39 +520,48 @@ class TwoTierIndexManager(
         val mode = settings.accessMode
         val provider = providerResolver(mode)
 
-        _progress.value = _progress.value.copy(
-            tier1Phase = Tier1Phase.FULL_SCAN,
-            tier1ScannedCount = 0,
-            errorMessage = null,
-            statusMessage = "正在检测 ${mode.label} 权限与服务连接…"
-        )
+        _progress.update { cur ->
+            cur.copy(
+                tier1Phase = Tier1Phase.FULL_SCAN,
+                tier1ScannedCount = 0,
+                errorMessage = null,
+                statusMessage = "正在检测 ${mode.label} 权限与服务连接…"
+            )
+        }
 
         val availability = provider.checkAvailability()
         if (availability !is ModeAvailability.Ready) {
             val reason = availabilityReason(availability)
-            _progress.value = _progress.value.copy(
-                tier1Phase = Tier1Phase.IDLE,
-                errorMessage = reason,
-                statusMessage = reason
-            )
+            finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = true)
+            _progress.update { cur ->
+                cur.copy(
+                    tier1Phase = Tier1Phase.IDLE,
+                    errorMessage = reason,
+                    statusMessage = reason
+                )
+            }
             return
         }
 
         // Never wipe existing DB or Tier-2 cache before IPC binds and completes full tree traversal.
-        _progress.value = _progress.value.copy(
-            tier1Phase = Tier1Phase.FULL_SCAN,
-            tier1ScannedCount = 0,
-            errorMessage = null,
-            statusMessage = when (mode) {
-                AccessMode.ROOT -> "正在连接 Root 后台服务并扫描（可能需要数秒响应）…"
-                AccessMode.SHIZUKU -> "正在连接 Shizuku 服务并扫描存储…"
-                AccessMode.NORMAL -> "正在扫描公开存储目录…"
-            }
-        )
+        _progress.update { cur ->
+            cur.copy(
+                tier1Phase = Tier1Phase.FULL_SCAN,
+                tier1ScannedCount = 0,
+                errorMessage = null,
+                statusMessage = when (mode) {
+                    AccessMode.ROOT -> "正在连接 Root 后台服务并扫描（可能需要数秒响应）…"
+                    AccessMode.SHIZUKU -> "正在连接 Shizuku 服务并扫描存储…"
+                    AccessMode.NORMAL -> "正在扫描公开存储目录…"
+                }
+            )
+        }
 
         val filter = FilterEngine(settings.filterConfig)
         val seenPaths = HashSet<String>(16384)
         var scannedCount = 0
+        var upsertedCount = 0
+        var prunedCount = 0
 
         try {
             provider.scanFullTree(filter) { batch ->
@@ -412,18 +571,20 @@ class TwoTierIndexManager(
                     seenPaths.add(record.path)
                     entries.add(record.toUpsertEntry(filter))
                 }
-                db.upsertFileBatch(entries)
+                upsertedCount += db.upsertFileBatch(entries)
                 scannedCount += batch.size
                 val sec = ((System.currentTimeMillis() - startMs) / 1000L).coerceAtLeast(0L)
-                _progress.value = _progress.value.copy(
-                    tier1ScannedCount = scannedCount,
-                    statusMessage = "一级建库中：已扫描 $scannedCount 项 (${sec}s)"
-                )
+                _progress.update { cur ->
+                    cur.copy(
+                        tier1ScannedCount = scannedCount,
+                        statusMessage = "一级建库中：已扫描 $scannedCount 项 (${sec}s)"
+                    )
+                }
             }
 
             if (currentCoroutineContext().isActive && seenPaths.isNotEmpty()) {
-                _progress.value = _progress.value.copy(statusMessage = "正在比对并清理失效旧条目…")
-                db.pruneMissingEntries(seenPaths, scopeMode = null)
+                _progress.update { cur -> cur.copy(statusMessage = "正在比对并清理失效旧条目…") }
+                prunedCount = db.pruneMissingEntries(seenPaths, scopeMode = null)
             }
 
             val rootPaths = storageRootsResolver().let { base ->
@@ -437,36 +598,51 @@ class TwoTierIndexManager(
 
             val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
             val stats = db.getStats()
-            _progress.value = _progress.value.copy(
-                tier1Phase = Tier1Phase.IDLE,
-                tier1ScannedCount = scannedCount,
-                lastScanDurationMs = elapsed,
-                stats = stats,
-                tier2PendingCount = stats.pendingDocs,
-                statusMessage = "全盘建库完成：共 ${stats.totalEntries} 项 · ${formatDuration(elapsed)}"
-            )
+            val mutated = upsertedCount > 0 || prunedCount > 0
+            finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = true)
+            _progress.update { cur ->
+                cur.copy(
+                    tier1Phase = Tier1Phase.IDLE,
+                    tier1ScannedCount = scannedCount,
+                    lastScanDurationMs = elapsed,
+                    stats = stats,
+                    tier2PendingCount = stats.pendingDocs,
+                    syncGeneration = if (mutated) cur.syncGeneration + 1L else cur.syncGeneration,
+                    statusMessage = "全盘建库完成：共 ${stats.totalEntries} 项 · ${formatDuration(elapsed)}"
+                )
+            }
             ensureTier2Running()
         } catch (ce: CancellationException) {
             val stats = runCatching { db.getStats() }.getOrElse { _progress.value.stats }
-            _progress.value = _progress.value.copy(
-                tier1Phase = Tier1Phase.IDLE,
-                stats = stats,
-                tier2PendingCount = stats.pendingDocs,
-                statusMessage = "全盘扫描已取消（已保留当前 ${stats.totalEntries} 项）"
-            )
+            val mutated = upsertedCount > 0 || prunedCount > 0
+            finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = false)
+            _progress.update { cur ->
+                cur.copy(
+                    tier1Phase = Tier1Phase.IDLE,
+                    stats = stats,
+                    tier2PendingCount = stats.pendingDocs,
+                    syncGeneration = if (mutated) cur.syncGeneration + 1L else cur.syncGeneration,
+                    statusMessage = "全盘扫描已取消（已保留当前 ${stats.totalEntries} 项）"
+                )
+            }
             throw ce
         } catch (t: Throwable) {
             val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
             val stats = runCatching { db.getStats() }.getOrElse { _progress.value.stats }
             val reason = formatEngineeringError(t, "全盘扫描")
-            _progress.value = _progress.value.copy(
-                tier1Phase = Tier1Phase.IDLE,
-                lastScanDurationMs = elapsed,
-                stats = stats,
-                tier2PendingCount = stats.pendingDocs,
-                errorMessage = reason,
-                statusMessage = reason
-            )
+            val mutated = upsertedCount > 0 || prunedCount > 0
+            finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = true)
+            _progress.update { cur ->
+                cur.copy(
+                    tier1Phase = Tier1Phase.IDLE,
+                    lastScanDurationMs = elapsed,
+                    stats = stats,
+                    tier2PendingCount = stats.pendingDocs,
+                    syncGeneration = if (mutated) cur.syncGeneration + 1L else cur.syncGeneration,
+                    errorMessage = reason,
+                    statusMessage = reason
+                )
+            }
         }
     }
 
@@ -514,12 +690,14 @@ class TwoTierIndexManager(
                         ensureTier2Running()
                         return@withLock
                     }
-                    _progress.value = _progress.value.copy(
-                        tier1Phase = Tier1Phase.QUICK_SYNC,
-                        tier1ScannedCount = 0,
-                        errorMessage = null,
-                        statusMessage = "正在扫描新增或变更目录…"
-                    )
+                    _progress.update { cur ->
+                        cur.copy(
+                            tier1Phase = Tier1Phase.QUICK_SYNC,
+                            tier1ScannedCount = 0,
+                            errorMessage = null,
+                            statusMessage = "正在扫描新增或变更目录…"
+                        )
+                    }
                     val seen = HashSet<String>(512)
                     seen.addAll(targetDirs)
                     val listedDirs = HashSet<String>(targetDirs.size)
@@ -531,36 +709,45 @@ class TwoTierIndexManager(
                     ) { batch ->
                         for (r in batch) seen.add(r.path)
                         scanned += db.upsertFileBatch(batch.map { it.toUpsertEntry(filter) })
-                        _progress.value = _progress.value.copy(
-                            tier1ScannedCount = scanned,
-                            statusMessage = "正在索引目录：已处理 $scanned 项"
-                        )
+                        _progress.update { cur ->
+                            cur.copy(
+                                tier1ScannedCount = scanned,
+                                statusMessage = "正在索引目录：已处理 $scanned 项"
+                            )
+                        }
                     }
+                    var pruned = 0
                     for (dir in targetDirs) {
                         if (dir in listedDirs) {
-                            db.pruneDirectorySubtree(dir, seen)
+                            pruned += db.pruneDirectorySubtree(dir, seen)
                         }
                     }
                     val snaps = runCatching { provider.statDirectories(targetDirs) }.getOrDefault(emptyMap())
                     db.saveDirSnapshots(snaps, settings.accessMode)
                     val stats = db.getStats()
-                    _progress.value = _progress.value.copy(
-                        tier1Phase = Tier1Phase.IDLE,
-                        tier1ScannedCount = scanned,
-                        stats = stats,
-                        tier2PendingCount = stats.pendingDocs,
-                        statusMessage = "就绪 · ${stats.totalEntries} 项 / ${stats.indexedDocs} 正文"
-                    )
+                    val mutated = scanned > 0 || pruned > 0
+                    _progress.update { cur ->
+                        cur.copy(
+                            tier1Phase = Tier1Phase.IDLE,
+                            tier1ScannedCount = scanned,
+                            stats = stats,
+                            tier2PendingCount = stats.pendingDocs,
+                            syncGeneration = if (mutated) cur.syncGeneration + 1L else cur.syncGeneration,
+                            statusMessage = "就绪 · ${stats.totalEntries} 项 / ${stats.indexedDocs} 正文"
+                        )
+                    }
                     ensureTier2Running()
                 } catch (ce: CancellationException) {
-                    _progress.value = _progress.value.copy(tier1Phase = Tier1Phase.IDLE)
+                    _progress.update { it.copy(tier1Phase = Tier1Phase.IDLE) }
                     throw ce
                 } catch (t: Throwable) {
-                    _progress.value = _progress.value.copy(
-                        tier1Phase = Tier1Phase.IDLE,
-                        errorMessage = t.message ?: "目录刷新失败",
-                        statusMessage = "目录刷新中断：${t.message ?: "请重试"}"
-                    )
+                    _progress.update { cur ->
+                        cur.copy(
+                            tier1Phase = Tier1Phase.IDLE,
+                            errorMessage = t.message ?: "目录刷新失败",
+                            statusMessage = "目录刷新中断：${t.message ?: "请重试"}"
+                        )
+                    }
                 }
             }
         }
@@ -581,16 +768,19 @@ class TwoTierIndexManager(
                     )
                     if (tasks.isEmpty()) break
 
-                    _progress.value = _progress.value.copy(
-                        tier2Phase = Tier2Phase.EXTRACTING,
-                        tier2ProcessedCount = processed,
-                        tier2PendingCount = db.getStats().pendingDocs
-                    )
+                    val pendingBefore = db.getStats().pendingDocs
+                    _progress.update { cur ->
+                        cur.copy(
+                            tier2Phase = Tier2Phase.EXTRACTING,
+                            tier2ProcessedCount = processed,
+                            tier2PendingCount = pendingBefore
+                        )
+                    }
 
-                    tasks.map { task ->
+                    val indexedAny = tasks.map { task ->
                         async {
                             semaphore.withPermit {
-                                if (!isActive) return@withPermit
+                                if (!isActive) return@withPermit false
                                 val provider = providerResolver(task.accessMode)
                                 val maxBytes = filter.maxBytesForExtension(task.ext)
                                 val outcome = runCatching {
@@ -610,6 +800,7 @@ class TwoTierIndexManager(
                                             status = Tier2Status.INDEXED,
                                             extractedText = outcome.text
                                         )
+                                        true
                                     }
                                     is ExtractionResult.Failed -> {
                                         db.saveTier2Result(
@@ -618,40 +809,48 @@ class TwoTierIndexManager(
                                             status = outcome.status,
                                             errorMessage = outcome.message
                                         )
+                                        false
                                     }
                                 }
                             }
                         }
-                    }.awaitAll()
+                    }.awaitAll().any { it }
 
                     processed += tasks.size
                     val stats = db.getStats()
-                    _progress.value = _progress.value.copy(
-                        tier2Phase = Tier2Phase.EXTRACTING,
-                        tier2ProcessedCount = processed,
-                        tier2PendingCount = stats.pendingDocs,
-                        stats = stats
-                    )
+                    _progress.update { cur ->
+                        cur.copy(
+                            tier2Phase = Tier2Phase.EXTRACTING,
+                            tier2ProcessedCount = processed,
+                            tier2PendingCount = stats.pendingDocs,
+                            stats = stats,
+                            syncGeneration = if (indexedAny) cur.syncGeneration + 1L else cur.syncGeneration
+                        )
+                    }
                 }
 
                 val finalStats = db.getStats()
-                _progress.value = _progress.value.copy(
-                    tier2Phase = Tier2Phase.IDLE,
-                    tier2PendingCount = finalStats.pendingDocs,
-                    stats = finalStats,
-                    statusMessage = if (processed > 0 && _progress.value.tier1Phase == Tier1Phase.IDLE) {
-                        "就绪 · ${finalStats.totalEntries} 项 / ${finalStats.indexedDocs} 正文"
-                    } else {
-                        _progress.value.statusMessage
-                    }
-                )
+                _progress.update { cur ->
+                    cur.copy(
+                        tier2Phase = Tier2Phase.IDLE,
+                        tier2PendingCount = finalStats.pendingDocs,
+                        stats = finalStats,
+                        statusMessage = if (processed > 0 && cur.tier1Phase == Tier1Phase.IDLE) {
+                            "就绪 · ${finalStats.totalEntries} 项 / ${finalStats.indexedDocs} 正文"
+                        } else {
+                            cur.statusMessage
+                        }
+                    )
+                }
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
-                _progress.value = _progress.value.copy(
-                    tier2Phase = Tier2Phase.IDLE,
-                    errorMessage = t.message ?: "正文解析中断"
-                )
+                _progress.update { cur ->
+                    cur.copy(
+                        tier2Phase = Tier2Phase.IDLE,
+                        errorMessage = t.message ?: "正文解析中断"
+                    )
+                }
             }
         }
     }
@@ -712,5 +911,9 @@ class TwoTierIndexManager(
             needsTier2 = status == Tier2Status.PENDING,
             initialTier2Status = status
         )
+    }
+
+    companion object {
+        const val DEFAULT_FOREGROUND_SYNC_INTERVAL_MS = 2_500L
     }
 }

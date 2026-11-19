@@ -87,6 +87,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketeverything.app.data.ThemeMode
+import com.pocketeverything.app.indexer.IndexProgressState
+import com.pocketeverything.app.indexer.Tier1Phase
 import com.pocketeverything.app.picker.MimeFilterHelper
 import com.pocketeverything.app.search.QuickScope
 import com.pocketeverything.app.search.SearchResultItem
@@ -105,6 +107,12 @@ import kotlinx.coroutines.withContext
 
 class FilePickerActivity : ComponentActivity() {
 
+    override fun onResume() {
+        super.onResume()
+        val app = application as PocketEverythingApp
+        app.container.indexManager.triggerForegroundSync()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -119,6 +127,7 @@ class FilePickerActivity : ComponentActivity() {
 
         setContent {
             val settings by container.settingsRepository.settings.collectAsState()
+            val indexProgress by container.indexManager.progress.collectAsState()
             val systemDark = isSystemInDarkTheme()
             val isDarkTheme = when (settings.themeMode) {
                 ThemeMode.SYSTEM -> systemDark
@@ -148,6 +157,7 @@ class FilePickerActivity : ComponentActivity() {
                     acceptedMimes = acceptedMimes,
                     useMonospaceFont = settings.useMonospaceFont,
                     compactMode = settings.compactListMode,
+                    indexProgress = indexProgress,
                     loadTotalEntries = {
                         withContext(Dispatchers.IO) {
                             runCatching { container.database.getStats().totalEntries }.getOrDefault(0L)
@@ -248,6 +258,7 @@ private fun FilePickerContent(
     acceptedMimes: Set<String>,
     useMonospaceFont: Boolean,
     compactMode: Boolean,
+    indexProgress: IndexProgressState,
     loadTotalEntries: suspend () -> Long,
     loadItems: suspend (query: String, currentDir: String?, enforceMime: Boolean) -> List<SearchResultItem>,
     onResolveFiles: suspend (List<SearchResultItem>) -> List<Pair<String, Uri>>,
@@ -262,6 +273,7 @@ private fun FilePickerContent(
     var items by remember { mutableStateOf<List<SearchResultItem>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
     var isResolving by remember { mutableStateOf(false) }
+    var lastLoadedNavKey by remember { mutableStateOf<Triple<String, String?, Boolean>?>(null) }
 
     val selectedMap = remember { mutableStateMapOf<String, SearchResultItem>() }
     val snackbarHostState = remember { SnackbarHostState() }
@@ -271,29 +283,40 @@ private fun FilePickerContent(
     val haptics = rememberAppHaptics()
 
     val currentDir = dirStack.lastOrNull()
+    val isIndexSyncing = indexProgress.tier1Phase != Tier1Phase.IDLE
+    val indexSyncGeneration = indexProgress.syncGeneration
+    val indexTotalEntries = indexProgress.stats.totalEntries
+    val indexIndexedDocs = indexProgress.stats.indexedDocs
 
     BackHandler(enabled = dirStack.isNotEmpty()) {
         dirStack = dirStack.dropLast(1)
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(indexSyncGeneration, indexTotalEntries) {
         totalEntries = loadTotalEntries()
     }
 
-    LaunchedEffect(query, currentDir, enforceMimeFilter) {
-        if (currentDir == null && query.isNotBlank()) {
+    LaunchedEffect(query, currentDir, enforceMimeFilter, indexSyncGeneration, indexTotalEntries, indexIndexedDocs) {
+        val navKey = Triple(query, currentDir, enforceMimeFilter)
+        val navChanged = navKey != lastLoadedNavKey
+        if (navChanged && currentDir == null && query.isNotBlank()) {
             delay(65)
         }
-        isLoading = true
+        if (navChanged) {
+            isLoading = true
+        }
         runCatching {
             loadItems(query, currentDir, enforceMimeFilter)
         }.onSuccess { loaded ->
             items = loaded
+            if (navChanged) {
+                lastLoadedNavKey = navKey
+                listState.scrollToItem(0)
+            }
         }.onFailure { err ->
             snackbarHostState.showSnackbar("加载失败：${err.message ?: "请重试"}")
         }
         isLoading = false
-        listState.scrollToItem(0)
     }
 
     LaunchedEffect(listState.isScrollInProgress) {
@@ -489,7 +512,7 @@ private fun FilePickerContent(
                 }
             }
 
-            if (isLoading || isResolving) {
+            if (isLoading || isResolving || isIndexSyncing) {
                 LinearProgressIndicator(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -498,10 +521,10 @@ private fun FilePickerContent(
             }
 
             when {
-                totalEntries == 0L -> {
+                totalEntries == 0L && !isIndexSyncing -> {
                     PickerEmptyIndexState(onOpenMainApp = onOpenMainApp)
                 }
-                !isLoading && items.isEmpty() -> {
+                !isLoading && !isIndexSyncing && items.isEmpty() -> {
                     PickerNoResultsState(
                         enforceMimeFilter = enforceMimeFilter,
                         onShowAllFormats = { enforceMimeFilter = false }

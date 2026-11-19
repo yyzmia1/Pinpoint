@@ -22,12 +22,16 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.InputStream
 import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicInteger
 
 class TwoTierIndexManagerTest {
 
@@ -87,12 +91,13 @@ class TwoTierIndexManagerTest {
     ) : FileSystemProvider {
         var availability: ModeAvailability = ModeAvailability.Ready
         var fullTreeHandler: suspend (FilterEngine, suspend (List<ScannedFileRecord>) -> Unit) -> Int = { _, _ -> 0 }
-        var statDirsHandler: (List<String>) -> Map<String, Long> = { emptyMap() }
+        var statDirsHandler: suspend (List<String>) -> Map<String, Long> = { emptyMap() }
         var statPathsHandler: (List<String>) -> Map<String, Long> = { emptyMap() }
         var listDirectHandler: suspend (List<String>, (String) -> Unit, suspend (List<ScannedFileRecord>) -> Unit) -> Int = { _, _, _ -> 0 }
         var scanDirsHandler: suspend (List<String>, (String) -> Unit, suspend (List<ScannedFileRecord>) -> Unit) -> Int = { _, _, _ -> 0 }
         var fileContents: MutableMap<String, String> = HashMap()
         var listDirectCallCount = 0
+        var statDirsCallCount = 0
 
         override suspend fun checkAvailability(): ModeAvailability = availability
 
@@ -130,7 +135,10 @@ class TwoTierIndexManagerTest {
             return listDirectHandler(dirs, onDirListed, onBatch)
         }
 
-        override suspend fun statDirectories(dirPaths: List<String>): Map<String, Long> = statDirsHandler(dirPaths)
+        override suspend fun statDirectories(dirPaths: List<String>): Map<String, Long> {
+            statDirsCallCount++
+            return statDirsHandler(dirPaths)
+        }
         override suspend fun statPaths(paths: List<String>): Map<String, Long> = statPathsHandler(paths)
 
         override suspend fun <T> openFileStream(
@@ -480,6 +488,337 @@ class TwoTierIndexManagerTest {
             includeNewWifiFile = true
             mgr.startQuickHotDirsRefresh().join()
             assertEquals(1, db.search("name:bluedroid.conf").items.size)
+        }
+    }
+
+    @Test
+    fun `triggerForegroundSync enforces cooldown throttling and reuses active in-flight scan`() = runBlocking {
+        val dbFile = Files.createTempFile("pocket_mgr_fg_throttle_", ".db").toFile().apply { deleteOnExit() }
+        val ctx = TestContext()
+        val settingsRepo = SettingsRepository(ctx)
+        settingsRepo.updateAccessMode(AccessMode.NORMAL)
+        val provider = FakeProvider(AccessMode.NORMAL)
+        var nowMs = 10_000L
+        var statGate: CompletableDeferred<Unit>? = null
+        var statStarted: CompletableDeferred<Unit>? = null
+
+        SqliteSearchDatabase(dbFile.absolutePath).use { db ->
+            val t0 = 1000L
+            db.upsertFileBatch(
+                listOf(
+                    FileUpsertEntry("/storage/emulated/0/Download", "/storage/emulated/0", "Download", "", 0L, t0, true, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/Download/a.bin", "/storage/emulated/0/Download", "a.bin", "bin", 32L, t0, false, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE)
+                )
+            )
+            db.saveDirSnapshots(mapOf("/storage/emulated/0" to t0), AccessMode.NORMAL)
+            settingsRepo.markFullScanCompleted(t0)
+
+            provider.statDirsHandler = {
+                statStarted?.complete(Unit)
+                statGate?.await()
+                mapOf(
+                    "/storage/emulated/0" to t0,
+                    "/storage/emulated/0/Download" to t0
+                )
+            }
+
+            val mgr = TwoTierIndexManager(
+                context = ctx,
+                db = db,
+                settingsRepo = settingsRepo,
+                providerResolver = { provider },
+                storageRootsResolver = { listOf("/storage/emulated/0") },
+                clockMs = { nowMs }
+            )
+
+            // 1. First foreground sync executes immediately
+            val first = mgr.triggerForegroundSync(minIntervalMs = 2_500L)
+            assertNotNull(first)
+            withTimeout(5_000L) { first!!.join() }
+            assertEquals(1, provider.statDirsCallCount)
+
+            // 2. Within cooldown (< 2500ms) -> throttled
+            nowMs += 1_000L
+            assertNull(mgr.triggerForegroundSync(minIntervalMs = 2_500L))
+            nowMs += 1_499L
+            assertNull(mgr.triggerForegroundSync(minIntervalMs = 2_500L))
+            assertEquals(1, provider.statDirsCallCount)
+
+            // 3. Exactly at cooldown boundary (2500ms) -> executes again
+            nowMs += 1L
+            val second = mgr.triggerForegroundSync(minIntervalMs = 2_500L)
+            assertNotNull(second)
+            withTimeout(5_000L) { second!!.join() }
+            assertEquals(2, provider.statDirsCallCount)
+
+            // 4. Concurrent call while scan is active reuses the in-flight job without starting a duplicate
+            nowMs += 5_000L
+            statStarted = CompletableDeferred()
+            statGate = CompletableDeferred()
+            val activeJob = mgr.triggerForegroundSync(minIntervalMs = 2_500L)
+            assertNotNull(activeJob)
+            withTimeout(5_000L) { statStarted!!.await() }
+
+            val concurrentJob = mgr.triggerForegroundSync(minIntervalMs = 0L)
+            assertSame(activeJob, concurrentJob)
+            assertEquals(3, provider.statDirsCallCount)
+
+            statGate!!.complete(Unit)
+            withTimeout(5_000L) { activeJob!!.join() }
+            assertEquals(3, provider.statDirsCallCount)
+        }
+    }
+
+    @Test
+    fun `syncGeneration increments on mutation even with net-zero count change and stays stable on no-op`() = runBlocking {
+        val dbFile = Files.createTempFile("pocket_mgr_sync_gen_", ".db").toFile().apply { deleteOnExit() }
+        val ctx = TestContext()
+        val settingsRepo = SettingsRepository(ctx)
+        settingsRepo.updateAccessMode(AccessMode.NORMAL)
+        val provider = FakeProvider(AccessMode.NORMAL)
+        var downloadMtime = 1000L
+        var fileInDownload = "old.bin"
+
+        provider.fullTreeHandler = { _, onBatch ->
+            val batch = listOf(
+                ScannedFileRecord("/storage/emulated/0", "/storage/emulated", "0", "", 0L, 1000L, true, AccessMode.NORMAL),
+                ScannedFileRecord("/storage/emulated/0/Download", "/storage/emulated/0", "Download", "", 0L, downloadMtime, true, AccessMode.NORMAL),
+                ScannedFileRecord("/storage/emulated/0/Download/$fileInDownload", "/storage/emulated/0/Download", fileInDownload, "bin", 16L, 1000L, false, AccessMode.NORMAL)
+            )
+            onBatch(batch)
+            batch.size
+        }
+        provider.statDirsHandler = {
+            mapOf(
+                "/storage/emulated/0" to 1000L,
+                "/storage/emulated/0/Download" to downloadMtime
+            )
+        }
+        provider.listDirectHandler = { dirs, onDirListed, onBatch ->
+            if ("/storage/emulated/0/Download" in dirs) {
+                onDirListed("/storage/emulated/0/Download")
+                onBatch(
+                    listOf(
+                        ScannedFileRecord("/storage/emulated/0/Download/$fileInDownload", "/storage/emulated/0/Download", fileInDownload, "bin", 24L, downloadMtime, false, AccessMode.NORMAL)
+                    )
+                )
+                1
+            } else 0
+        }
+        provider.scanDirsHandler = { roots, onDirListed, onBatch ->
+            if ("/storage/emulated/0/Download" in roots) {
+                onDirListed("/storage/emulated/0/Download")
+                onBatch(
+                    listOf(
+                        ScannedFileRecord("/storage/emulated/0/Download/$fileInDownload", "/storage/emulated/0/Download", fileInDownload, "bin", 24L, downloadMtime, false, AccessMode.NORMAL),
+                        ScannedFileRecord("/storage/emulated/0/Download/note.txt", "/storage/emulated/0/Download", "note.txt", "txt", 32L, downloadMtime, false, AccessMode.NORMAL)
+                    )
+                )
+                2
+            } else 0
+        }
+        provider.fileContents["/storage/emulated/0/Download/note.txt"] = "增量同步测试正文"
+
+        SqliteSearchDatabase(dbFile.absolutePath).use { db ->
+            val mgr = TwoTierIndexManager(
+                context = ctx,
+                db = db,
+                settingsRepo = settingsRepo,
+                providerResolver = { provider },
+                storageRootsResolver = { listOf("/storage/emulated/0") }
+            )
+            assertEquals(0L, mgr.progress.value.syncGeneration)
+
+            // 1. Full scan mutates -> increments
+            withTimeout(5_000L) { mgr.startFullScan().join() }
+            val genAfterFull = mgr.progress.value.syncGeneration
+            assertTrue("Expected syncGeneration > 0 after full scan", genAfterFull > 0L)
+            assertEquals(3L, db.getStats().totalEntries)
+
+            // 2. No-op quick sync -> syncGeneration unchanged
+            withTimeout(5_000L) { mgr.startQuickHotDirsRefresh().join() }
+            assertEquals(genAfterFull, mgr.progress.value.syncGeneration)
+
+            // 3. Replace 1 file with 1 new file (totalEntries stays 3L!) -> syncGeneration MUST increment
+            downloadMtime = 2000L
+            fileInDownload = "replaced.bin"
+            withTimeout(5_000L) { mgr.startQuickHotDirsRefresh().join() }
+            assertEquals(3L, db.getStats().totalEntries)
+            assertEquals(0, db.search("name:old.bin").items.size)
+            assertEquals(1, db.search("name:replaced.bin").items.size)
+            val genAfterSwap = mgr.progress.value.syncGeneration
+            assertEquals(genAfterFull + 1L, genAfterSwap)
+
+            // 4. Directory refresh adds note.txt -> increments (and Tier-2 extracts body -> increments again)
+            withTimeout(5_000L) { mgr.startDirectoriesRefresh(listOf("/storage/emulated/0/Download")).join() }
+            withTimeout(5_000L) {
+                mgr.progress.first {
+                    it.tier1Phase == Tier1Phase.IDLE &&
+                        it.tier2Phase == Tier2Phase.IDLE &&
+                        it.stats.indexedDocs >= 1L
+                }
+            }
+            val genAfterDirAndTier2 = mgr.progress.value.syncGeneration
+            assertTrue("Expected syncGeneration to advance after dir refresh & tier2", genAfterDirAndTier2 > genAfterSwap)
+
+            // 5. Filter prune removing /storage/emulated/0/Download -> increments
+            val cfg = settingsRepo.settings.value.filterConfig.copy(
+                customExcludedPaths = listOf("/storage/emulated/0/Download")
+            )
+            settingsRepo.updateFilterConfig(cfg)
+            val summary = mgr.pruneByCurrentFilter()
+            assertTrue(summary.removedEntries > 0)
+            assertEquals(genAfterDirAndTier2 + 1L, mgr.progress.value.syncGeneration)
+        }
+    }
+
+    @Test
+    fun `triggerForegroundSync runs full scan when DB is empty and stays silent when unavailable`() = runBlocking {
+        val dbFile = Files.createTempFile("pocket_mgr_fg_empty_", ".db").toFile().apply { deleteOnExit() }
+        val ctx = TestContext()
+        val settingsRepo = SettingsRepository(ctx)
+        settingsRepo.updateAccessMode(AccessMode.NORMAL)
+        val provider = FakeProvider(AccessMode.NORMAL)
+        provider.availability = ModeAvailability.NeedsPermission("缺少存储权限")
+        provider.fullTreeHandler = { _, onBatch ->
+            onBatch(
+                listOf(
+                    ScannedFileRecord("/storage/emulated/0", "/storage/emulated", "0", "", 0L, 1000L, true, AccessMode.NORMAL),
+                    ScannedFileRecord("/storage/emulated/0/doc.pdf", "/storage/emulated/0", "doc.pdf", "pdf", 128L, 1000L, false, AccessMode.NORMAL)
+                )
+            )
+            2
+        }
+        var nowMs = 1_000L
+
+        SqliteSearchDatabase(dbFile.absolutePath).use { db ->
+            val mgr = TwoTierIndexManager(
+                context = ctx,
+                db = db,
+                settingsRepo = settingsRepo,
+                providerResolver = { provider },
+                storageRootsResolver = { listOf("/storage/emulated/0") },
+                clockMs = { nowMs }
+            )
+
+            // Unavailable -> stays silent (no error banner)
+            val j1 = mgr.triggerForegroundSync(minIntervalMs = 2_500L)
+            assertNotNull(j1)
+            withTimeout(5_000L) { j1!!.join() }
+            assertNull(mgr.progress.value.errorMessage)
+            assertEquals(0L, db.getStats().totalEntries)
+
+            // Granted permission + after cooldown -> runs full scan on empty DB
+            provider.availability = ModeAvailability.Ready
+            nowMs += 3_000L
+            val j2 = mgr.triggerForegroundSync(minIntervalMs = 2_500L)
+            assertNotNull(j2)
+            withTimeout(5_000L) { j2!!.join() }
+            assertEquals(2L, db.getStats().totalEntries)
+            assertTrue(mgr.progress.value.syncGeneration >= 1L)
+        }
+    }
+
+    @Test
+    fun `triggerForegroundSync maxWaitMs waits for fast sync and invokes onChanged only on deferred mutation`() = runBlocking {
+        val dbFile = Files.createTempFile("pocket_mgr_fg_wait_", ".db").toFile().apply { deleteOnExit() }
+        val ctx = TestContext()
+        val settingsRepo = SettingsRepository(ctx)
+        settingsRepo.updateAccessMode(AccessMode.NORMAL)
+        val provider = FakeProvider(AccessMode.NORMAL)
+        var nowMs = 1_000L
+        var dirMtime = 1000L
+        val diskFiles = mutableListOf(
+            ScannedFileRecord("/storage/emulated/0/Download/init.pdf", "/storage/emulated/0/Download", "init.pdf", "pdf", 64L, 1000L, false, AccessMode.NORMAL)
+        )
+        var slowGate: CompletableDeferred<Unit>? = null
+
+        SqliteSearchDatabase(dbFile.absolutePath).use { db ->
+            db.upsertFileBatch(
+                listOf(
+                    FileUpsertEntry("/storage/emulated/0/Download", "/storage/emulated/0", "Download", "", 0L, dirMtime, true, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/storage/emulated/0/Download/init.pdf", "/storage/emulated/0/Download", "init.pdf", "pdf", 64L, 1000L, false, AccessMode.NORMAL, false, Tier2Status.NOT_APPLICABLE)
+                )
+            )
+            db.saveDirSnapshots(mapOf("/storage/emulated/0" to 1000L), AccessMode.NORMAL)
+            settingsRepo.markFullScanCompleted(1000L)
+
+            provider.statDirsHandler = {
+                slowGate?.await()
+                mapOf(
+                    "/storage/emulated/0" to 1000L,
+                    "/storage/emulated/0/Download" to dirMtime
+                )
+            }
+            provider.listDirectHandler = { dirs, onDirListed, onBatch ->
+                if ("/storage/emulated/0/Download" in dirs) {
+                    onDirListed("/storage/emulated/0/Download")
+                    onBatch(diskFiles.toList())
+                    diskFiles.size
+                } else 0
+            }
+
+            val mgr = TwoTierIndexManager(
+                context = ctx,
+                db = db,
+                settingsRepo = settingsRepo,
+                providerResolver = { provider },
+                storageRootsResolver = { listOf("/storage/emulated/0") },
+                clockMs = { nowMs }
+            )
+
+            // 1. Fast sync finishes within maxWaitMs: newly created file immediately visible, deferred onChanged NOT called
+            dirMtime = 2000L
+            diskFiles.add(
+                ScannedFileRecord("/storage/emulated/0/Download/fresh.pdf", "/storage/emulated/0/Download", "fresh.pdf", "pdf", 128L, dirMtime, false, AccessMode.NORMAL)
+            )
+            val fastCallbacks = AtomicInteger(0)
+            val fastJob = mgr.triggerForegroundSync(
+                minIntervalMs = 2_500L,
+                maxWaitMs = 1_200L,
+                onChanged = { fastCallbacks.incrementAndGet() }
+            )
+            assertNotNull(fastJob)
+            assertEquals(1, db.search("name:fresh.pdf").items.size)
+            assertEquals(0, fastCallbacks.get())
+
+            // 2. Slow sync exceeds maxWaitMs and mutates DB: returns early, fires onChanged once completed, and cooldown stops re-entry loop
+            nowMs += 5_000L
+            dirMtime = 3000L
+            diskFiles.add(
+                ScannedFileRecord("/storage/emulated/0/Download/delayed.pdf", "/storage/emulated/0/Download", "delayed.pdf", "pdf", 256L, dirMtime, false, AccessMode.NORMAL)
+            )
+            slowGate = CompletableDeferred()
+            val deferredFired = CompletableDeferred<Boolean>()
+            val slowJob = mgr.triggerForegroundSync(
+                minIntervalMs = 2_500L,
+                maxWaitMs = 60L,
+                onChanged = {
+                    val reTrigger = mgr.triggerForegroundSync(minIntervalMs = 2_500L)
+                    deferredFired.complete(reTrigger == null)
+                }
+            )
+            assertNotNull(slowJob)
+            assertEquals(0, db.search("name:delayed.pdf").items.size)
+
+            slowGate!!.complete(Unit)
+            val reTriggerWasThrottled = withTimeout(5_000L) { deferredFired.await() }
+            assertTrue("Re-query inside deferred onChanged must hit cooldown to prevent refresh loops", reTriggerWasThrottled)
+            assertEquals(1, db.search("name:delayed.pdf").items.size)
+
+            // 3. Slow sync exceeds maxWaitMs with NO changes: onChanged must NOT be invoked
+            nowMs += 5_000L
+            slowGate = CompletableDeferred()
+            val noOpCallbacks = AtomicInteger(0)
+            val noOpJob = mgr.triggerForegroundSync(
+                minIntervalMs = 2_500L,
+                maxWaitMs = 60L,
+                onChanged = { noOpCallbacks.incrementAndGet() }
+            )
+            assertNotNull(noOpJob)
+            slowGate!!.complete(Unit)
+            withTimeout(5_000L) { noOpJob!!.join() }
+            assertEquals(0, noOpCallbacks.get())
         }
     }
 }

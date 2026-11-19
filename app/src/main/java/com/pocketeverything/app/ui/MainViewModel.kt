@@ -191,7 +191,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             val indexMutationTick = indexManager.progress
-                .map { it.stats.totalEntries to it.stats.indexedDocs }
+                .map { Triple(it.stats.totalEntries, it.stats.indexedDocs, it.syncGeneration) }
                 .distinctUntilChanged()
                 .debounce(250)
 
@@ -201,8 +201,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _sortOrder,
                 settingsRepo.settings.map { it.showRecentOnEmptyQuery }.distinctUntilChanged(),
                 indexMutationTick
-            ) { q, scope, sort, showRecent, _ ->
-                SearchTriggerParams(q, scope, sort, showRecent)
+            ) { q, scope, sort, showRecent, tick ->
+                SearchTriggerParams(q, scope, sort, showRecent, tick)
             }.distinctUntilChanged().collectLatest { params ->
                 val resp = withContext(Dispatchers.IO) {
                     try {
@@ -228,8 +228,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val query: String,
         val scope: QuickScope,
         val sort: SortOrder,
-        val showRecentOnEmpty: Boolean
+        val showRecentOnEmpty: Boolean,
+        val indexTick: Triple<Long, Long, Long>
     )
+
+    fun onAppForegrounded() {
+        refreshModeStatuses()
+        indexManager.triggerForegroundSync()
+    }
 
     fun updateQuery(newQuery: String) {
         _query.value = newQuery
