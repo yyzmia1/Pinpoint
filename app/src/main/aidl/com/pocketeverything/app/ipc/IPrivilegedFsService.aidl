@@ -52,4 +52,10 @@ interface IPrivilegedFsService {
         boolean deduplicateMounts,
         in ParcelFileDescriptor outputFd
     ) = 5;
+
+    /**
+     * Safely deletes a file, symlink (unlinked without following), or directory subtree.
+     * Enforces server-side DeletionSafetyGuard before touching disk.
+     */
+    boolean deletePath(String path) = 6;
 }

@@ -480,7 +480,7 @@ fun folderPalette(dark: Boolean): Triple<Color, Color, Color> = if (dark) {
     Triple(Color(0xFFF3BA44), Color(0xFFFFE682), Color(0xFFFFD04E))
 }
 
-private fun classifyVisualFamily(isDir: Boolean, ext: String): FileVisualFamily {
+fun classifyVisualFamily(isDir: Boolean, ext: String): FileVisualFamily {
     if (isDir) return FileVisualFamily.FOLDER
     return when (ext.lowercase(Locale.US)) {
         "pdf" -> FileVisualFamily.PDF

@@ -97,6 +97,10 @@ class PrivilegedFsBinderImpl(
         return runCatching { File(path).exists() }.getOrDefault(false)
     }
 
+    override fun deletePath(path: String): Boolean {
+        return runCatching { DeletionSafetyGuard.deleteRecursivelyNoFollow(path) }.getOrDefault(false)
+    }
+
     override fun destroy() {
         if (exitOnDestroy) {
             exitProcess(0)
