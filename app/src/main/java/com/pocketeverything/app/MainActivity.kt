@@ -327,18 +327,18 @@ class MainActivity : ComponentActivity() {
                         AppPage.STORAGE_ANALYZER -> {
                             val analyzerActions = remember(viewModel) {
                                 object : StorageAnalyzerActions {
-                                    override fun onBack() {
-                                        if (viewModel.analyzerState.value.selectedTab == AnalyzerTab.TREE &&
-                                            viewModel.navigateAnalyzerUp()
-                                        ) {
-                                            return
-                                        }
+                                    override fun onExit() {
                                         currentPage = AppPage.SEARCH
+                                    }
+                                    override fun onNavigateUp() {
+                                        viewModel.navigateAnalyzerUp()
                                     }
                                     override fun onRefresh() = viewModel.refreshStorageAnalyzer()
                                     override fun onSelectTab(tab: AnalyzerTab) = viewModel.selectAnalyzerTab(tab)
                                     override fun onNavigateDir(path: String) = viewModel.navigateAnalyzerDir(path)
-                                    override fun onToggleTreeSort() = viewModel.toggleAnalyzerTreeSort()
+                                    override fun onSelectTreeSort(sort: com.pocketeverything.app.analyzer.AnalyzerTreeSort) =
+                                        viewModel.selectAnalyzerTreeSort(sort)
+                                    override fun onToggleFoldersFirst() = viewModel.toggleAnalyzerFoldersFirst()
                                     override fun onSelectExtFilter(ext: String?) = viewModel.selectAnalyzerExtFilter(ext)
                                     override fun onToggleUninstalledOnly(enabled: Boolean) = viewModel.toggleAnalyzerUninstalledOnly(enabled)
                                     override fun onToggleTreemap() = viewModel.toggleAnalyzerTreemap()

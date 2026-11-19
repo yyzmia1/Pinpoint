@@ -115,6 +115,62 @@ class WizTreeEngineTest {
     }
 
     @Test
+    fun `four-dimension tree sorting supports time, name, asc-desc toggle, foldersFirst, and SQLite pushdown`() {
+        val dbFile = Files.createTempFile("wiztree_sort_", ".db").toFile().apply { deleteOnExit() }
+        val resolver = AppInfoResolver { pkg, fallback -> ResolvedAppMeta(pkg, fallback ?: pkg, true) }
+
+        SqliteSearchDatabase(dbFile.absolutePath).use { db ->
+            db.upsertFileBatch(
+                listOf(
+                    dir("/storage/emulated/0/Work", mtime = 1_000L),
+                    dir("/storage/emulated/0/Work/beta_dir", mtime = 2_000L),
+                    file("/storage/emulated/0/Work/beta_dir/inside.bin", "bin", 500L, mtime = 2_000L),
+                    file("/storage/emulated/0/Work/alpha.txt", "txt", 100L, mtime = 5_000L),
+                    file("/storage/emulated/0/Work/zebra.mp4", "mp4", 9_000L, mtime = 1_500L),
+                    file("/storage/emulated/0/Work/Mid.pdf", "pdf", 300L, mtime = 3_500L)
+                )
+            )
+
+            val snap = WizTreeEngine.buildFromDatabase(db, resolver, listOf("/storage/emulated/0"))
+            val work = snap.dirNodes["/storage/emulated/0/Work"]!!
+
+            // SIZE_DESC with foldersFirst=false puts zebra.mp4 (9000) first
+            val bySizeMixed = WizTreeEngine.loadChildrenForDirectory(db, work, AnalyzerTreeSort.SIZE_DESC, foldersFirst = false)
+            assertEquals(listOf("zebra.mp4", "beta_dir", "Mid.pdf", "alpha.txt"), bySizeMixed.map { it.name })
+
+            // SIZE_DESC with foldersFirst=true pins beta_dir above files
+            val bySizeFoldersFirst = WizTreeEngine.loadChildrenForDirectory(db, work, AnalyzerTreeSort.SIZE_DESC, foldersFirst = true)
+            assertEquals(listOf("beta_dir", "zebra.mp4", "Mid.pdf", "alpha.txt"), bySizeFoldersFirst.map { it.name })
+
+            // TIME_DESC with foldersFirst=false puts newest alpha.txt (5000) first
+            val byTimeDesc = WizTreeEngine.loadChildrenForDirectory(db, work, AnalyzerTreeSort.TIME_DESC, foldersFirst = false)
+            assertEquals(listOf("alpha.txt", "Mid.pdf", "beta_dir", "zebra.mp4"), byTimeDesc.map { it.name })
+
+            // TIME_ASC puts oldest zebra.mp4 (1500) first
+            val byTimeAsc = WizTreeEngine.loadChildrenForDirectory(db, work, AnalyzerTreeSort.TIME_ASC, foldersFirst = false)
+            assertEquals(listOf("zebra.mp4", "beta_dir", "Mid.pdf", "alpha.txt"), byTimeAsc.map { it.name })
+
+            // NAME_ASC case-insensitive with foldersFirst=true
+            val byNameAsc = WizTreeEngine.loadChildrenForDirectory(db, work, AnalyzerTreeSort.NAME_ASC, foldersFirst = true)
+            assertEquals(listOf("beta_dir", "alpha.txt", "Mid.pdf", "zebra.mp4"), byNameAsc.map { it.name })
+
+            // NAME_DESC without foldersFirst
+            val byNameDesc = WizTreeEngine.loadChildrenForDirectory(db, work, AnalyzerTreeSort.NAME_DESC, foldersFirst = false)
+            assertEquals(listOf("zebra.mp4", "Mid.pdf", "beta_dir", "alpha.txt"), byNameDesc.map { it.name })
+
+            // SQLite pushdown check: with limit=1 and TIME_DESC, must return newest file alpha.txt (not largest zebra.mp4)
+            val top1Newest = WizTreeEngine.loadChildrenForDirectory(
+                db = db,
+                dirNode = work,
+                sort = AnalyzerTreeSort.TIME_DESC,
+                foldersFirst = false,
+                limit = 1
+            ).filter { !it.isDir }
+            assertEquals(listOf("alpha.txt"), top1Newest.map { it.name })
+        }
+    }
+
+    @Test
     fun `AppStorageAttribution matches Android data, obb, media, root data, and shared folders accurately`() {
         val m1 = AppStorageAttribution.matchPath("/storage/emulated/0/Android/data/com.tencent.mm/MicroMsg/a.jpg")
         assertEquals("com.tencent.mm", m1?.packageName)
@@ -211,26 +267,26 @@ class WizTreeEngineTest {
         assertTrue("50k single-pass rollup should finish fast, took ${snap.buildDurationMs}ms", snap.buildDurationMs < 5_000L)
     }
 
-    private fun dir(path: String): FileUpsertEntry = FileUpsertEntry(
+    private fun dir(path: String, mtime: Long = 1794900000000L): FileUpsertEntry = FileUpsertEntry(
         path = path,
         parentPath = path.substringBeforeLast('/').ifEmpty { "/" },
         name = path.substringAfterLast('/'),
         ext = "",
         size = 0L,
-        mtime = 1794900000000L,
+        mtime = mtime,
         isDir = true,
         accessMode = AccessMode.NORMAL,
         needsTier2 = false,
         initialTier2Status = Tier2Status.NOT_APPLICABLE
     )
 
-    private fun file(path: String, ext: String, size: Long): FileUpsertEntry = FileUpsertEntry(
+    private fun file(path: String, ext: String, size: Long, mtime: Long = 1794900000000L): FileUpsertEntry = FileUpsertEntry(
         path = path,
         parentPath = path.substringBeforeLast('/').ifEmpty { "/" },
         name = path.substringAfterLast('/'),
         ext = ext,
         size = size,
-        mtime = 1794900000000L,
+        mtime = mtime,
         isDir = false,
         accessMode = AccessMode.NORMAL,
         needsTier2 = false,

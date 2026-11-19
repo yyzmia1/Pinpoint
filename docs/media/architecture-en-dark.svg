@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 492" width="960" height="492" role="img" aria-label="Pinpoint System Architecture">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#58A6FF" />
+    </marker>
+    <style>
+      text { font-family: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif; }
+      .layer-lbl { font-size: 11px; font-weight: 700; letter-spacing: 0.4px; fill: #8B949E; }
+      .card-title { font-size: 13.5px; font-weight: 700; fill: #F0F6FC; }
+      .card-sub { font-size: 11px; fill: #8B949E; }
+      .badge-txt { font-size: 10.5px; font-weight: 600; }
+    </style>
+  </defs>
+  <rect x="0" y="0" width="960" height="492" rx="16" fill="#0D1117" />
+  <rect x="20" y="16" width="920" height="94" rx="12" fill="#161B22" stroke="#30363D" stroke-width="1" />
+  <text x="36" y="36" class="layer-lbl">UI Layer · Jetpack Compose (Material 3)</text>
+  <rect x="34" y="46" width="214" height="52" rx="9" fill="#1C2330" stroke="#388BFD" stroke-width="1.2" />
+  <rect x="34" y="46" width="4" height="52" rx="2" fill="#388BFD" />
+  <text x="48" y="68" class="card-title">Search Home</text>
+  <text x="48" y="86" class="card-sub">Everything Syntax · Sub-10ms</text>
+  <rect x="260" y="46" width="214" height="52" rx="9" fill="#1C2330" stroke="#388BFD" stroke-width="1.2" />
+  <rect x="260" y="46" width="4" height="52" rx="2" fill="#388BFD" />
+  <text x="274" y="68" class="card-title">Storage Analyzer</text>
+  <text x="274" y="86" class="card-sub">Treemap · MT-Style File Tree</text>
+  <rect x="486" y="46" width="214" height="52" rx="9" fill="#1C2330" stroke="#388BFD" stroke-width="1.2" />
+  <rect x="486" y="46" width="4" height="52" rx="2" fill="#388BFD" />
+  <text x="500" y="68" class="card-title">Built-in Preview</text>
+  <text x="500" y="86" class="card-sub">Text / PDF / Image / Archive</text>
+  <rect x="712" y="46" width="214" height="52" rx="9" fill="#1C2330" stroke="#388BFD" stroke-width="1.2" />
+  <rect x="712" y="46" width="4" height="52" rx="2" fill="#388BFD" />
+  <text x="726" y="68" class="card-title">Settings &amp; Theme</text>
+  <text x="726" y="86" class="card-sub">Monet Colors · Filter Rules</text>
+  <line x1="480" y1="110" x2="480" y2="132" stroke="#58A6FF" stroke-width="1.8" marker-end="url(#arrow)" />
+  <rect x="20" y="136" width="920" height="74" rx="12" fill="#211938" stroke="#A371F7" stroke-width="1.3" />
+  <text x="36" y="155" class="badge-txt" fill="#D2A8FF">State Coordination &amp; System Integration</text>
+  <text x="480" y="178" text-anchor="middle" class="card-title">MainViewModel   ·   Static-Manifest UpdateChecker   ·   System File Picker (SAF)</text>
+  <text x="480" y="198" text-anchor="middle" class="card-sub">Foreground debounced sync · Live permission probe · In-app changelog &amp; installer</text>
+  <line x1="178" y1="210" x2="178" y2="234" stroke="#58A6FF" stroke-width="1.8" marker-end="url(#arrow)" />
+  <line x1="480" y1="210" x2="480" y2="234" stroke="#58A6FF" stroke-width="1.8" marker-end="url(#arrow)" />
+  <line x1="782" y1="210" x2="782" y2="234" stroke="#58A6FF" stroke-width="1.8" marker-end="url(#arrow)" />
+  <rect x="20" y="238" width="920" height="102" rx="12" fill="#161B22" stroke="#30363D" stroke-width="1" />
+  <text x="36" y="258" class="layer-lbl">Core Indexing &amp; Analysis Engines</text>
+  <rect x="34" y="268" width="288" height="60" rx="9" fill="#1C2330" stroke="#3FB950" stroke-width="1.2" />
+  <rect x="34" y="268" width="4" height="60" rx="2" fill="#3FB950" />
+  <text x="48" y="289" class="card-title">Two-Tier Streaming Indexer</text>
+  <text x="48" y="305" class="card-sub">TwoTierIndexManager + FilterEngine</text>
+  <text x="48" y="321" class="badge-txt" fill="#56D364">Stream-to-search · Incremental sync</text>
+  <rect x="336" y="268" width="288" height="60" rx="9" fill="#1C2330" stroke="#3FB950" stroke-width="1.2" />
+  <rect x="336" y="268" width="4" height="60" rx="2" fill="#3FB950" />
+  <text x="350" y="289" class="card-title">Storage &amp; App Attribution</text>
+  <text x="350" y="305" class="card-sub">WizTreeEngine + AppAttribution</text>
+  <text x="350" y="321" class="badge-txt" fill="#56D364">SQLite rollups · Residue detection</text>
+  <rect x="638" y="268" width="288" height="60" rx="9" fill="#1C2330" stroke="#3FB950" stroke-width="1.2" />
+  <rect x="638" y="268" width="4" height="60" rx="2" fill="#3FB950" />
+  <text x="652" y="289" class="card-title">Streaming Doc Extractors</text>
+  <text x="652" y="305" class="card-sub">ExtractorDispatcher</text>
+  <text x="652" y="321" class="badge-txt" fill="#56D364">TXT / MD / DOCX / PDF OOM-safe</text>
+  <line x1="200" y1="340" x2="200" y2="364" stroke="#58A6FF" stroke-width="1.8" marker-end="url(#arrow)" />
+  <line x1="440" y1="340" x2="360" y2="364" stroke="#58A6FF" stroke-width="1.8" marker-end="url(#arrow)" />
+  <line x1="520" y1="340" x2="600" y2="364" stroke="#58A6FF" stroke-width="1.8" marker-end="url(#arrow)" />
+  <line x1="760" y1="340" x2="760" y2="364" stroke="#58A6FF" stroke-width="1.8" marker-end="url(#arrow)" />
+  <rect x="20" y="368" width="920" height="108" rx="12" fill="#161B22" stroke="#30363D" stroke-width="1" />
+  <text x="36" y="388" class="layer-lbl">Storage &amp; Privileged Traversal Layer</text>
+  <rect x="34" y="398" width="438" height="66" rx="9" fill="#2B2110" stroke="#D29922" stroke-width="1.3" />
+  <text x="48" y="418" class="card-title">SQLite FTS5 Search Engine</text>
+  <text x="48" y="436" class="badge-txt" fill="#E3B341">CjkTokenizer N-gram · Strict AST Verification</text>
+  <text x="48" y="453" class="card-sub">WAL R/W Split · Zlib Body Store · Native GROUP BY</text>
+  <rect x="488" y="398" width="438" height="66" rx="9" fill="#2E1619" stroke="#F85149" stroke-width="1.3" />
+  <text x="502" y="418" class="card-title">Tiered File Providers &amp; Safety Guard</text>
+  <text x="502" y="436" class="badge-txt" fill="#FFA198">Normal / Shizuku / Root · Dual Deletion Guard</text>
+  <text x="502" y="453" class="card-sub">PrivilegedTreeWalker + PFD Pipe Binary Stream</text>
+</svg>

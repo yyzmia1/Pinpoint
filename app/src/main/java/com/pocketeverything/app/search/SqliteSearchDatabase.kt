@@ -2131,8 +2131,21 @@ class SqliteSearchDatabase(
         return out
     }
 
-    fun queryDirectFilesInDirForAnalyzer(dirPath: String, limit: Int = 500): List<AnalyzerFileRow> {
+    fun queryDirectFilesInDirForAnalyzer(
+        dirPath: String,
+        orderByClause: String = "size DESC, name COLLATE NOCASE ASC",
+        limit: Int = 500
+    ): List<AnalyzerFileRow> {
         val normalized = if (dirPath.length > 1) dirPath.trimEnd('/') else dirPath
+        val safeOrderBy = when (orderByClause) {
+            "size DESC, name COLLATE NOCASE ASC",
+            "size ASC, name COLLATE NOCASE ASC",
+            "mtime DESC, name COLLATE NOCASE ASC",
+            "mtime ASC, name COLLATE NOCASE ASC",
+            "name COLLATE NOCASE ASC",
+            "name COLLATE NOCASE DESC" -> orderByClause
+            else -> "size DESC, name COLLATE NOCASE ASC"
+        }
         val out = ArrayList<AnalyzerFileRow>(64)
         readLock.withLock {
             readConn.prepare(
@@ -2140,7 +2153,7 @@ class SqliteSearchDatabase(
                 SELECT path, parent_path, name, ext, size, mtime, access_mode
                 FROM files_meta
                 WHERE parent_path = ? AND is_dir = 0
-                ORDER BY size DESC, name COLLATE NOCASE ASC
+                ORDER BY $safeOrderBy
                 LIMIT ?
                 """.trimIndent()
             ).use { stmt ->

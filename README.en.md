@@ -23,17 +23,16 @@ Desktop *Everything*-style query syntax · Sub-10 ms CJK substring retrieval ove
 
 ## Highlights
 
-- **Zero-Network, Everything-Grade Local Search**: Indexes filenames, paths, and extracted document bodies fully offline with millisecond response times.
-- **Arbitrary Chinese Substring Precision**: Combines a custom CJK 1-gram/2-gram hybrid tokenizer (`CjkTokenizer`) with strict AST verification to guarantee 100% recall and zero false positives across single characters, cross-word fragments, phrases, wildcards (`*`, `?`), and regular expressions.
-- **Tiered Privilege Backends (`Normal` / `Shizuku` / `Root`)**:
+- **Offline, Everything-Grade Local Search**: Indexes filenames, paths, and document text locally with zero network dependency; supports boolean logic, wildcards, regex, field qualifiers, and size/date filters.
+- **Millisecond Arbitrary CJK Substring Precision**: Pairs a custom CJK N-gram tokenizer with strict AST verification for 100% recall and zero false positives across single characters, cross-word fragments, and exact phrases.
+- **Tiered Access (`Normal` / `Shizuku` / `Root`)**:
   - **Normal**: Standard storage traversal via `MANAGE_EXTERNAL_STORAGE`.
-  - **Shizuku**: Non-root `UserService` IPC penetration into restricted `/Android/data` and `/Android/obb` directories, paired with an interactive 3-step setup wizard.
-  - **Root**: Full-tree traversal from `/` via `libsu` `RootService`, using POSIX `Os.lstat` and `(st_dev, st_ino)` deduplication to skip symlinks, virtual filesystems, and duplicate bind mounts.
-- **Two-Tier Streaming Pipeline & Automatic Foreground Sync**: Separates instant Tier-1 path indexing (with unified directory-prefix exclusions, tiered Root `/data` scopes, and automatic debounced incremental refresh on foreground resume or system file picker open) from customizable-priority Tier-2 streaming extraction (`.txt`, `.md`, `.docx`, `.pdf`), scaling safely up to unlimited file sizes without OOM.
-- **Mobile WizTree Storage Analyzer & App Residue Cleaner (`StorageAnalyzerScreen`)**: Reuses existing `files_meta` via native SQLite C++ `GROUP BY` / `ORDER BY LIMIT` rollups (zero extra tables, zero duplicate disk scans, zero OOM even on million-file indexes) to power an interactive **Squarified Treemap**, **Directory Tree** (size/count dual sort + proportional `% of Parent` bars), **App Attribution & Uninstalled Residue** leaderboard, and **Extension / Top Large Files** view—paired with symlink-safe cross-permission disk deletion (`DeletionSafetyGuard` enforced on both UI and Binder) and 1-tap search index exclusion.
-- **Universal QuickLook Preview (`ReaderPreviewSheet`)**: Built-in text/code/log viewer (UTF-8/BOM/GB18030 detection), hardware `PdfRenderer` page viewer (including image-only scanned PDFs), zoomable image canvas, `ZIP`/`APK` archive inspector, media metadata viewer, directory drill-down, and hex head inspector.
-- **System File Picker Integration (`ACTION_GET_CONTENT` + SAF `DocumentsProvider`)**: Exposes both a SAF `Pinpoint` root inside Android `DocumentsUI`'s left drawer and a dedicated `Pinpoint 选择` picker (`FilePickerActivity`) with automatic incremental sync on open, MIME filtering, folder drill-down, multi-select, and FTS5/CJK search; restricted files bridge cleanly via `preview_bridge` while preserving filenames, toggleable in Settings.
-- **Adaptive Material You (Monet) UI & Rate-Limit-Free Static Update Manifest**: Supports Android 12+ wallpaper-driven Monet dynamic color alongside System / Light / Dark modes; update checks and the multi-release Markdown **Changelog** sheet fetch a static `releases.json` from the dedicated `release-manifest` branch (`raw.githubusercontent.com` → `jsDelivr` CDN → GitHub API fallback) to eliminate unauthenticated GitHub API `403` rate limits, complete with 24h silent throttling, strict SemVer comparison, and in-app `DownloadManager` installation with browser fallback.
+  - **Shizuku**: Non-root penetration into `/Android/data` and `/Android/obb` with an interactive 3-step setup wizard.
+  - **Root**: Full `/` traversal with scoped `/data` controls, symlink safety, and bind-mount deduplication.
+- **Streaming Indexing & Automatic Incremental Sync**: Search opens immediately while scanning and refreshes automatically on foreground resume or system picker launch; background extraction handles `.txt`, `.md`, `.docx`, and `.pdf` safely without OOM.
+- **Storage Analyzer & Residue Cleaner**: Zero-rescan SQLite rollups powering an interactive treemap, MT-style file tree (size / count / time / name sorting + proportion bars), app attribution with uninstalled residue detection, and cross-permission safe deletion.
+- **Built-in Preview & System File Picker**: Preview text/code, PDFs, zoomable images, archives, and media in-app, or search and attach indexed files directly from Android's system file picker.
+- **Material You UI & Rate-Limit-Free Updates**: Adaptive Monet dynamic colors with AMOLED pure-black dark mode, plus static-manifest multi-mirror update checks and changelog viewing that avoid GitHub API `403` limits.
 
 ---
 
@@ -65,33 +64,15 @@ Desktop *Everything*-style query syntax · Sub-10 ms CJK substring retrieval ove
 - **Storage Analyzer & Cleanup**: Tap the pie-chart icon in the home top bar (or **Locate in Storage Tree** from any file detail dialog) to inspect folder treemaps, uncover uninstalled app residue, and safely delete files or exclude noisy folders from search.
 - **System File Picker**: When attaching files from external apps, open the left navigation drawer of Android's system file picker and pick **Pinpoint** to search freshly synced files across directories.
 
-
-
 ---
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    UI["Compose UI: SearchScreen / StorageAnalyzerScreen / ReaderPreviewSheet / SettingsScreen"]
-    VM["MainViewModel & UpdateChecker (Static Manifest)"]
-    IDX["TwoTierIndexManager & FilterEngine"]
-    ANA["WizTreeEngine & AppStorageAttribution"]
-    DB["SqliteSearchDatabase (FTS5 + WAL R/W Split + SQLite GROUP BY)"]
-    PAR["ExtractorDispatcher: TxtMd / Docx / Pdf"]
-    PROV["FileSystemProvider & DeletionSafetyGuard: Normal / Shizuku / Root"]
-    WALK["PrivilegedTreeWalker + BinaryTreeStreamCodec (PFD Pipe)"]
-
-    UI --> VM
-    VM --> DB
-    VM --> IDX
-    VM --> ANA
-    ANA --> DB
-    IDX --> PAR
-    IDX --> DB
-    IDX --> PROV
-    PROV --> WALK
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/architecture-en-dark.svg" />
+  <source media="(prefers-color-scheme: light)" srcset="docs/media/architecture-en-light.svg" />
+  <img alt="Pinpoint System Architecture" src="docs/media/architecture-en-light.svg" width="100%" />
+</picture>
 
 ### Core Engineering Design
 

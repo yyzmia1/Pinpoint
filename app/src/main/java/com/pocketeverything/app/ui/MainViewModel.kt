@@ -973,7 +973,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (existingSnap == null || analyzerBuiltGeneration != currentGen) {
             refreshStorageAnalyzer(preferredDirPath = normalizedTarget)
         } else if (normalizedTarget != null && normalizedTarget in existingSnap.dirNodes) {
-            loadActiveAnalyzerDirChildren(existingSnap.dirNodes[normalizedTarget]!!, _analyzerState.value.treeSort)
+            loadActiveAnalyzerDirChildren(
+                existingSnap.dirNodes[normalizedTarget]!!,
+                _analyzerState.value.treeSort,
+                _analyzerState.value.foldersFirst
+            )
         }
     }
 
@@ -985,6 +989,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _analyzerState.update { it.copy(isLoading = true, errorMessage = null) }
             val genAtStart = indexProgress.value.syncGeneration
             val currentSort = _analyzerState.value.treeSort
+            val currentFoldersFirst = _analyzerState.value.foldersFirst
             val currentExt = _analyzerState.value.selectedExtFilter
             val result = withContext(Dispatchers.IO) {
                 runCatching {
@@ -1000,7 +1005,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         else -> snap.defaultRootPath
                     }
                     val dirChildren = resolvedDir?.let { snap.dirNodes[it] }?.let { node ->
-                        WizTreeEngine.loadChildrenForDirectory(db, node, currentSort)
+                        WizTreeEngine.loadChildrenForDirectory(db, node, currentSort, currentFoldersFirst)
                     }.orEmpty()
                     val largeFiles = if (currentExt == null) {
                         snap.topLargeFiles
@@ -1043,16 +1048,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun loadActiveAnalyzerDirChildren(dirNode: com.pocketeverything.app.analyzer.DirNodeStat, sort: AnalyzerTreeSort) {
+    private fun loadActiveAnalyzerDirChildren(
+        dirNode: com.pocketeverything.app.analyzer.DirNodeStat,
+        sort: AnalyzerTreeSort,
+        foldersFirst: Boolean
+    ) {
         analyzerChildrenJob?.cancel()
         // Immediately show subdirectories while direct files load (< 1ms) so navigation feels instantaneous.
-        _analyzerState.update { it.copy(activeDirChildren = dirNode.childrenSorted(sort)) }
+        _analyzerState.update { it.copy(activeDirChildren = dirNode.childrenSorted(sort, foldersFirst)) }
         analyzerChildrenJob = viewModelScope.launch {
             val merged = withContext(Dispatchers.IO) {
-                runCatching { WizTreeEngine.loadChildrenForDirectory(db, dirNode, sort) }
-                    .getOrElse { dirNode.childrenSorted(sort) }
+                runCatching { WizTreeEngine.loadChildrenForDirectory(db, dirNode, sort, foldersFirst) }
+                    .getOrElse { dirNode.childrenSorted(sort, foldersFirst) }
             }
-            if (_analyzerState.value.currentDirPath == dirNode.path) {
+            if (_analyzerState.value.currentDirPath == dirNode.path &&
+                _analyzerState.value.treeSort == sort &&
+                _analyzerState.value.foldersFirst == foldersFirst
+            ) {
                 _analyzerState.update { it.copy(activeDirChildren = merged) }
             }
         }
@@ -1067,7 +1079,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val normalized = WizTreeEngine.normalizeDirPath(path)
         val node = snap.dirNodes[normalized] ?: return
         _analyzerState.update { it.copy(currentDirPath = normalized) }
-        loadActiveAnalyzerDirChildren(node, _analyzerState.value.treeSort)
+        loadActiveAnalyzerDirChildren(node, _analyzerState.value.treeSort, _analyzerState.value.foldersFirst)
     }
 
     fun navigateAnalyzerUp(): Boolean {
@@ -1078,19 +1090,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val parent = active.parentPath
         val parentNode = snap.dirNodes[parent] ?: return false
         _analyzerState.update { it.copy(currentDirPath = parent) }
-        loadActiveAnalyzerDirChildren(parentNode, cur.treeSort)
+        loadActiveAnalyzerDirChildren(parentNode, cur.treeSort, cur.foldersFirst)
         return true
     }
 
-    fun toggleAnalyzerTreeSort() {
+    fun selectAnalyzerTreeSort(sort: AnalyzerTreeSort) {
         val cur = _analyzerState.value
-        val next = if (cur.treeSort == AnalyzerTreeSort.SIZE_DESC) {
-            AnalyzerTreeSort.COUNT_DESC
-        } else {
-            AnalyzerTreeSort.SIZE_DESC
+        val activeNode = cur.activeDirNode
+        val resorted = com.pocketeverything.app.analyzer.sortTreeChildren(
+            cur.effectiveDirChildren,
+            sort,
+            cur.foldersFirst
+        )
+        _analyzerState.update { it.copy(treeSort = sort, activeDirChildren = resorted) }
+        if (activeNode != null && activeNode.directFileCount > WizTreeEngine.DEFAULT_DIRECT_FILES_LIMIT) {
+            loadActiveAnalyzerDirChildren(activeNode, sort, cur.foldersFirst)
         }
-        val resorted = com.pocketeverything.app.analyzer.sortTreeChildren(cur.effectiveDirChildren, next)
-        _analyzerState.update { it.copy(treeSort = next, activeDirChildren = resorted) }
+    }
+
+    fun toggleAnalyzerFoldersFirst() {
+        val cur = _analyzerState.value
+        val next = !cur.foldersFirst
+        val resorted = com.pocketeverything.app.analyzer.sortTreeChildren(
+            cur.effectiveDirChildren,
+            cur.treeSort,
+            next
+        )
+        _analyzerState.update { it.copy(foldersFirst = next, activeDirChildren = resorted) }
     }
 
     fun selectAnalyzerExtFilter(ext: String?) {

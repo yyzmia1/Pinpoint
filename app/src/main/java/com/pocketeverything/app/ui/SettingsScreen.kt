@@ -278,11 +278,11 @@ fun SettingsScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable(onClick = onOpenChangelog)
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                            .padding(horizontal = 16.dp, vertical = 9.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "查看版本更新日志 (Changelog)",
+                            text = "版本更新日志",
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.weight(1f)
@@ -299,18 +299,65 @@ fun SettingsScreen(
                         thickness = 0.5.dp,
                         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)
                     )
-                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
-                        ToggleRow(
-                            title = "接收正式版更新",
-                            checked = settings.receiveStableUpdates,
-                            onCheckedChange = onSetReceiveStableUpdates
+                    val channelIndex = when {
+                        settings.receiveBetaUpdates -> 2
+                        settings.receiveStableUpdates -> 1
+                        else -> 0
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "更新通道",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f)
                         )
-                        SettingsDivider()
-                        ToggleRow(
-                            title = "接收测试版更新 (Pre-release)",
-                            checked = settings.receiveBetaUpdates,
-                            onCheckedChange = onSetReceiveBetaUpdates
-                        )
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(2.dp),
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                listOf("关闭", "正式版", "含测试版").forEachIndexed { idx, label ->
+                                    val selected = channelIndex == idx
+                                    Surface(
+                                        onClick = {
+                                            haptics.tick()
+                                            when (idx) {
+                                                0 -> {
+                                                    onSetReceiveStableUpdates(false)
+                                                    onSetReceiveBetaUpdates(false)
+                                                }
+                                                1 -> {
+                                                    onSetReceiveStableUpdates(true)
+                                                    onSetReceiveBetaUpdates(false)
+                                                }
+                                                2 -> {
+                                                    onSetReceiveStableUpdates(true)
+                                                    onSetReceiveBetaUpdates(true)
+                                                }
+                                            }
+                                        },
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                            color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -631,6 +678,7 @@ fun SettingsScreen(
                 SettingsDivider()
                 ToggleRow(
                     title = "系统文件选择器入口",
+                    subtitle = "在微信、浏览器等外部应用选文时提供 Pinpoint 入口",
                     checked = settings.systemFilePickerEnabled,
                     onCheckedChange = onSetSystemFilePickerEnabled
                 )
@@ -694,6 +742,18 @@ fun SettingsScreen(
                             )
                         }
                     }
+                    val rootScopeHint = when (currentRootScope) {
+                        RootDataScope.EXCLUDE_ALL -> "跳过整个 /data 分区，扫描最快且减少系统干扰"
+                        RootDataScope.EXCLUDE_PRIVATE -> "排除 /data/data 等应用私有目录，保留其余系统数据"
+                        RootDataScope.INCLUDE_ALL -> "包含全部 /data 目录（含应用私有数据区）"
+                        null -> "已通过下方排除列表自定义 /data 扫描范围"
+                    }
+                    Text(
+                        text = rootScopeHint,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
                     SettingsDivider()
                 }
 
@@ -827,6 +887,15 @@ fun SettingsScreen(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     FilterChipPill(
+                        label = "指定目录",
+                        selected = isCustomScope,
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            haptics.tick()
+                            dirPickTarget = DirPickTarget.TIER2_ALLOW
+                        }
+                    )
+                    FilterChipPill(
                         label = "用户存储",
                         selected = isStorageScope,
                         modifier = Modifier.weight(1f),
@@ -844,16 +913,18 @@ fun SettingsScreen(
                             onUpdateFilterConfig(cfg.copy(tier2AllowedPrefixes = emptyList()))
                         }
                     )
-                    FilterChipPill(
-                        label = "指定目录",
-                        selected = isCustomScope,
-                        modifier = Modifier.weight(1f),
-                        onClick = {
-                            haptics.tick()
-                            dirPickTarget = DirPickTarget.TIER2_ALLOW
-                        }
-                    )
                 }
+                val tier2ScopeHint = when {
+                    isCustomScope -> "仅提取下方已添加目录内的文档正文"
+                    isStorageScope -> "仅提取内部存储与外置卡中的文档正文（/storage/...），跳过系统区"
+                    else -> "不限目录，所有已索引分区内的支持文档均提取正文"
+                }
+                Text(
+                    text = tier2ScopeHint,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
 
                 if (isCustomScope) {
                     Spacer(Modifier.height(8.dp))

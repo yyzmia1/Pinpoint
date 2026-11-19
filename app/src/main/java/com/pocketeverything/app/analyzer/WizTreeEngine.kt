@@ -7,9 +7,59 @@ import java.util.PriorityQueue
 import kotlin.math.max
 import kotlin.math.min
 
-enum class AnalyzerTreeSort {
-    SIZE_DESC,
-    COUNT_DESC
+enum class AnalyzerTreeSortField(val label: String, val defaultDescending: Boolean) {
+    SIZE("体积", true),
+    COUNT("文件数", true),
+    TIME("时间", true),
+    NAME("名称", false)
+}
+
+enum class AnalyzerTreeSort(
+    val sortField: AnalyzerTreeSortField,
+    val descending: Boolean
+) {
+    SIZE_DESC(AnalyzerTreeSortField.SIZE, true),
+    SIZE_ASC(AnalyzerTreeSortField.SIZE, false),
+    COUNT_DESC(AnalyzerTreeSortField.COUNT, true),
+    COUNT_ASC(AnalyzerTreeSortField.COUNT, false),
+    TIME_DESC(AnalyzerTreeSortField.TIME, true),
+    TIME_ASC(AnalyzerTreeSortField.TIME, false),
+    NAME_ASC(AnalyzerTreeSortField.NAME, false),
+    NAME_DESC(AnalyzerTreeSortField.NAME, true);
+
+    val label: String get() = sortField.label
+    val directionArrow: String get() = if (descending) "↓" else "↑"
+    val shortLabel: String get() = "${sortField.label}$directionArrow"
+
+    fun toggledDirection(): AnalyzerTreeSort = when (this) {
+        SIZE_DESC -> SIZE_ASC
+        SIZE_ASC -> SIZE_DESC
+        COUNT_DESC -> COUNT_ASC
+        COUNT_ASC -> COUNT_DESC
+        TIME_DESC -> TIME_ASC
+        TIME_ASC -> TIME_DESC
+        NAME_ASC -> NAME_DESC
+        NAME_DESC -> NAME_ASC
+    }
+
+    internal fun toSqlOrderBy(): String = when (this) {
+        SIZE_DESC, COUNT_DESC -> "size DESC, name COLLATE NOCASE ASC"
+        SIZE_ASC, COUNT_ASC -> "size ASC, name COLLATE NOCASE ASC"
+        TIME_DESC -> "mtime DESC, name COLLATE NOCASE ASC"
+        TIME_ASC -> "mtime ASC, name COLLATE NOCASE ASC"
+        NAME_ASC -> "name COLLATE NOCASE ASC"
+        NAME_DESC -> "name COLLATE NOCASE DESC"
+    }
+
+    companion object {
+        fun forField(field: AnalyzerTreeSortField, descending: Boolean = field.defaultDescending): AnalyzerTreeSort =
+            when (field) {
+                AnalyzerTreeSortField.SIZE -> if (descending) SIZE_DESC else SIZE_ASC
+                AnalyzerTreeSortField.COUNT -> if (descending) COUNT_DESC else COUNT_ASC
+                AnalyzerTreeSortField.TIME -> if (descending) TIME_DESC else TIME_ASC
+                AnalyzerTreeSortField.NAME -> if (descending) NAME_DESC else NAME_ASC
+            }
+    }
 }
 
 data class AppAttributionBadge(
@@ -46,20 +96,43 @@ data class DirNodeStat(
     val appBadge: AppAttributionBadge? = null,
     val childrenBySize: List<TreeChildEntry>
 ) {
-    fun childrenSorted(sort: AnalyzerTreeSort): List<TreeChildEntry> = sortTreeChildren(childrenBySize, sort)
+    fun childrenSorted(sort: AnalyzerTreeSort, foldersFirst: Boolean = false): List<TreeChildEntry> =
+        sortTreeChildren(childrenBySize, sort, foldersFirst)
 }
 
-fun sortTreeChildren(children: List<TreeChildEntry>, sort: AnalyzerTreeSort): List<TreeChildEntry> = when (sort) {
-    AnalyzerTreeSort.SIZE_DESC -> children.sortedWith(
-        compareByDescending<TreeChildEntry> { it.totalBytes }
+fun sortTreeChildren(
+    children: List<TreeChildEntry>,
+    sort: AnalyzerTreeSort,
+    foldersFirst: Boolean = false
+): List<TreeChildEntry> {
+    val valueComparator: Comparator<TreeChildEntry> = when (sort) {
+        AnalyzerTreeSort.SIZE_DESC -> compareByDescending<TreeChildEntry> { it.totalBytes }
             .thenByDescending { it.isDir }
             .thenBy { it.name.lowercase(Locale.ROOT) }
-    )
-    AnalyzerTreeSort.COUNT_DESC -> children.sortedWith(
-        compareByDescending<TreeChildEntry> { it.fileCount + it.dirCount }
+        AnalyzerTreeSort.SIZE_ASC -> compareBy<TreeChildEntry> { it.totalBytes }
+            .thenByDescending { it.isDir }
+            .thenBy { it.name.lowercase(Locale.ROOT) }
+        AnalyzerTreeSort.COUNT_DESC -> compareByDescending<TreeChildEntry> { it.fileCount + it.dirCount }
             .thenByDescending { it.totalBytes }
             .thenBy { it.name.lowercase(Locale.ROOT) }
-    )
+        AnalyzerTreeSort.COUNT_ASC -> compareBy<TreeChildEntry> { it.fileCount + it.dirCount }
+            .thenBy { it.totalBytes }
+            .thenBy { it.name.lowercase(Locale.ROOT) }
+        AnalyzerTreeSort.TIME_DESC -> compareByDescending<TreeChildEntry> { it.mtime }
+            .thenBy { it.name.lowercase(Locale.ROOT) }
+        AnalyzerTreeSort.TIME_ASC -> compareBy<TreeChildEntry> { it.mtime }
+            .thenBy { it.name.lowercase(Locale.ROOT) }
+        AnalyzerTreeSort.NAME_ASC -> compareBy<TreeChildEntry> { it.name.lowercase(Locale.ROOT) }
+            .thenBy { it.name }
+        AnalyzerTreeSort.NAME_DESC -> compareByDescending<TreeChildEntry> { it.name.lowercase(Locale.ROOT) }
+            .thenByDescending { it.name }
+    }
+    val finalComparator = if (foldersFirst) {
+        compareByDescending<TreeChildEntry> { it.isDir }.then(valueComparator)
+    } else {
+        valueComparator
+    }
+    return children.sortedWith(finalComparator)
 }
 
 data class AppLocationStat(
@@ -460,11 +533,16 @@ object WizTreeEngine {
         db: SqliteSearchDatabase,
         dirNode: DirNodeStat,
         sort: AnalyzerTreeSort,
+        foldersFirst: Boolean = false,
         limit: Int = DEFAULT_DIRECT_FILES_LIMIT
     ): List<TreeChildEntry> {
         val parentBytes = dirNode.totalBytes.coerceAtLeast(1L).toFloat()
         val directFiles = if (dirNode.directFileCount > 0L) {
-            db.queryDirectFilesInDirForAnalyzer(dirNode.path, limit = limit).map { row ->
+            db.queryDirectFilesInDirForAnalyzer(
+                dirPath = dirNode.path,
+                orderByClause = sort.toSqlOrderBy(),
+                limit = limit
+            ).map { row ->
                 val safeSize = row.size.coerceAtLeast(0L)
                 TreeChildEntry(
                     path = row.path,
@@ -486,7 +564,7 @@ object WizTreeEngine {
         val merged = ArrayList<TreeChildEntry>(dirNode.childrenBySize.size + directFiles.size)
         merged.addAll(dirNode.childrenBySize)
         merged.addAll(directFiles)
-        return sortTreeChildren(merged, sort)
+        return sortTreeChildren(merged, sort, foldersFirst)
     }
 
     /**

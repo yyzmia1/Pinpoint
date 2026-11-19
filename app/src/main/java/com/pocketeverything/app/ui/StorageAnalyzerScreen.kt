@@ -39,9 +39,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -59,6 +63,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -103,6 +109,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketeverything.app.analyzer.AnalyzerTreeSort
+import com.pocketeverything.app.analyzer.AnalyzerTreeSortField
 import com.pocketeverything.app.analyzer.AppAttributionBadge
 import com.pocketeverything.app.analyzer.AppLocationStat
 import com.pocketeverything.app.analyzer.AppPathCategory
@@ -139,6 +146,7 @@ data class StorageAnalyzerUiState(
     val currentDirPath: String? = null,
     val activeDirChildren: List<TreeChildEntry> = emptyList(),
     val treeSort: AnalyzerTreeSort = AnalyzerTreeSort.SIZE_DESC,
+    val foldersFirst: Boolean = true,
     val selectedExtFilter: String? = null,
     val activeLargeFiles: List<LargeFileEntry> = emptyList(),
     val onlyUninstalledApps: Boolean = false,
@@ -155,7 +163,7 @@ data class StorageAnalyzerUiState(
         }
 
     val effectiveDirChildren: List<TreeChildEntry>
-        get() = if (activeDirChildren.isNotEmpty()) activeDirChildren else activeDirNode?.childrenSorted(treeSort).orEmpty()
+        get() = if (activeDirChildren.isNotEmpty()) activeDirChildren else activeDirNode?.childrenSorted(treeSort, foldersFirst).orEmpty()
 
     val effectiveLargeFiles: List<LargeFileEntry>
         get() = if (activeLargeFiles.isNotEmpty() || selectedExtFilter != null) {
@@ -175,11 +183,13 @@ data class StorageAnalyzerUiState(
 
 @Stable
 interface StorageAnalyzerActions {
-    fun onBack()
+    fun onExit()
+    fun onNavigateUp()
     fun onRefresh()
     fun onSelectTab(tab: AnalyzerTab)
     fun onNavigateDir(path: String)
-    fun onToggleTreeSort()
+    fun onSelectTreeSort(sort: AnalyzerTreeSort)
+    fun onToggleFoldersFirst()
     fun onSelectExtFilter(ext: String?)
     fun onToggleUninstalledOnly(enabled: Boolean)
     fun onToggleTreemap()
@@ -222,212 +232,227 @@ fun StorageAnalyzerScreen(
         buildTreemapInputs(snapshot, state.selectedTab, activeChildren, state.onlyUninstalledApps)
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .statusBarsPadding()
-            .navigationBarsPadding()
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground
     ) {
-        AnalyzerTopBar(
-            snapshot = snapshot,
-            showTreemap = state.showTreemap,
-            isLoading = state.isLoading,
-            onBack = {
-                haptics.tick()
-                actions.onBack()
-            },
-            onToggleTreemap = {
-                haptics.tick()
-                actions.onToggleTreemap()
-            },
-            onRefresh = {
-                haptics.click()
-                actions.onRefresh()
-            }
-        )
-
-        if (state.isLoading || state.deletingPath != null) {
-            LinearProgressIndicator(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(2.dp)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+        ) {
+            AnalyzerTopBar(
+                snapshot = snapshot,
+                showTreemap = state.showTreemap,
+                isLoading = state.isLoading,
+                onExit = {
+                    haptics.tick()
+                    actions.onExit()
+                },
+                onToggleTreemap = {
+                    haptics.tick()
+                    actions.onToggleTreemap()
+                },
+                onRefresh = {
+                    haptics.click()
+                    actions.onRefresh()
+                }
             )
-        }
 
-        AnalyzerTabStrip(
-            selected = state.selectedTab,
-            uninstalledCount = snapshot?.uninstalledAppCount ?: 0,
-            onSelect = {
-                haptics.tick()
-                actions.onSelectTab(it)
-            },
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-        )
-
-        if (snapshot == null && state.isLoading) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(modifier = Modifier.size(30.dp), strokeWidth = 2.6.dp)
-            }
-        } else if (snapshot == null || (snapshot.totalFiles == 0L && snapshot.totalDirs == 0L)) {
-            AnalyzerEmptyState(
-                errorMessage = state.errorMessage,
-                onRefresh = actions::onRefresh
-            )
-        } else {
-            AnimatedVisibility(
-                visible = state.showTreemap && treemapInputs.isNotEmpty(),
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut()
-            ) {
-                SquarifiedTreemapCard(
-                    inputs = treemapInputs,
-                    dark = dark,
-                    onTileClick = { tile ->
-                        if (tile.isOtherBucket) return@SquarifiedTreemapCard
-                        haptics.tick()
-                        when (state.selectedTab) {
-                            AnalyzerTab.TREE -> {
-                                if (tile.isDir) actions.onNavigateDir(tile.id)
-                                else actions.onOpenFile(tile.id)
-                            }
-                            AnalyzerTab.APPS -> {
-                                expandedAppPkg = if (expandedAppPkg == tile.id) null else tile.id
-                            }
-                            AnalyzerTab.FILES -> {
-                                val next = if (state.selectedExtFilter == tile.id) null else tile.id
-                                actions.onSelectExtFilter(next)
-                            }
-                        }
-                    },
-                    onTileLongPress = { tile ->
-                        if (tile.isOtherBucket) return@SquarifiedTreemapCard
-                        haptics.click()
-                        if (state.selectedTab == AnalyzerTab.TREE) {
-                            val child = activeChildren.firstOrNull { it.path == tile.id }
-                            if (child != null) {
-                                sheetTarget = AnalyzerActionTarget(
-                                    path = child.path,
-                                    displayName = child.name,
-                                    totalBytes = child.totalBytes,
-                                    fileCount = child.fileCount,
-                                    dirCount = child.dirCount,
-                                    isDir = child.isDir,
-                                    accessMode = child.accessMode,
-                                    showLocateInTree = false
-                                )
-                            }
-                        }
-                    },
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)
+            if (state.isLoading || state.deletingPath != null) {
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.dp)
                 )
             }
 
-            when (state.selectedTab) {
-                AnalyzerTab.TREE -> {
-                    TreeTabBody(
-                        snapshot = snapshot,
-                        activeDir = activeDir,
-                        children = activeChildren,
-                        sort = state.treeSort,
-                        appIcons = state.appIcons,
-                        useMonospaceFont = useMonospaceFont,
-                        onSelectRoot = {
-                            haptics.tick()
-                            actions.onNavigateDir(it)
-                        },
-                        onBreadcrumbClick = {
-                            haptics.tick()
-                            actions.onNavigateDir(it)
-                        },
-                        onToggleSort = {
-                            haptics.tick()
-                            actions.onToggleTreeSort()
-                        },
-                        onRowClick = { item ->
-                            haptics.tick()
-                            if (item.isDir) actions.onNavigateDir(item.path)
-                            else actions.onOpenFile(item.path)
-                        },
-                        onRowMore = { item ->
-                            haptics.click()
-                            sheetTarget = AnalyzerActionTarget(
-                                path = item.path,
-                                displayName = item.name,
-                                totalBytes = item.totalBytes,
-                                fileCount = item.fileCount,
-                                dirCount = item.dirCount,
-                                isDir = item.isDir,
-                                accessMode = item.accessMode,
-                                showLocateInTree = false
-                            )
-                        }
-                    )
+            AnalyzerTabStrip(
+                selected = state.selectedTab,
+                uninstalledCount = snapshot?.uninstalledAppCount ?: 0,
+                onSelect = {
+                    haptics.tick()
+                    actions.onSelectTab(it)
+                },
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+            )
+
+            if (snapshot == null && state.isLoading) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(modifier = Modifier.size(30.dp), strokeWidth = 2.6.dp)
                 }
-                AnalyzerTab.APPS -> {
-                    AppsTabBody(
-                        snapshot = snapshot,
-                        onlyUninstalled = state.onlyUninstalledApps,
-                        expandedPkg = expandedAppPkg,
-                        appIcons = state.appIcons,
-                        useMonospaceFont = useMonospaceFont,
-                        onToggleUninstalled = {
-                            haptics.tick()
-                            actions.onToggleUninstalledOnly(it)
-                        },
-                        onToggleExpand = { pkg ->
-                            haptics.tick()
-                            expandedAppPkg = if (expandedAppPkg == pkg) null else pkg
-                        },
-                        onLocateLocation = { loc ->
-                            haptics.tick()
-                            actions.onSelectTab(AnalyzerTab.TREE)
-                            actions.onNavigateDir(loc.path)
-                        },
-                        onLocationActions = { app, loc ->
-                            haptics.click()
-                            sheetTarget = AnalyzerActionTarget(
-                                path = loc.path,
-                                displayName = "${app.displayLabel} · ${loc.category.label}",
-                                totalBytes = loc.totalBytes,
-                                fileCount = loc.fileCount,
-                                dirCount = 0L,
-                                isDir = true,
-                                accessMode = loc.accessMode,
-                                showLocateInTree = true
-                            )
-                        }
-                    )
-                }
-                AnalyzerTab.FILES -> {
-                    FilesTabBody(
-                        snapshot = snapshot,
-                        files = activeLargeFiles,
-                        selectedExt = state.selectedExtFilter,
-                        useMonospaceFont = useMonospaceFont,
+            } else if (snapshot == null || (snapshot.totalFiles == 0L && snapshot.totalDirs == 0L)) {
+                AnalyzerEmptyState(
+                    errorMessage = state.errorMessage,
+                    onRefresh = actions::onRefresh
+                )
+            } else {
+                AnimatedVisibility(
+                    visible = state.showTreemap && treemapInputs.isNotEmpty(),
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut()
+                ) {
+                    SquarifiedTreemapCard(
+                        inputs = treemapInputs,
                         dark = dark,
-                        onSelectExt = { ext ->
+                        onTileClick = { tile ->
+                            if (tile.isOtherBucket) return@SquarifiedTreemapCard
                             haptics.tick()
-                            actions.onSelectExtFilter(ext)
+                            when (state.selectedTab) {
+                                AnalyzerTab.TREE -> {
+                                    if (tile.isDir) actions.onNavigateDir(tile.id)
+                                    else actions.onOpenFile(tile.id)
+                                }
+                                AnalyzerTab.APPS -> {
+                                    expandedAppPkg = if (expandedAppPkg == tile.id) null else tile.id
+                                }
+                                AnalyzerTab.FILES -> {
+                                    val next = if (state.selectedExtFilter == tile.id) null else tile.id
+                                    actions.onSelectExtFilter(next)
+                                }
+                            }
                         },
-                        onFileClick = { f ->
-                            haptics.tick()
-                            actions.onOpenFile(f.path)
-                        },
-                        onFileMore = { f ->
+                        onTileLongPress = { tile ->
+                            if (tile.isOtherBucket) return@SquarifiedTreemapCard
                             haptics.click()
-                            sheetTarget = AnalyzerActionTarget(
-                                path = f.path,
-                                displayName = f.name,
-                                totalBytes = f.size,
-                                fileCount = 1L,
-                                dirCount = 0L,
-                                isDir = false,
-                                accessMode = f.accessMode,
-                                showLocateInTree = true
-                            )
-                        }
+                            if (state.selectedTab == AnalyzerTab.TREE) {
+                                val child = activeChildren.firstOrNull { it.path == tile.id }
+                                if (child != null) {
+                                    sheetTarget = AnalyzerActionTarget(
+                                        path = child.path,
+                                        displayName = child.name,
+                                        totalBytes = child.totalBytes,
+                                        fileCount = child.fileCount,
+                                        dirCount = child.dirCount,
+                                        isDir = child.isDir,
+                                        accessMode = child.accessMode,
+                                        showLocateInTree = false
+                                    )
+                                }
+                            }
+                        },
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)
                     )
+                }
+
+                when (state.selectedTab) {
+                    AnalyzerTab.TREE -> {
+                        TreeTabBody(
+                            snapshot = snapshot,
+                            activeDir = activeDir,
+                            canNavigateUp = state.canNavigateUpInTree,
+                            children = activeChildren,
+                            sort = state.treeSort,
+                            foldersFirst = state.foldersFirst,
+                            appIcons = state.appIcons,
+                            useMonospaceFont = useMonospaceFont,
+                            onNavigateUp = {
+                                haptics.tick()
+                                actions.onNavigateUp()
+                            },
+                            onSelectRoot = {
+                                haptics.tick()
+                                actions.onNavigateDir(it)
+                            },
+                            onBreadcrumbClick = {
+                                haptics.tick()
+                                actions.onNavigateDir(it)
+                            },
+                            onSelectSort = { nextSort ->
+                                haptics.tick()
+                                actions.onSelectTreeSort(nextSort)
+                            },
+                            onToggleFoldersFirst = {
+                                haptics.tick()
+                                actions.onToggleFoldersFirst()
+                            },
+                            onRowClick = { item ->
+                                haptics.tick()
+                                if (item.isDir) actions.onNavigateDir(item.path)
+                                else actions.onOpenFile(item.path)
+                            },
+                            onRowMore = { item ->
+                                haptics.click()
+                                sheetTarget = AnalyzerActionTarget(
+                                    path = item.path,
+                                    displayName = item.name,
+                                    totalBytes = item.totalBytes,
+                                    fileCount = item.fileCount,
+                                    dirCount = item.dirCount,
+                                    isDir = item.isDir,
+                                    accessMode = item.accessMode,
+                                    showLocateInTree = false
+                                )
+                            }
+                        )
+                    }
+                    AnalyzerTab.APPS -> {
+                        AppsTabBody(
+                            snapshot = snapshot,
+                            onlyUninstalled = state.onlyUninstalledApps,
+                            expandedPkg = expandedAppPkg,
+                            appIcons = state.appIcons,
+                            useMonospaceFont = useMonospaceFont,
+                            onToggleUninstalled = {
+                                haptics.tick()
+                                actions.onToggleUninstalledOnly(it)
+                            },
+                            onToggleExpand = { pkg ->
+                                haptics.tick()
+                                expandedAppPkg = if (expandedAppPkg == pkg) null else pkg
+                            },
+                            onLocateLocation = { loc ->
+                                haptics.tick()
+                                actions.onSelectTab(AnalyzerTab.TREE)
+                                actions.onNavigateDir(loc.path)
+                            },
+                            onLocationActions = { app, loc ->
+                                haptics.click()
+                                sheetTarget = AnalyzerActionTarget(
+                                    path = loc.path,
+                                    displayName = "${app.displayLabel} · ${loc.category.label}",
+                                    totalBytes = loc.totalBytes,
+                                    fileCount = loc.fileCount,
+                                    dirCount = 0L,
+                                    isDir = true,
+                                    accessMode = loc.accessMode,
+                                    showLocateInTree = true
+                                )
+                            }
+                        )
+                    }
+                    AnalyzerTab.FILES -> {
+                        FilesTabBody(
+                            snapshot = snapshot,
+                            files = activeLargeFiles,
+                            selectedExt = state.selectedExtFilter,
+                            useMonospaceFont = useMonospaceFont,
+                            dark = dark,
+                            onSelectExt = { ext ->
+                                haptics.tick()
+                                actions.onSelectExtFilter(ext)
+                            },
+                            onFileClick = { f ->
+                                haptics.tick()
+                                actions.onOpenFile(f.path)
+                            },
+                            onFileMore = { f ->
+                                haptics.click()
+                                sheetTarget = AnalyzerActionTarget(
+                                    path = f.path,
+                                    displayName = f.name,
+                                    totalBytes = f.size,
+                                    fileCount = 1L,
+                                    dirCount = 0L,
+                                    isDir = false,
+                                    accessMode = f.accessMode,
+                                    showLocateInTree = true
+                                )
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -496,7 +521,7 @@ private fun AnalyzerTopBar(
     snapshot: WizTreeSnapshot?,
     showTreemap: Boolean,
     isLoading: Boolean,
-    onBack: () -> Unit,
+    onExit: () -> Unit,
     onToggleTreemap: () -> Unit,
     onRefresh: () -> Unit
 ) {
@@ -506,10 +531,11 @@ private fun AnalyzerTopBar(
             .padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        IconButton(onClick = onBack, modifier = Modifier.size(44.dp)) {
+        IconButton(onClick = onExit, modifier = Modifier.size(44.dp)) {
             Icon(
                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = "返回"
+                contentDescription = "退出空间透视",
+                tint = MaterialTheme.colorScheme.onSurface
             )
         }
         Column(modifier = Modifier.weight(1f)) {
@@ -517,6 +543,7 @@ private fun AnalyzerTopBar(
                 text = "空间透视",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1
             )
             if (snapshot != null && (snapshot.totalFiles > 0L || snapshot.totalDirs > 0L)) {
@@ -778,24 +805,33 @@ private fun SquarifiedTreemapCard(
 private fun TreeTabBody(
     snapshot: WizTreeSnapshot,
     activeDir: DirNodeStat?,
+    canNavigateUp: Boolean,
     children: List<TreeChildEntry>,
     sort: AnalyzerTreeSort,
+    foldersFirst: Boolean,
     appIcons: Map<String, ImageBitmap>,
     useMonospaceFont: Boolean,
+    onNavigateUp: () -> Unit,
     onSelectRoot: (String) -> Unit,
     onBreadcrumbClick: (String) -> Unit,
-    onToggleSort: () -> Unit,
+    onSelectSort: (AnalyzerTreeSort) -> Unit,
+    onToggleFoldersFirst: () -> Unit,
     onRowClick: (TreeChildEntry) -> Unit,
     onRowMore: (TreeChildEntry) -> Unit
 ) {
     if (activeDir == null) return
     val listState = rememberLazyListState()
-    LaunchedEffect(activeDir.path, sort) {
+    var sortMenuExpanded by remember { mutableStateOf(false) }
+
+    LaunchedEffect(activeDir.path, sort, foldersFirst) {
         listState.scrollToItem(0)
     }
 
     val breadcrumbs = remember(activeDir.path, snapshot.rootPaths) {
         buildBreadcrumbs(activeDir.path, snapshot.rootPaths)
+    }
+    val parentLabel = remember(breadcrumbs) {
+        if (breadcrumbs.size >= 2) breadcrumbs[breadcrumbs.lastIndex - 1].second else ""
     }
     val crumbScroll = rememberScrollState()
     LaunchedEffect(activeDir.path) {
@@ -840,13 +876,41 @@ private fun TreeTabBody(
         }
     }
 
-    // Breadcrumb trail + Sort toggle chip
+    // MT-Manager-style compact path bar + dedicated up-one-level button + 4-dimension sort menu
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 14.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
+            .padding(start = 10.dp, end = 10.dp, top = 3.dp, bottom = 3.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        if (canNavigateUp) {
+            Surface(
+                onClick = onNavigateUp,
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.outlineVariant),
+                modifier = Modifier.padding(end = 6.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Reply,
+                        contentDescription = "返回上一级",
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.width(3.dp))
+                    Text(
+                        text = "上级",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+        }
         Row(
             modifier = Modifier
                 .weight(1f)
@@ -877,46 +941,147 @@ private fun TreeTabBody(
             }
         }
         Spacer(Modifier.width(6.dp))
-        Surface(
-            onClick = onToggleSort,
-            shape = RoundedCornerShape(8.dp),
-            color = MaterialTheme.colorScheme.surfaceContainer,
-            border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.outlineVariant)
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
-                verticalAlignment = Alignment.CenterVertically
+        Box {
+            Surface(
+                onClick = { sortMenuExpanded = true },
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.outlineVariant)
             ) {
-                Icon(
-                    imageVector = Icons.Default.SwapVert,
-                    contentDescription = null,
-                    modifier = Modifier.size(14.dp),
-                    tint = MaterialTheme.colorScheme.primary
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.SwapVert,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.width(3.dp))
+                    Text(
+                        text = sort.shortLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+            DropdownMenu(
+                expanded = sortMenuExpanded,
+                onDismissRequest = { sortMenuExpanded = false }
+            ) {
+                AnalyzerTreeSortField.entries.forEach { field ->
+                    val isSelected = sort.sortField == field
+                    val nextSort = if (isSelected) sort.toggledDirection() else AnalyzerTreeSort.forField(field)
+                    DropdownMenuItem(
+                        text = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "按${field.label}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                    color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = if (sort.descending) Icons.Default.ArrowDownward else Icons.Default.ArrowUpward,
+                                        contentDescription = if (sort.descending) "降序" else "升序",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        },
+                        onClick = {
+                            sortMenuExpanded = false
+                            onSelectSort(nextSort)
+                        }
+                    )
+                }
+                HorizontalDivider(
+                    thickness = 0.5.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)
                 )
-                Spacer(Modifier.width(3.dp))
-                Text(
-                    text = if (sort == AnalyzerTreeSort.SIZE_DESC) "体积" else "文件数",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Medium
+                DropdownMenuItem(
+                    text = {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "文件夹置顶",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (foldersFirst) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "已开启",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    },
+                    onClick = {
+                        sortMenuExpanded = false
+                        onToggleFoldersFirst()
+                    }
                 )
             }
         }
     }
 
+    // MT-Manager-style compact folder status bar
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .padding(horizontal = 14.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "${formatCompactCount(activeDir.dirCount)} 文件夹 · ${formatCompactCount(activeDir.fileCount)} 文件",
+            style = MaterialTheme.typography.labelSmall,
+            fontFamily = if (useMonospaceFont) FontFamily.Monospace else FontFamily.Default,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            text = FormatUtils.formatBytes(activeDir.totalBytes),
+            style = MaterialTheme.typography.labelSmall,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+
     HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
 
-    if (children.isEmpty()) {
+    if (children.isEmpty() && !canNavigateUp) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("空目录", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         return
     }
 
-    val barColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.085f)
-    val residueBarColor = MaterialTheme.colorScheme.error.copy(alpha = 0.10f)
+    val isMetricSort = sort.sortField == AnalyzerTreeSortField.SIZE || sort.sortField == AnalyzerTreeSortField.COUNT
+    val barColor = MaterialTheme.colorScheme.primary.copy(alpha = if (isMetricSort) 0.085f else 0.035f)
+    val residueBarColor = MaterialTheme.colorScheme.error.copy(alpha = if (isMetricSort) 0.10f else 0.05f)
     val maxCount = remember(children, sort) {
-        if (sort == AnalyzerTreeSort.COUNT_DESC) children.maxOfOrNull { it.fileCount + it.dirCount }?.coerceAtLeast(1L) ?: 1L
-        else 1L
+        if (sort.sortField == AnalyzerTreeSortField.COUNT) {
+            children.maxOfOrNull { it.fileCount + it.dirCount }?.coerceAtLeast(1L) ?: 1L
+        } else {
+            1L
+        }
     }
 
     LazyColumn(
@@ -924,15 +1089,77 @@ private fun TreeTabBody(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = 24.dp)
     ) {
+        if (canNavigateUp) {
+            item(key = "__parent_up__", contentType = "parent_up") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onNavigateUp)
+                        .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Reply,
+                            contentDescription = "返回上一级",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "..",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1
+                        )
+                        Text(
+                            text = if (parentLabel.isNotEmpty()) "返回上一级 · $parentLabel" else "返回上一级目录",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                HorizontalDivider(
+                    modifier = Modifier.padding(start = 54.dp, end = 12.dp),
+                    thickness = 0.5.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+                )
+            }
+        }
+
+        if (children.isEmpty()) {
+            item(key = "__empty_dir__", contentType = "empty_hint") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 48.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("空目录", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+
         items(
             items = children,
             key = { it.path },
             contentType = { if (it.isDir) "tree_dir" else "tree_file" }
         ) { item ->
-            val ratio = if (sort == AnalyzerTreeSort.SIZE_DESC) {
-                item.shareOfParent
-            } else {
+            val ratio = if (sort.sortField == AnalyzerTreeSortField.COUNT) {
                 ((item.fileCount + item.dirCount).toFloat() / maxCount.toFloat()).coerceIn(0f, 1f)
+            } else {
+                item.shareOfParent
             }
             val isResidue = item.appBadge?.isInstalled == false
             val rowFill = if (isResidue) residueBarColor else barColor
@@ -954,7 +1181,7 @@ private fun TreeTabBody(
                         onClick = { onRowClick(item) },
                         onLongClick = { onRowMore(item) }
                     )
-                    .padding(start = 14.dp, end = 4.dp, top = 9.dp, bottom = 9.dp),
+                    .padding(start = 12.dp, end = 4.dp, top = 7.dp, bottom = 7.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 TreeItemLeadingIcon(
@@ -970,6 +1197,7 @@ private fun TreeTabBody(
                             text = item.name,
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = if (item.isDir) FontWeight.Medium else FontWeight.Normal,
+                            color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
@@ -979,12 +1207,25 @@ private fun TreeTabBody(
                             AppBadgePill(badge = item.appBadge)
                         }
                     }
-                    Spacer(Modifier.height(2.dp))
+                    Spacer(Modifier.height(1.5.dp))
                     val pctText = String.format(Locale.US, "%.1f%%", item.shareOfParent * 100f)
+                    val dateText = if (item.mtime > 0L) FormatUtils.formatSmartDate(item.mtime) else ""
                     val metaText = if (item.isDir) {
-                        "$pctText · ${formatCompactCount(item.fileCount)} 文件"
+                        buildString {
+                            if (dateText.isNotEmpty()) {
+                                append(dateText)
+                                append(" · ")
+                            }
+                            append("${formatCompactCount(item.fileCount)} 项 · $pctText")
+                        }
                     } else {
-                        "$pctText · ${FormatUtils.formatSmartDate(item.mtime)}"
+                        buildString {
+                            if (dateText.isNotEmpty()) {
+                                append(dateText)
+                                append(" · ")
+                            }
+                            append(pctText)
+                        }
                     }
                     Text(
                         text = metaText,
@@ -995,30 +1236,30 @@ private fun TreeTabBody(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(6.dp))
                 Text(
                     text = FormatUtils.formatBytes(item.totalBytes),
-                    style = MaterialTheme.typography.labelLarge,
+                    style = MaterialTheme.typography.labelMedium,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.SemiBold,
                     color = if (isResidue) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
                 )
                 IconButton(
                     onClick = { onRowMore(item) },
-                    modifier = Modifier.size(36.dp)
+                    modifier = Modifier.size(34.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.MoreVert,
                         contentDescription = "更多操作",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(17.dp)
                     )
                 }
             }
             HorizontalDivider(
-                modifier = Modifier.padding(start = 58.dp, end = 14.dp),
+                modifier = Modifier.padding(start = 54.dp, end = 12.dp),
                 thickness = 0.5.dp,
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
             )
         }
     }
@@ -1141,6 +1382,7 @@ private fun AppsTabBody(
                                 text = app.displayLabel,
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f, fill = false)
@@ -1227,7 +1469,8 @@ private fun AppsTabBody(
                                     text = FormatUtils.formatBytes(loc.totalBytes),
                                     style = MaterialTheme.typography.labelMedium,
                                     fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.SemiBold
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                                 IconButton(
                                     onClick = { onLocationActions(app, loc) },
@@ -1374,6 +1617,7 @@ private fun FilesTabBody(
                         Text(
                             text = file.name,
                             style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
@@ -1398,7 +1642,8 @@ private fun FilesTabBody(
                     text = FormatUtils.formatBytes(file.size),
                     style = MaterialTheme.typography.labelLarge,
                     fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 IconButton(
                     onClick = { onFileMore(file) },
@@ -1433,13 +1678,13 @@ private fun TreeItemLeadingIcon(
             bitmap = appIcon,
             contentDescription = appBadge?.displayLabel,
             modifier = Modifier
-                .size(34.dp)
+                .size(32.dp)
                 .clip(RoundedCornerShape(8.dp))
         )
     } else if (isDir && appBadge?.isInstalled == false) {
         Box(
             modifier = Modifier
-                .size(34.dp)
+                .size(32.dp)
                 .clip(RoundedCornerShape(8.dp))
                 .background(MaterialTheme.colorScheme.errorContainer),
             contentAlignment = Alignment.Center
@@ -1448,11 +1693,11 @@ private fun TreeItemLeadingIcon(
                 imageVector = Icons.Default.DeleteOutline,
                 contentDescription = "已卸载残留",
                 tint = MaterialTheme.colorScheme.error,
-                modifier = Modifier.size(19.dp)
+                modifier = Modifier.size(18.dp)
             )
         }
     } else {
-        FileTypeIcon(isDir = isDir, ext = ext, size = 34.dp)
+        FileTypeIcon(isDir = isDir, ext = ext, size = 32.dp)
     }
 }
 
@@ -1812,11 +2057,13 @@ private fun formatCompactCount(count: Long): String = when {
 }
 
 private val NoOpAnalyzerActions = object : StorageAnalyzerActions {
-    override fun onBack() {}
+    override fun onExit() {}
+    override fun onNavigateUp() {}
     override fun onRefresh() {}
     override fun onSelectTab(tab: AnalyzerTab) {}
     override fun onNavigateDir(path: String) {}
-    override fun onToggleTreeSort() {}
+    override fun onSelectTreeSort(sort: AnalyzerTreeSort) {}
+    override fun onToggleFoldersFirst() {}
     override fun onSelectExtFilter(ext: String?) {}
     override fun onToggleUninstalledOnly(enabled: Boolean) {}
     override fun onToggleTreemap() {}
@@ -1903,6 +2150,22 @@ private fun previewWizTreeSnapshot(): WizTreeSnapshot {
 @Composable
 fun StorageAnalyzerTreeLightPreview() {
     PocketEverythingTheme(darkTheme = false, dynamicColor = false) {
+        StorageAnalyzerScreen(
+            state = StorageAnalyzerUiState(
+                snapshot = previewWizTreeSnapshot(),
+                selectedTab = AnalyzerTab.TREE,
+                currentDirPath = "/storage/emulated/0"
+            ),
+            useMonospaceFont = false,
+            actions = NoOpAnalyzerActions
+        )
+    }
+}
+
+@Preview(showBackground = true, widthDp = 390, heightDp = 844)
+@Composable
+fun StorageAnalyzerTreeDarkPreview() {
+    PocketEverythingTheme(darkTheme = true, dynamicColor = false, pureBlackDark = true) {
         StorageAnalyzerScreen(
             state = StorageAnalyzerUiState(
                 snapshot = previewWizTreeSnapshot(),
