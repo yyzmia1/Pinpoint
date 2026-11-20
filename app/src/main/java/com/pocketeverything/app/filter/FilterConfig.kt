@@ -32,6 +32,7 @@ data class FilterConfig(
     val skipNoiseCaches: Boolean = true,
     val deduplicateMounts: Boolean = true,
     val customExcludedPaths: List<String> = DEFAULT_EXCLUDED_PATHS,
+    val customIncludedPaths: List<String> = emptyList(),
     val tier2AllowedPrefixes: List<String> = DEFAULT_TIER2_ALLOWED_PREFIXES,
     val tier2BlockedPrefixes: List<String> = DEFAULT_TIER2_BLOCKED_PREFIXES,
     val tier2PriorityOrder: List<Tier2PriorityEntry> = DEFAULT_TIER2_PRIORITY_ORDER,

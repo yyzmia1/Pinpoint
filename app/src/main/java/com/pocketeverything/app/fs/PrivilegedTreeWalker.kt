@@ -21,10 +21,14 @@ object PrivilegedTreeWalker {
         excludedDirNames: Array<String>,
         deduplicateMounts: Boolean,
         writer: BinaryTreeStreamCodec.Writer,
-        recursive: Boolean = true
+        recursive: Boolean = true,
+        includedPrefixes: Array<String> = emptyArray()
     ): Int {
         val excludedPrefixSet = excludedPrefixes.map { normalizePrefix(it) }.toHashSet()
         val excludedDirSet = excludedDirNames.map { it.lowercase() }.toHashSet()
+        fun included(path: String, isDir: Boolean): Boolean = includedPrefixes.isEmpty() ||
+            includedPrefixes.any { p -> path == p || p == "/" || path.startsWith("$p/") ||
+                (isDir && (path == "/" || p.startsWith("$path/"))) }
         val visitedInodes = if (deduplicateMounts) HashSet<DevInode>(4096) else null
         var count = 0
 
@@ -32,7 +36,7 @@ object PrivilegedTreeWalker {
         val rootSet = HashSet<String>(roots.size)
         for (rawRoot in roots) {
             val root = normalizePrefix(rawRoot)
-            if (!isExcludedPrefix(root, excludedPrefixSet)) {
+            if (!isExcludedPrefix(root, excludedPrefixSet) && included(root, true)) {
                 stack.addLast(root)
                 rootSet.add(root)
             }
@@ -50,19 +54,22 @@ object PrivilegedTreeWalker {
             }
 
             val children = runCatching { File(currentPath).list() }.getOrNull() ?: continue
-            if (!recursive || currentPath in rootSet) {
-                writer.writeDirListed(currentPath)
-            }
+            var completelyListed = true
             for (childName in children) {
                 if (childName == "." || childName == "..") continue
                 val childPath = if (currentPath == "/") "/$childName" else "$currentPath/$childName"
 
                 if (isExcludedPrefix(childPath, excludedPrefixSet)) continue
 
-                val st = runCatching { Os.lstat(childPath) }.getOrNull() ?: continue
+                val st = runCatching { Os.lstat(childPath) }.getOrNull()
+                if (st == null) {
+                    completelyListed = false
+                    continue
+                }
                 if (OsConstants.S_ISLNK(st.st_mode)) continue
 
                 val isDir = OsConstants.S_ISDIR(st.st_mode)
+                if (!included(childPath, isDir)) continue
                 if (isDir && childName.lowercase() in excludedDirSet && childPath != "/data/local/tmp") continue
 
                 val ext = if (!isDir) {
@@ -89,6 +96,7 @@ object PrivilegedTreeWalker {
                     stack.addLast(childPath)
                 }
             }
+            if (completelyListed) writer.writeDirListed(currentPath)
         }
         return count
     }

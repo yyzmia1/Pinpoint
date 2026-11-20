@@ -428,7 +428,8 @@ object WizTreeEngine {
         currentGeneration: Long = 0L
     ): WizTreeSnapshot? {
         val meta = db.loadAnalyzerMeta()
-        if (meta["schema_version"] != CACHE_SCHEMA_VERSION) return null
+        if (meta["schema_version"] != CACHE_SCHEMA_VERSION || meta["visibility"] != db.visibilityKey ||
+            meta["mode"] != accessMode.code.toString()) return null
         val totalBytes = meta["total_bytes"]?.toLongOrNull() ?: return null
         val totalFiles = meta["total_files"]?.toLongOrNull() ?: 0L
         val totalDirs = meta["total_dirs"]?.toLongOrNull() ?: 0L
@@ -520,6 +521,7 @@ object WizTreeEngine {
         onProgress: (String) -> Unit = {}
     ): WizTreeSnapshot {
         val startMs = System.nanoTime() / 1_000_000L
+        val visibilityAtStart = db.visibilityKey
 
         val dirs = HashMap<String, MutableDir>(4096)
         val appMap = HashMap<String, MutableAppAcc>(256)
@@ -660,6 +662,8 @@ object WizTreeEngine {
         onProgress("正在写入磁盘缓存…")
         val metaMap = mapOf(
             "schema_version" to CACHE_SCHEMA_VERSION,
+            "visibility" to visibilityAtStart,
+            "mode" to accessMode.code.toString(),
             "total_bytes" to totalBytes.toString(),
             "total_files" to totalFiles.toString(),
             "total_dirs" to totalDirs.toString(),
@@ -689,6 +693,7 @@ object WizTreeEngine {
                 }
             }
         }
+        if (visibilityAtStart != db.visibilityKey) throw kotlinx.coroutines.CancellationException("索引显示范围已改变")
         db.replaceAnalyzerCache(
             meta = metaMap,
             dirs = dirRowsIterable,

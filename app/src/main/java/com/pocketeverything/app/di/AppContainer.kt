@@ -20,7 +20,10 @@ class AppContainer(context: Context) {
 
     val database: SqliteSearchDatabase by lazy {
         val dbFile = File(appContext.filesDir, "pocket_everything_v1.db")
-        SqliteSearchDatabase(dbFile.absolutePath)
+        SqliteSearchDatabase(dbFile.absolutePath) {
+            val settings = settingsRepository.settings.value
+            if (settings.showRetainedModeRecords) AccessMode.ROOT.code else settings.accessMode.code
+        }
     }
 
     val normalProvider: NormalFileProvider by lazy { NormalFileProvider(appContext) }

@@ -63,7 +63,8 @@ data class FileMetaRow(
  * Separates write transactions from read queries so background indexing never blocks UI typing.
  */
 class SqliteSearchDatabase(
-    private val dbPath: String
+    private val dbPath: String,
+    private val visibleMode: () -> Int = { AccessMode.ROOT.code }
 ) : AutoCloseable {
 
     private val driver = BundledSQLiteDriver()
@@ -85,6 +86,23 @@ class SqliteSearchDatabase(
                 configureReadConnection(readConn)
             }
         }
+    }
+
+    val visibilityKey: String get() = visibleMode().toString()
+
+    private fun prepareVisible(sql: String): SQLiteStatement {
+        val maxMode = visibleMode().coerceIn(AccessMode.NORMAL.code, AccessMode.ROOT.code)
+        if (maxMode == AccessMode.ROOT.code) return readConn.prepare(sql)
+        val visible = "SELECT * FROM files_meta WHERE access_mode <= $maxMode"
+        val scoped = if ("files_meta" in sql) {
+            sql.replace("files_meta", "($visible)")
+        } else if (maxMode < AccessMode.ROOT.code &&
+            Regex("FROM (files_fts|docs_fts|docs_uni_fts)\\b").containsMatchIn(sql)) {
+            val clause = " AND rowid IN (SELECT id FROM files_meta WHERE access_mode <= $maxMode) "
+            val limitAt = sql.indexOf("LIMIT", ignoreCase = true)
+            if (limitAt < 0) sql + clause else sql.substring(0, limitAt) + clause + sql.substring(limitAt)
+        } else sql
+        return readConn.prepare(scoped)
     }
 
     private fun configureWriteConnection(conn: SQLiteConnection) {
@@ -386,20 +404,23 @@ class SqliteSearchDatabase(
         }
     }
 
-    fun pruneMissingEntries(seenPaths: Set<String>, scopeMode: AccessMode? = null): Int {
+    fun pruneMissingEntries(
+        seenPaths: Set<String>, scopeMode: AccessMode? = null,
+        canPrune: (String, AccessMode) -> Boolean = { _, _ -> true }
+    ): Int {
         return writeLock.withLock {
             val staleIds = ArrayList<Long>()
             val sql = if (scopeMode != null) {
-                "SELECT id, path FROM files_meta WHERE access_mode = ?"
+                "SELECT id, path, access_mode FROM files_meta WHERE access_mode = ?"
             } else {
-                "SELECT id, path FROM files_meta"
+                "SELECT id, path, access_mode FROM files_meta ORDER BY length(path)"
             }
             writeConn.prepare(sql).use { stmt ->
                 if (scopeMode != null) stmt.bindLong(1, scopeMode.code.toLong())
                 while (stmt.step()) {
                     val id = stmt.getLong(0)
                     val p = stmt.getText(1)
-                    if (p !in seenPaths) {
+                    if (p !in seenPaths && canPrune(p, AccessMode.fromCode(stmt.getLong(2).toInt()))) {
                         staleIds.add(id)
                     }
                 }
@@ -452,7 +473,8 @@ class SqliteSearchDatabase(
 
     fun fetchPendingTier2Tasks(
         limit: Int = 32,
-        priorityOrder: List<Tier2PriorityEntry> = FilterConfig.DEFAULT_TIER2_PRIORITY_ORDER
+        priorityOrder: List<Tier2PriorityEntry> = FilterConfig.DEFAULT_TIER2_PRIORITY_ORDER,
+        maxMode: AccessMode = AccessMode.ROOT
     ): List<PendingTier2Task> {
         val orderSql = buildTier2OrderClause(priorityOrder)
         return readLock.withLock {
@@ -461,13 +483,14 @@ class SqliteSearchDatabase(
                 """
                 SELECT id, path, name, ext, size, mtime, access_mode
                 FROM files_meta
-                WHERE tier2_status = ?
+                WHERE tier2_status = ? AND access_mode <= ?
                 ORDER BY $orderSql
                 LIMIT ?
                 """.trimIndent()
             ).use { stmt ->
                 stmt.bindLong(1, Tier2Status.PENDING.code.toLong())
-                stmt.bindLong(2, limit.toLong())
+                stmt.bindLong(2, maxMode.code.toLong())
+                stmt.bindLong(3, limit.toLong())
                 while (stmt.step()) {
                     result.add(
                         PendingTier2Task(
@@ -644,7 +667,7 @@ class SqliteSearchDatabase(
                 ORDER BY is_dir DESC, name COLLATE NOCASE ASC
                 LIMIT ?
             """.trimIndent()
-            readConn.prepare(sql).use { stmt ->
+            prepareVisible(sql).use { stmt ->
                 stmt.bindText(1, parentPath)
                 stmt.bindLong(2, safeLimit.toLong())
                 while (stmt.step()) {
@@ -862,17 +885,17 @@ class SqliteSearchDatabase(
         }
     }
 
-    fun pruneDirectChildren(parentPath: String, seenDirectPaths: Set<String>): Int {
+    fun pruneDirectChildren(parentPath: String, seenDirectPaths: Set<String>, maxMode: AccessMode = AccessMode.ROOT): Int {
         return writeLock.withLock {
             val staleFileIds = ArrayList<Long>()
             val staleDirPaths = ArrayList<String>()
-            writeConn.prepare("SELECT id, path, is_dir FROM files_meta WHERE parent_path = ?").use { stmt ->
+            writeConn.prepare("SELECT id, path, is_dir, access_mode FROM files_meta WHERE parent_path = ?").use { stmt ->
                 stmt.bindText(1, parentPath)
                 while (stmt.step()) {
                     val id = stmt.getLong(0)
                     val p = stmt.getText(1)
                     val isDir = stmt.getLong(2) != 0L
-                    if (p !in seenDirectPaths) {
+                    if (p !in seenDirectPaths && stmt.getLong(3) <= maxMode.code) {
                         staleFileIds.add(id)
                         if (isDir) staleDirPaths.add(p)
                     }
@@ -1474,7 +1497,7 @@ class SqliteSearchDatabase(
                 val (metaClauses, metaArgs) = buildMetaWhereParts(metaFilters, "")
                 val extraWhere = if (metaClauses.isEmpty()) "" else " AND " + metaClauses.joinToString(" AND ")
                 val sql = "SELECT id FROM files_meta WHERE LOWER($col) LIKE ? ESCAPE '\\'$extraWhere LIMIT 2000"
-                readConn.prepare(sql).use { stmt ->
+                prepareVisible(sql).use { stmt ->
                     stmt.bindText(1, likePattern)
                     bindDynamicArgs(stmt, 2, metaArgs)
                     while (stmt.step()) result.add(stmt.getLong(0))
@@ -1494,7 +1517,7 @@ class SqliteSearchDatabase(
                     "SELECT m.id FROM files_fts f JOIN files_meta m ON m.id = f.rowid WHERE files_fts MATCH ? AND " +
                         metaClauses.joinToString(" AND ") + " LIMIT 4000"
                 }
-                readConn.prepare(sql).use { stmt ->
+                prepareVisible(sql).use { stmt ->
                     stmt.bindText(1, tier1MatchExpr)
                     bindDynamicArgs(stmt, 2, metaArgs)
                     while (stmt.step()) result.add(stmt.getLong(0))
@@ -1534,7 +1557,7 @@ class SqliteSearchDatabase(
             val (metaClauses, metaArgs) = buildMetaWhereParts(metaFilters, "m")
             val whereSql = if (metaClauses.isEmpty()) "" else " WHERE " + metaClauses.joinToString(" AND ")
             val sql = "SELECT d.file_id FROM docs_raw d JOIN files_meta m ON m.id = d.file_id$whereSql"
-            readConn.prepare(sql).use { stmt ->
+            prepareVisible(sql).use { stmt ->
                 bindDynamicArgs(stmt, 1, metaArgs)
                 while (stmt.step()) result.add(stmt.getLong(0))
             }
@@ -1579,7 +1602,7 @@ class SqliteSearchDatabase(
                     "SELECT m.id FROM files_fts f JOIN files_meta m ON m.id = f.rowid WHERE files_fts MATCH ? AND " +
                         metaClauses.joinToString(" AND ") + " LIMIT 8000"
                 }
-                readConn.prepare(sql).use { stmt ->
+                prepareVisible(sql).use { stmt ->
                     stmt.bindText(1, matchExpr)
                     bindDynamicArgs(stmt, 2, metaArgs)
                     while (stmt.step()) result.add(stmt.getLong(0))
@@ -1601,7 +1624,7 @@ class SqliteSearchDatabase(
                     "SELECT m.id FROM files_fts f JOIN files_meta m ON m.id = f.rowid WHERE files_fts MATCH ? AND " +
                         metaClauses.joinToString(" AND ") + " LIMIT 8000"
                 }
-                readConn.prepare(sql).use { stmt ->
+                prepareVisible(sql).use { stmt ->
                     stmt.bindText(1, matchExpr)
                     bindDynamicArgs(stmt, 2, metaArgs)
                     while (stmt.step()) result.add(stmt.getLong(0))
@@ -1616,7 +1639,7 @@ class SqliteSearchDatabase(
         val whereSql = if (metaClauses.isEmpty()) "" else " WHERE " + metaClauses.joinToString(" AND ")
         val selectCol = if (hasPathSep || term.field == MatchField.PATH_ONLY) "path" else "name"
         val sql = "SELECT id, $selectCol FROM files_meta$whereSql ORDER BY mtime DESC"
-        readConn.prepare(sql).use { stmt ->
+        prepareVisible(sql).use { stmt ->
             bindDynamicArgs(stmt, 1, metaArgs)
             while (stmt.step()) {
                 val target = CjkTokenizer.normalizeString(stmt.getText(1))
@@ -1648,7 +1671,7 @@ class SqliteSearchDatabase(
             val (metaClauses, metaArgs) = buildMetaWhereParts(metaFilters, "")
             val whereSql = if (metaClauses.isEmpty()) "" else " WHERE " + metaClauses.joinToString(" AND ")
             val sql = "SELECT id, name, path FROM files_meta$whereSql ORDER BY mtime DESC"
-            readConn.prepare(sql).use { stmt ->
+            prepareVisible(sql).use { stmt ->
                 bindDynamicArgs(stmt, 1, metaArgs)
                 while (stmt.step()) {
                     val id = stmt.getLong(0)
@@ -1672,7 +1695,7 @@ class SqliteSearchDatabase(
             val (metaClauses, metaArgs) = buildMetaWhereParts(metaFilters, "m")
             val whereSql = if (metaClauses.isEmpty()) "" else " WHERE " + metaClauses.joinToString(" AND ")
             val sql = "SELECT d.file_id, d.compressed_body FROM docs_raw d JOIN files_meta m ON m.id = d.file_id$whereSql"
-            readConn.prepare(sql).use { stmt ->
+            prepareVisible(sql).use { stmt ->
                 bindDynamicArgs(stmt, 1, metaArgs)
                 while (stmt.step()) {
                     val fileId = stmt.getLong(0)
@@ -1783,7 +1806,7 @@ class SqliteSearchDatabase(
                 "SELECT m.id FROM docs_fts d JOIN files_meta m ON m.id = d.rowid WHERE body_bi MATCH ? AND " +
                     metaClauses.joinToString(" AND ") + " LIMIT 2500"
             }
-            readConn.prepare(sql).use { stmt ->
+            prepareVisible(sql).use { stmt ->
                 stmt.bindText(1, expr)
                 bindDynamicArgs(stmt, 2, metaArgs)
                 while (stmt.step()) ids.add(stmt.getLong(0))
@@ -1802,7 +1825,7 @@ class SqliteSearchDatabase(
                 "SELECT m.id FROM docs_uni_fts u JOIN files_meta m ON m.id = u.rowid WHERE docs_uni_fts MATCH ? AND " +
                     metaClauses.joinToString(" AND ") + " LIMIT 2500"
             }
-            readConn.prepare(sql).use { stmt ->
+            prepareVisible(sql).use { stmt ->
                 stmt.bindText(1, expr)
                 bindDynamicArgs(stmt, 2, metaArgs)
                 while (stmt.step()) ids.add(stmt.getLong(0))
@@ -1827,7 +1850,7 @@ class SqliteSearchDatabase(
         val whereSql = if (whereClauses.isEmpty()) "" else "WHERE " + whereClauses.joinToString(" AND ")
         val sql = "SELECT id FROM files_meta $whereSql ORDER BY mtime DESC LIMIT ?"
         val out = LinkedHashSet<Long>()
-        readConn.prepare(sql).use { stmt ->
+        prepareVisible(sql).use { stmt ->
             val nextIdx = bindDynamicArgs(stmt, 1, bindArgs)
             stmt.bindLong(nextIdx, limit.toLong())
             while (stmt.step()) out.add(stmt.getLong(0))
@@ -1844,7 +1867,7 @@ class SqliteSearchDatabase(
             FROM files_meta $whereSql ORDER BY mtime DESC LIMIT ?
         """.trimIndent()
         val rows = ArrayList<FileMetaRow>()
-        readConn.prepare(sql).use { stmt ->
+        prepareVisible(sql).use { stmt ->
             val nextIdx = bindDynamicArgs(stmt, 1, bindArgs)
             stmt.bindLong(nextIdx, limit.toLong())
             while (stmt.step()) rows.add(readMetaRow(stmt))
@@ -1854,7 +1877,7 @@ class SqliteSearchDatabase(
 
     private fun fetchRecentRows(limit: Int): List<FileMetaRow> {
         val rows = ArrayList<FileMetaRow>(limit)
-        readConn.prepare(
+        prepareVisible(
             """
             SELECT id, path, parent_path, name, ext, size, mtime, is_dir, access_mode, tier2_status, tier2_error
             FROM files_meta
@@ -1879,7 +1902,7 @@ class SqliteSearchDatabase(
                 FROM files_meta
                 WHERE id IN ($placeholders)
             """.trimIndent()
-            readConn.prepare(sql).use { stmt ->
+            prepareVisible(sql).use { stmt ->
                 chunk.forEachIndexed { index, id -> stmt.bindLong(index + 1, id) }
                 while (stmt.step()) rows.add(readMetaRow(stmt))
             }
@@ -2087,7 +2110,7 @@ class SqliteSearchDatabase(
     }
 
     private fun loadRawTextLocked(fileId: Long): String? {
-        readConn.prepare("SELECT compressed_body FROM docs_raw WHERE file_id = ?").use { stmt ->
+        prepareVisible("SELECT compressed_body FROM docs_raw WHERE file_id = ?").use { stmt ->
             stmt.bindLong(1, fileId)
             return if (stmt.step()) decompressUtf8(stmt.getBlob(0)) else null
         }
@@ -2108,7 +2131,7 @@ class SqliteSearchDatabase(
         ) -> Unit
     ) {
         readLock.withLock {
-            readConn.prepare(
+            prepareVisible(
                 """
                 SELECT parent_path,
                        SUM(CASE WHEN is_dir = 0 THEN CASE WHEN size > 0 THEN size ELSE 0 END ELSE 0 END),
@@ -2148,7 +2171,7 @@ class SqliteSearchDatabase(
         ) -> Unit
     ) {
         readLock.withLock {
-            readConn.prepare(
+            prepareVisible(
                 "SELECT path, parent_path, name, mtime, access_mode FROM files_meta WHERE is_dir = 1"
             ).use { stmt ->
                 while (stmt.step()) {
@@ -2173,7 +2196,7 @@ class SqliteSearchDatabase(
     fun queryExtensionStatsForAnalyzer(limit: Int = 36): List<AnalyzerExtRow> {
         val out = ArrayList<AnalyzerExtRow>(limit)
         readLock.withLock {
-            readConn.prepare(
+            prepareVisible(
                 """
                 SELECT LOWER(ext) AS norm_ext,
                        SUM(CASE WHEN size > 0 THEN size ELSE 0 END) AS total_bytes,
@@ -2230,7 +2253,7 @@ class SqliteSearchDatabase(
                 LIMIT ?
                 """.trimIndent()
             }
-            readConn.prepare(sql).use { stmt ->
+            prepareVisible(sql).use { stmt ->
                 if (extFilter == null) {
                     stmt.bindLong(1, limit.toLong())
                 } else {
@@ -2272,7 +2295,7 @@ class SqliteSearchDatabase(
         }
         val out = ArrayList<AnalyzerFileRow>(64)
         readLock.withLock {
-            readConn.prepare(
+            prepareVisible(
                 """
                 SELECT path, parent_path, name, ext, size, mtime, access_mode
                 FROM files_meta
@@ -2317,7 +2340,7 @@ class SqliteSearchDatabase(
         ) -> Unit
     ) {
         readLock.withLock {
-            readConn.prepare(
+            prepareVisible(
                 "SELECT path, parent_path, name, ext, size, mtime, is_dir, access_mode FROM files_meta"
             ).use { stmt ->
                 while (stmt.step()) {

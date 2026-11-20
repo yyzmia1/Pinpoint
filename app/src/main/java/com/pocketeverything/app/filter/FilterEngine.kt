@@ -10,6 +10,12 @@ class FilterEngine(
     val config: FilterConfig = FilterConfig()
 ) {
     private val normalizedCustomExcludes = FilterConfig.normalizePaths(config.customExcludedPaths)
+    private val normalizedIncludes = FilterConfig.normalizePaths(config.customIncludedPaths)
+
+    fun includedPrefixes(): Array<String> = normalizedIncludes.toTypedArray()
+
+    fun isIncluded(path: String, isDir: Boolean): Boolean = normalizedIncludes.isEmpty() ||
+        normalizedIncludes.any { matchesPathPrefix(path, it) || (isDir && matchesPathPrefix(it, path)) }
 
     private val excludedDirNameSet: Set<String> = if (config.skipNoiseCaches) {
         FilterConfig.DEFAULT_NOISE_DIR_NAMES
@@ -40,6 +46,7 @@ class FilterEngine(
 
     fun shouldSkipTier1Path(path: String, name: String, isDir: Boolean, mode: AccessMode): Boolean {
         val clean = if (path.length > 1) path.trimEnd('/') else path
+        if (!isIncluded(clean, isDir)) return true
         if (mode == AccessMode.ROOT) {
             for (prefix in FilterConfig.VIRTUAL_FS_EXCLUSIONS) {
                 if (matchesPathPrefix(clean, prefix)) return true
@@ -87,6 +94,7 @@ class FilterEngine(
         if (lowerExt !in FilterConfig.SUPPORTED_DOC_EXTENSIONS) return Tier2Status.NOT_APPLICABLE
 
         val clean = if (path.length > 1) path.trimEnd('/') else path
+        if (!isIncluded(clean, false)) return Tier2Status.SKIPPED_FILTER
         for (custom in normalizedCustomExcludes) {
             if (matchesPathPrefix(clean, custom)) return Tier2Status.SKIPPED_FILTER
         }

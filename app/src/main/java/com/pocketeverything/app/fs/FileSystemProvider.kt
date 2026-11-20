@@ -78,6 +78,14 @@ interface FileSystemProvider {
         filterEngine: FilterEngine,
         onBatch: suspend (List<ScannedFileRecord>) -> Unit
     ): Int
+    suspend fun scanFullTree(
+        filterEngine: FilterEngine,
+        onDirListed: (String) -> Unit,
+        onBatch: suspend (List<ScannedFileRecord>) -> Unit
+    ): Int = scanFullTree(filterEngine) { batch ->
+        batch.map { it.parentPath }.distinct().forEach(onDirListed)
+        onBatch(batch)
+    }
     suspend fun scanDirectories(
         roots: List<String>,
         filterEngine: FilterEngine,
@@ -140,6 +148,12 @@ class NormalFileProvider(
         return scanDirectories(roots, filterEngine, onBatch)
     }
 
+    override suspend fun scanFullTree(
+        filterEngine: FilterEngine,
+        onDirListed: (String) -> Unit,
+        onBatch: suspend (List<ScannedFileRecord>) -> Unit
+    ): Int = scanDirectories(StorageRootsHelper.getNormalStorageRoots(context), filterEngine, onDirListed, onBatch)
+
     override suspend fun scanDirectories(
         roots: List<String>,
         filterEngine: FilterEngine,
@@ -191,6 +205,7 @@ class NormalFileProvider(
                             roots = roots.toTypedArray(),
                             excludedPrefixes = excludedPrefixes,
                             excludedDirNames = excludedDirNames,
+                            includedPrefixes = filterEngine.includedPrefixes(),
                             deduplicateMounts = filterEngine.config.deduplicateMounts,
                             writer = writer,
                             recursive = recursive
@@ -407,6 +422,12 @@ class PrivilegedFileProvider(
         return scanDirectories(roots, filterEngine, onBatch)
     }
 
+    override suspend fun scanFullTree(
+        filterEngine: FilterEngine,
+        onDirListed: (String) -> Unit,
+        onBatch: suspend (List<ScannedFileRecord>) -> Unit
+    ): Int = scanDirectories(if (mode == AccessMode.ROOT) listOf("/") else StorageRootsHelper.getNormalStorageRoots(context), filterEngine, onDirListed, onBatch)
+
     override suspend fun scanDirectories(
         roots: List<String>,
         filterEngine: FilterEngine,
@@ -470,6 +491,7 @@ class PrivilegedFileProvider(
                         roots.toTypedArray(),
                         excludedPrefixes,
                         excludedDirNames,
+                        filterEngine.includedPrefixes(),
                         filterEngine.config.deduplicateMounts,
                         writeEnd
                     )
@@ -478,6 +500,7 @@ class PrivilegedFileProvider(
                         roots.toTypedArray(),
                         excludedPrefixes,
                         excludedDirNames,
+                        filterEngine.includedPrefixes(),
                         filterEngine.config.deduplicateMounts,
                         writeEnd
                     )

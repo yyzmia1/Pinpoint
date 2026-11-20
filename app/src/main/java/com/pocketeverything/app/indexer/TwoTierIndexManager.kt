@@ -207,6 +207,20 @@ class TwoTierIndexManager(
         return targetJob
     }
 
+    suspend fun cancelScanAndAwait() {
+        val previous = synchronized(triggerLock) {
+            listOfNotNull(tier1Job, tier2Job).also { jobs -> jobs.forEach { it.cancel() } }
+        }
+        previous.forEach { it.join() }
+        tier1Mutex.withLock { }
+    }
+
+    suspend fun switchMode(mode: AccessMode): Job {
+        cancelScanAndAwait()
+        tier1Mutex.withLock { settingsRepo.updateAccessMode(mode) }
+        return startFullScan(clearExisting = false)
+    }
+
     fun isTier1Busy(): Boolean = synchronized(triggerLock) {
         tier1Job?.isActive == true
     } || _progress.value.tier1Phase != Tier1Phase.IDLE
@@ -327,14 +341,10 @@ class TwoTierIndexManager(
             }
         }
 
-        // Remove only top-most missing subdirs so nested deletions don't double-scan
-        val sortedMissing = missingSubdirs.sortedBy { it.length }
-        val deletedRoots = ArrayList<String>()
-        for (m in sortedMissing) {
-            if (deletedRoots.none { m.startsWith("$it/") }) {
-                deletedRoots.add(m)
-                removedCount += db.deleteSubtree(m)
-            }
+        // A successful parent listing distinguishes deletion from EACCES or an unmounted volume.
+        for (missing in missingSubdirs) {
+            val parent = missing.substringBeforeLast('/').ifEmpty { "/" }
+            if (parent in trackedDirs && parent !in dirtyDirs) dirtyDirs.add(parent)
         }
 
         if (dirtyDirs.isNotEmpty()) {
@@ -363,7 +373,7 @@ class TwoTierIndexManager(
             }
             // Only prune children of directories that were actually listed (never on list() == null / EACCES).
             for (dirty in listedDirs) {
-                removedCount += db.pruneDirectChildren(dirty, seenByParent[dirty].orEmpty())
+                removedCount += db.pruneDirectChildren(dirty, seenByParent[dirty].orEmpty(), mode)
             }
             if (newSubdirs.isNotEmpty()) {
                 provider.scanDirectories(newSubdirs.distinct(), filter) { batch ->
@@ -833,12 +843,13 @@ class TwoTierIndexManager(
 
         val filter = FilterEngine(settings.filterConfig)
         val seenPaths = HashSet<String>(16384)
+        val listedDirectories = HashSet<String>()
         var scannedCount = 0
         var upsertedCount = 0
         var prunedCount = 0
 
         try {
-            provider.scanFullTree(filter) { batch ->
+            provider.scanFullTree(filter, { listedDirectories.add(it) }) { batch ->
                 if (!currentCoroutineContext().isActive) return@scanFullTree
                 val entries = ArrayList<FileUpsertEntry>(batch.size)
                 for (record in batch) {
@@ -856,9 +867,18 @@ class TwoTierIndexManager(
                 }
             }
 
-            if (currentCoroutineContext().isActive && seenPaths.isNotEmpty()) {
+            if (currentCoroutineContext().isActive && listedDirectories.isNotEmpty()) {
                 _progress.update { cur -> cur.copy(statusMessage = "正在比对并清理失效旧条目…") }
-                prunedCount = db.pruneMissingEntries(seenPaths, scopeMode = null)
+                val missingTrees = ArrayList<String>()
+                prunedCount = db.pruneMissingEntries(seenPaths) { path, sourceMode ->
+                    val parent = path.substringBeforeLast('/').ifEmpty { "/" }
+                    val confirmedMissing = parent in listedDirectories || missingTrees.any { path.startsWith("$it/") }
+                    val remove = if (sourceMode.code > mode.code) {
+                        settings.clearIndexOnModeSwitch
+                    } else confirmedMissing && !filter.shouldSkipTier1Path(path, path.substringAfterLast('/'), true, mode)
+                    if (remove && confirmedMissing) missingTrees.add(path)
+                    remove
+                }
             }
 
             val rootPaths = storageRootsResolver().let { base ->
@@ -1002,10 +1022,8 @@ class TwoTierIndexManager(
                         }
                     }
                     var pruned = 0
-                    for (dir in targetDirs) {
-                        if (dir in listedDirs) {
-                            pruned += db.pruneDirectorySubtree(dir, seen)
-                        }
+                    for (dir in listedDirs) {
+                        pruned += db.pruneDirectChildren(dir, seen, settings.accessMode)
                     }
                     val snaps = runCatching { provider.statDirectories(targetDirs) }.getOrDefault(emptyMap())
                     db.saveDirSnapshots(snaps, settings.accessMode)
@@ -1049,7 +1067,8 @@ class TwoTierIndexManager(
                     val filter = FilterEngine(settings.filterConfig)
                     val tasks = db.fetchPendingTier2Tasks(
                         limit = 20,
-                        priorityOrder = settings.filterConfig.tier2PriorityOrder
+                        priorityOrder = settings.filterConfig.tier2PriorityOrder,
+                        maxMode = settings.accessMode
                     )
                     if (tasks.isEmpty()) break
 

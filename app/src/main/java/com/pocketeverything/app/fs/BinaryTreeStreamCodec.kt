@@ -8,6 +8,7 @@ import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.EOFException
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 
@@ -86,10 +87,10 @@ object BinaryTreeStreamCodec {
         inp.use { stream ->
             val magic = try {
                 stream.readInt()
-            } catch (_: EOFException) {
-                return 0
+            } catch (e: EOFException) {
+                throw IOException("索引数据流未完整建立", e)
             }
-            if (magic != MAGIC) return 0
+            if (magic != MAGIC) throw IOException("无效的索引数据流")
 
             val batch = ArrayList<ScannedFileRecord>(batchSize)
             val ctx = currentCoroutineContext()
@@ -97,10 +98,11 @@ object BinaryTreeStreamCodec {
                 ctx.ensureActive()
                 val tag = try {
                     stream.readByte()
-                } catch (_: EOFException) {
-                    break
+                } catch (e: EOFException) {
+                    throw IOException("索引数据流意外中断", e)
                 }
                 if (tag == EOF_TAG) break
+                if (tag != RECORD_TAG && tag != DIR_LISTED_TAG) throw IOException("无效的索引记录")
                 if (tag == DIR_LISTED_TAG) {
                     onDirListed(stream.readUTF())
                     continue

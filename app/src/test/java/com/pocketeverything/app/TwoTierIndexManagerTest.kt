@@ -234,6 +234,7 @@ class TwoTierIndexManagerTest {
         val ctx = TestContext()
         val settingsRepo = SettingsRepository(ctx)
         settingsRepo.updateAccessMode(AccessMode.ROOT)
+        settingsRepo.setClearIndexOnModeSwitch(true)
         val provider = FakeProvider(AccessMode.ROOT)
 
         SqliteSearchDatabase(dbFile.absolutePath).use { db ->
@@ -922,6 +923,56 @@ class TwoTierIndexManagerTest {
             stattedDirs.clear()
             mgr.startQuickHotDirsRefresh(includeRootOther = true).join()
             assertTrue("Manual quick sync must verify /system/priv-app in Stage 3", "/system/priv-app" in stattedDirs)
+        }
+    }
+
+    @Test
+    fun `mode preferences persist and whitelist migration leaves existing exclusions unchanged`() {
+        val ctx = TestContext()
+        val first = SettingsRepository(ctx)
+        assertFalse(first.settings.value.clearIndexOnModeSwitch)
+        assertTrue(first.settings.value.showRetainedModeRecords)
+        assertTrue(first.settings.value.filterConfig.customIncludedPaths.isEmpty())
+        val blacklist = first.settings.value.filterConfig.customExcludedPaths
+        first.setClearIndexOnModeSwitch(true)
+        first.setShowRetainedModeRecords(false)
+        first.updateFilterConfig(first.settings.value.filterConfig.copy(customIncludedPaths = listOf("/storage/emulated/0/Documents/")))
+        val restored = SettingsRepository(ctx).settings.value
+        assertTrue(restored.clearIndexOnModeSwitch)
+        assertFalse(restored.showRetainedModeRecords)
+        assertEquals(blacklist, restored.filterConfig.customExcludedPaths)
+        assertEquals(listOf("/storage/emulated/0/Documents"), restored.filterConfig.customIncludedPaths)
+    }
+
+    @Test
+    fun `root records and body survive downgrade subsequent full scans and return until cleanup enabled`() = runBlocking {
+        val ctx = TestContext()
+        val repo = SettingsRepository(ctx)
+        repo.updateAccessMode(AccessMode.ROOT)
+        val normal = FakeProvider(AccessMode.NORMAL)
+        normal.fullTreeHandler = { _, emit ->
+            emit(listOf(ScannedFileRecord("/storage/emulated/0/visible.txt", "/storage/emulated/0", "visible.txt", "txt", 10, 1000, false, AccessMode.NORMAL)))
+            1
+        }
+        val root = FakeProvider(AccessMode.ROOT)
+        SqliteSearchDatabase(":memory:").use { db ->
+            db.upsertFileBatch(listOf(FileUpsertEntry("/data/private.txt", "/data", "private.txt", "txt", 10, 1000,
+                false, AccessMode.ROOT, true, Tier2Status.PENDING)))
+            val id = db.fetchPendingTier2Tasks().single().fileId
+            db.saveTier2Result(id, 1000, Tier2Status.INDEXED, "retained secret body")
+            val manager = TwoTierIndexManager(ctx, db, repo, { if (it == AccessMode.ROOT) root else normal },
+                storageRootsResolver = { listOf("/storage/emulated/0") })
+            manager.switchMode(AccessMode.NORMAL).join()
+            assertEquals(1, db.search("content:secret").items.size)
+            manager.startFullScan().join()
+            assertEquals(1, db.search("content:secret").items.size)
+            manager.switchMode(AccessMode.SHIZUKU).join()
+            assertNotNull(db.getFileMetaByPath("/data/private.txt"))
+            manager.switchMode(AccessMode.ROOT).join()
+            assertEquals(1, db.search("content:secret").items.size)
+            repo.setClearIndexOnModeSwitch(true)
+            manager.switchMode(AccessMode.NORMAL).join()
+            assertNull(db.getFileMetaByPath("/data/private.txt"))
         }
     }
 }

@@ -41,6 +41,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.geometry.Offset
+import com.pocketeverything.app.ui.RevealTransition
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -222,12 +228,28 @@ class MainActivity : ComponentActivity() {
                 var previousPage by remember { mutableStateOf(AppPage.SEARCH) }
                 var onboardingTargets by remember { mutableStateOf(OnboardingTargets()) }
                 val snackbarHostState = remember { SnackbarHostState() }
+                val pageStateHolder = rememberSaveableStateHolder()
+                val graphicsLayer = rememberGraphicsLayer()
+                val reveal = remember(graphicsLayer) { RevealTransition(graphicsLayer) }
+                val motionScope = rememberCoroutineScope()
+                var analyzerOrigin by remember { mutableStateOf(Offset.Zero) }
+                var settingsOrigin by remember { mutableStateOf(Offset.Zero) }
+                fun returnToSearch(origin: Offset) {
+                    motionScope.launch { reveal.run(origin, returning = true, duration = 250) {
+                        currentPage = AppPage.SEARCH
+                    } }
+                }
+
 
                 BackHandler(enabled = currentPage != AppPage.SEARCH) {
                     if (currentPage == AppPage.STORAGE_ANALYZER &&
                         analyzerState.selectedTab == AnalyzerTab.TREE &&
                         viewModel.navigateAnalyzerUp()
                     ) {
+                        return@BackHandler
+                    }
+                    if (currentPage == AppPage.SETTINGS || currentPage == AppPage.STORAGE_ANALYZER) {
+                        returnToSearch(if (currentPage == AppPage.SETTINGS) settingsOrigin else analyzerOrigin)
                         return@BackHandler
                     }
                     currentPage = when (currentPage) {
@@ -255,6 +277,7 @@ class MainActivity : ComponentActivity() {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
+                        .then(reveal.modifier())
                         .background(MaterialTheme.colorScheme.background)
                 ) {
                     customBgBitmap?.let { bmp ->
@@ -281,6 +304,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
+                    pageStateHolder.SaveableStateProvider(currentPage.name) {
                     when (currentPage) {
                         AppPage.SEARCH -> {
                             SearchScreen(
@@ -298,14 +322,24 @@ class MainActivity : ComponentActivity() {
                                 onItemClick = { viewModel.onItemClicked(it) },
                                 onItemLongPress = { viewModel.showDetail(it) },
                                 onSelectMode = { viewModel.switchMode(it) },
-                                onToggleTheme = { viewModel.toggleDayNight(isDarkTheme) },
+                                onToggleTheme = { origin -> motionScope.launch {
+                                    reveal.run(origin, duration = 400) { viewModel.toggleDayNight(isDarkTheme) }
+                                } },
                                 onQuickSync = { viewModel.triggerQuickSync() },
                                 onFullScan = { viewModel.triggerFullRebuild(clearFirst = false) },
-                                onOpenStorageAnalyzer = {
-                                    viewModel.openStorageAnalyzer()
-                                    currentPage = AppPage.STORAGE_ANALYZER
-                                },
-                                onOpenSettings = { currentPage = AppPage.SETTINGS },
+                                onOpenStorageAnalyzer = { origin -> motionScope.launch {
+                                    reveal.run(origin) {
+                                        analyzerOrigin = origin
+                                        viewModel.openStorageAnalyzer()
+                                        currentPage = AppPage.STORAGE_ANALYZER
+                                    }
+                                } },
+                                onOpenSettings = { origin -> motionScope.launch {
+                                    reveal.run(origin) {
+                                        settingsOrigin = origin
+                                        currentPage = AppPage.SETTINGS
+                                    }
+                                } },
                                 onOpenShizukuGuide = {
                                     previousPage = AppPage.SEARCH
                                     currentPage = AppPage.SHIZUKU_GUIDE
@@ -327,9 +361,7 @@ class MainActivity : ComponentActivity() {
                         AppPage.STORAGE_ANALYZER -> {
                             val analyzerActions = remember(viewModel) {
                                 object : StorageAnalyzerActions {
-                                    override fun onExit() {
-                                        currentPage = AppPage.SEARCH
-                                    }
+                                    override fun onExit() { returnToSearch(analyzerOrigin) }
                                     override fun onNavigateUp() {
                                         viewModel.navigateAnalyzerUp()
                                     }
@@ -361,7 +393,7 @@ class MainActivity : ComponentActivity() {
                                 modeStatuses = modeStatuses,
                                 indexProgress = indexProgress,
                                 updateState = updateState,
-                                onBack = { currentPage = AppPage.SEARCH },
+                                onBack = { returnToSearch(settingsOrigin) },
                                 onSelectMode = { viewModel.switchMode(it) },
                                 onOpenThemeSettings = { currentPage = AppPage.THEME_SETTINGS },
                                 onRequestStoragePermission = { requestAllFilesPermission() },
@@ -370,6 +402,8 @@ class MainActivity : ComponentActivity() {
                                     currentPage = AppPage.SHIZUKU_GUIDE
                                 },
                                 onRefreshModes = { viewModel.refreshModeStatuses(probeRoot = true) },
+                                onSetClearIndexOnModeSwitch = viewModel::setClearIndexOnModeSwitch,
+                                onSetShowRetainedModeRecords = viewModel::setShowRetainedModeRecords,
                                 onUpdateFilterConfig = { viewModel.updateFilterConfig(it) },
                                 onBrowseDirectories = { parent -> viewModel.listChildDirectories(parent) },
                                 onSetShowRecentOnEmpty = { viewModel.setShowRecentOnEmptyQuery(it) },
@@ -427,6 +461,8 @@ class MainActivity : ComponentActivity() {
                                 }
                             )
                         }
+                    }
+
                     }
 
                     if (currentPage == AppPage.SEARCH && !settings.hasSeenOnboarding) {
@@ -521,6 +557,7 @@ class MainActivity : ComponentActivity() {
                 pendingModeSwitch?.let { pending ->
                     ModeSwitchConfirmDialog(
                         pending = pending,
+                        clearIndex = settings.clearIndexOnModeSwitch,
                         onConfirm = { viewModel.confirmPendingModeSwitch() },
                         onDismiss = { viewModel.dismissPendingModeSwitch() }
                     )

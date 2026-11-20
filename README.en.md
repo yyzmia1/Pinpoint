@@ -22,6 +22,15 @@ Desktop *Everything*-style query syntax · Sub-10 ms CJK substring retrieval ove
 
 ---
 
+## v1.6.3 Update
+
+- **Compact settings header**: Only the Pinpoint version/check row and update channel appear at the top. Channels are ordered Stable → Include beta → Off; changelog and open-source details remain at the bottom.
+- **Keep indexes across modes**: Settings → Access mode adds “Clear index when switching modes” (off by default) and “Show records retained from other modes” (on by default). Reuse Root records and extracted text after switching to Shizuku or Normal; visibility applies to search, document pickers, and Storage Analyzer. Index cleanup never deletes files from disk.
+- **Combined directory lists**: Settings → Directory rules offers an allowlist (empty means unrestricted) and a blocklist, which always takes precedence. Existing exclusions migrate unchanged. Root `/data` scope, cache filtering, and system protections still apply; document extraction scope further narrows the selected directories.
+- **Origin-based transitions**: Storage Analyzer and Settings expand from their toolbar icons and contract on return. Day/night changes spread from an upright sun/moon icon; the Settings gear rotates briefly as the page opens. Transitions preserve page position, and respect the system animation setting.
+
+---
+
 ## Highlights
 
 - **Offline, *Everything*-Grade Search**: Indexes filenames, paths, and document bodies fully offline; supports boolean operators, wildcards, regex, field qualifiers, size/date filters, and millisecond arbitrary CJK substring recall with zero false positives.

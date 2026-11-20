@@ -13,9 +13,10 @@ class ShizukuFsService : IPrivilegedFsService.Stub() {
         roots: Array<String>,
         excludedPrefixes: Array<String>,
         excludedDirNames: Array<String>,
+        includedPrefixes: Array<String>,
         deduplicateMounts: Boolean,
         outputFd: ParcelFileDescriptor
-    ): Int = delegate.scanTreeToPipe(roots, excludedPrefixes, excludedDirNames, deduplicateMounts, outputFd)
+    ): Int = delegate.scanTreeToPipe(roots, excludedPrefixes, excludedDirNames, includedPrefixes, deduplicateMounts, outputFd)
 
     override fun statDirectories(dirPaths: Array<String>): LongArray = delegate.statDirectories(dirPaths)
 
@@ -25,9 +26,10 @@ class ShizukuFsService : IPrivilegedFsService.Stub() {
         dirs: Array<String>,
         excludedPrefixes: Array<String>,
         excludedDirNames: Array<String>,
+        includedPrefixes: Array<String>,
         deduplicateMounts: Boolean,
         outputFd: ParcelFileDescriptor
-    ): Int = delegate.listDirectChildrenToPipe(dirs, excludedPrefixes, excludedDirNames, deduplicateMounts, outputFd)
+    ): Int = delegate.listDirectChildrenToPipe(dirs, excludedPrefixes, excludedDirNames, includedPrefixes, deduplicateMounts, outputFd)
 
     override fun copyFileToFd(path: String, outputFd: ParcelFileDescriptor, maxBytes: Long): Long =
         delegate.copyFileToFd(path, outputFd, maxBytes)

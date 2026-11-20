@@ -60,7 +60,9 @@ data class AppSettings(
     val lastUpdateCheckAtMillis: Long = 0L,
     val ignoredUpdateTag: String = "",
     val receiveStableUpdates: Boolean = true,
-    val receiveBetaUpdates: Boolean = false
+    val receiveBetaUpdates: Boolean = false,
+    val clearIndexOnModeSwitch: Boolean = false,
+    val showRetainedModeRecords: Boolean = true
 )
 
 class SettingsRepository(context: Context) {
@@ -92,6 +94,7 @@ class SettingsRepository(context: Context) {
                 skipNoiseCaches = skipNoise,
                 deduplicateMounts = dedupMounts,
                 customExcludedPaths = customExcludes,
+                customIncludedPaths = prefs.getString(KEY_CUSTOM_INCLUDES, "").orEmpty().lines().filter { it.isNotBlank() },
                 tier2AllowedPrefixes = allowedPrefixes,
                 tier2BlockedPrefixes = blockedPrefixes,
                 tier2PriorityOrder = priorityOrder,
@@ -126,7 +129,9 @@ class SettingsRepository(context: Context) {
             lastUpdateCheckAtMillis = prefs.getLong(KEY_LAST_UPDATE_CHECK, 0L),
             ignoredUpdateTag = prefs.getString(KEY_IGNORED_UPDATE_TAG, "").orEmpty(),
             receiveStableUpdates = prefs.getBoolean(KEY_RECEIVE_STABLE_UPDATES, true),
-            receiveBetaUpdates = prefs.getBoolean(KEY_RECEIVE_BETA_UPDATES, false)
+            receiveBetaUpdates = prefs.getBoolean(KEY_RECEIVE_BETA_UPDATES, false),
+            clearIndexOnModeSwitch = prefs.getBoolean(KEY_CLEAR_INDEX_ON_MODE_SWITCH, false),
+            showRetainedModeRecords = prefs.getBoolean(KEY_SHOW_RETAINED_MODE_RECORDS, true)
         )
     }
 
@@ -135,17 +140,29 @@ class SettingsRepository(context: Context) {
         _settings.value = _settings.value.copy(accessMode = mode)
     }
 
+    fun setClearIndexOnModeSwitch(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_CLEAR_INDEX_ON_MODE_SWITCH, enabled).apply()
+        _settings.value = _settings.value.copy(clearIndexOnModeSwitch = enabled)
+    }
+
+    fun setShowRetainedModeRecords(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SHOW_RETAINED_MODE_RECORDS, enabled).apply()
+        _settings.value = _settings.value.copy(showRetainedModeRecords = enabled)
+    }
+
     fun updateFilterConfig(config: FilterConfig) {
         val cleanExcludes = FilterConfig.normalizePaths(config.customExcludedPaths)
         val cleanPriority = FilterConfig.normalizePriorityOrder(config.tier2PriorityOrder)
         val cleanConfig = config.copy(
             customExcludedPaths = cleanExcludes,
+            customIncludedPaths = FilterConfig.normalizePaths(config.customIncludedPaths),
             tier2PriorityOrder = cleanPriority
         )
         prefs.edit()
             .putBoolean(KEY_SKIP_NOISE, cleanConfig.skipNoiseCaches)
             .putBoolean(KEY_DEDUP_MOUNTS, cleanConfig.deduplicateMounts)
             .putString(KEY_CUSTOM_EXCLUDES, cleanExcludes.joinToString("\n"))
+            .putString(KEY_CUSTOM_INCLUDES, cleanConfig.customIncludedPaths.joinToString("\n"))
             .putBoolean(KEY_EXCLUDES_MIGRATED_V143, true)
             .putString(KEY_TIER2_ALLOWED, cleanConfig.tier2AllowedPrefixes.joinToString("\n"))
             .putString(KEY_TIER2_BLOCKED, cleanConfig.tier2BlockedPrefixes.joinToString("\n"))
@@ -395,6 +412,9 @@ class SettingsRepository(context: Context) {
         private const val KEY_SKIP_NOISE = "skip_noise_caches"
         private const val KEY_DEDUP_MOUNTS = "dedup_mounts"
         private const val KEY_LEGACY_ROOT_INCLUDE_DATA = "root_include_data"
+        private const val KEY_CUSTOM_INCLUDES = "custom_includes"
+        private const val KEY_CLEAR_INDEX_ON_MODE_SWITCH = "clear_index_on_mode_switch"
+        private const val KEY_SHOW_RETAINED_MODE_RECORDS = "show_retained_mode_records"
         private const val KEY_CUSTOM_EXCLUDES = "custom_excludes"
         private const val KEY_EXCLUDES_MIGRATED_V143 = "excludes_migrated_v143"
         private const val KEY_LEGACY_CUSTOM_EXCLUDED_DIRS = "custom_excluded_dirs"

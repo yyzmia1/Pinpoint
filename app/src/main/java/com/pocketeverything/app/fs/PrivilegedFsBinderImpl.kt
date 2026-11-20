@@ -18,22 +18,25 @@ class PrivilegedFsBinderImpl(
         roots: Array<String>,
         excludedPrefixes: Array<String>,
         excludedDirNames: Array<String>,
+        includedPrefixes: Array<String>,
         deduplicateMounts: Boolean,
         outputFd: ParcelFileDescriptor
-    ): Int = walkToPipe(roots, excludedPrefixes, excludedDirNames, deduplicateMounts, outputFd, recursive = true)
+    ): Int = walkToPipe(roots, excludedPrefixes, excludedDirNames, includedPrefixes, deduplicateMounts, outputFd, recursive = true)
 
     override fun listDirectChildrenToPipe(
         dirs: Array<String>,
         excludedPrefixes: Array<String>,
         excludedDirNames: Array<String>,
+        includedPrefixes: Array<String>,
         deduplicateMounts: Boolean,
         outputFd: ParcelFileDescriptor
-    ): Int = walkToPipe(dirs, excludedPrefixes, excludedDirNames, deduplicateMounts, outputFd, recursive = false)
+    ): Int = walkToPipe(dirs, excludedPrefixes, excludedDirNames, includedPrefixes, deduplicateMounts, outputFd, recursive = false)
 
     private fun walkToPipe(
         roots: Array<String>,
         excludedPrefixes: Array<String>,
         excludedDirNames: Array<String>,
+        includedPrefixes: Array<String>,
         deduplicateMounts: Boolean,
         outputFd: ParcelFileDescriptor,
         recursive: Boolean
@@ -45,6 +48,7 @@ class PrivilegedFsBinderImpl(
                         roots = roots,
                         excludedPrefixes = excludedPrefixes,
                         excludedDirNames = excludedDirNames,
+                        includedPrefixes = includedPrefixes,
                         deduplicateMounts = deduplicateMounts,
                         writer = writer,
                         recursive = recursive

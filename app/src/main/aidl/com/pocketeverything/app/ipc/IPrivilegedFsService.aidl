@@ -11,6 +11,7 @@ interface IPrivilegedFsService {
         in String[] roots,
         in String[] excludedPrefixes,
         in String[] excludedDirNames,
+        in String[] includedPrefixes,
         boolean deduplicateMounts,
         in ParcelFileDescriptor outputFd
     ) = 0;
@@ -49,6 +50,7 @@ interface IPrivilegedFsService {
         in String[] dirs,
         in String[] excludedPrefixes,
         in String[] excludedDirNames,
+        in String[] includedPrefixes,
         boolean deduplicateMounts,
         in ParcelFileDescriptor outputFd
     ) = 5;

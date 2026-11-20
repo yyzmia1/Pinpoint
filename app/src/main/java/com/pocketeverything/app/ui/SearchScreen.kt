@@ -74,11 +74,19 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -122,11 +130,11 @@ fun SearchScreen(
     onItemClick: (SearchResultItem) -> Unit,
     onItemLongPress: (SearchResultItem) -> Unit,
     onSelectMode: (AccessMode) -> Unit,
-    onToggleTheme: () -> Unit,
+    onToggleTheme: (Offset) -> Unit,
     onQuickSync: () -> Unit,
     onFullScan: () -> Unit,
-    onOpenStorageAnalyzer: () -> Unit = {},
-    onOpenSettings: () -> Unit,
+    onOpenStorageAnalyzer: (Offset) -> Unit = {},
+    onOpenSettings: (Offset) -> Unit,
     onOpenShizukuGuide: () -> Unit,
     onRefreshModes: () -> Unit = {},
     onRequestStoragePermission: () -> Unit = {},
@@ -140,16 +148,24 @@ fun SearchScreen(
     var targets by remember { mutableStateOf(OnboardingTargets()) }
     val focusRequester = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
     val listState = rememberLazyListState()
 
+    var requestedInitialFocus by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(settings.hasSeenOnboarding) {
-        if (settings.hasSeenOnboarding) {
+        if (settings.hasSeenOnboarding && !requestedInitialFocus) {
             runCatching { focusRequester.requestFocus() }
+            requestedInitialFocus = true
         } else {
             keyboard?.hide()
         }
     }
-    LaunchedEffect(query, quickScope, sortOrder) { listState.scrollToItem(0) }
+    val listKey = "$query|$quickScope|$sortOrder"
+    var previousListKey by rememberSaveable { mutableStateOf(listKey) }
+    LaunchedEffect(listKey) {
+        if (previousListKey != listKey) listState.scrollToItem(0)
+        previousListKey = listKey
+    }
     LaunchedEffect(listState.isScrollInProgress) {
         if (listState.isScrollInProgress) keyboard?.hide()
     }
@@ -183,19 +199,23 @@ fun SearchScreen(
                 },
                 onToggleTheme = {
                     haptics.click()
-                    onToggleTheme()
+                    onToggleTheme(it)
                 },
                 onQuickSync = {
                     haptics.click()
                     onQuickSync()
                 },
                 onOpenStorageAnalyzer = {
+                    keyboard?.hide()
+                    focusManager.clearFocus()
                     haptics.tick()
-                    onOpenStorageAnalyzer()
+                    onOpenStorageAnalyzer(it)
                 },
                 onOpenSettings = {
+                    keyboard?.hide()
+                    focusManager.clearFocus()
                     haptics.tick()
-                    onOpenSettings()
+                    onOpenSettings(it)
                 },
                 onModePillBounds = { rect -> targets = targets.copy(modePill = rect) }
             )
@@ -356,10 +376,10 @@ private fun HeaderBar(
     isDarkTheme: Boolean,
     availability: ModeAvailability?,
     onModeClick: () -> Unit,
-    onToggleTheme: () -> Unit,
+    onToggleTheme: (Offset) -> Unit,
     onQuickSync: () -> Unit,
-    onOpenStorageAnalyzer: () -> Unit,
-    onOpenSettings: () -> Unit,
+    onOpenStorageAnalyzer: (Offset) -> Unit,
+    onOpenSettings: (Offset) -> Unit,
     onModePillBounds: (Rect) -> Unit
 ) {
     Row(
@@ -413,8 +433,14 @@ private fun HeaderBar(
             }
         }
 
+        var analyzerOrigin by remember { mutableStateOf(Offset.Zero) }
+        var themeOrigin by remember { mutableStateOf(Offset.Zero) }
+        var settingsOrigin by remember { mutableStateOf(Offset.Zero) }
+        val settingsRotation = remember { Animatable(0f) }
+        val motionScope = rememberCoroutineScope()
         val actionTint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.82f)
-        IconButton(onClick = onOpenStorageAnalyzer, modifier = Modifier.size(36.dp)) {
+        IconButton(onClick = { onOpenStorageAnalyzer(analyzerOrigin) }, modifier = Modifier.size(36.dp)
+            .onGloballyPositioned { analyzerOrigin = it.boundsInRoot().center }) {
             Icon(
                 imageVector = Icons.Default.PieChart,
                 contentDescription = "空间透视",
@@ -422,7 +448,8 @@ private fun HeaderBar(
                 modifier = Modifier.size(19.dp)
             )
         }
-        IconButton(onClick = onToggleTheme, modifier = Modifier.size(36.dp)) {
+        IconButton(onClick = { onToggleTheme(themeOrigin) },
+            modifier = Modifier.size(36.dp).onGloballyPositioned { themeOrigin = it.boundsInRoot().center }) {
             Icon(
                 imageVector = if (isDarkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,
                 contentDescription = if (isDarkTheme) "切换白天模式" else "切换黑夜模式",
@@ -438,12 +465,17 @@ private fun HeaderBar(
                 modifier = Modifier.size(19.dp)
             )
         }
-        IconButton(onClick = onOpenSettings, modifier = Modifier.size(36.dp)) {
+        IconButton(onClick = { motionScope.launch {
+            if (!settingsRotation.isRunning) {
+                settingsRotation.animateTo(settingsRotation.value + 90f, tween(100))
+                onOpenSettings(settingsOrigin)
+            }
+        } }, modifier = Modifier.size(36.dp).onGloballyPositioned { settingsOrigin = it.boundsInRoot().center }) {
             Icon(
                 Icons.Default.Settings,
                 contentDescription = "设置",
                 tint = actionTint,
-                modifier = Modifier.size(19.dp)
+                modifier = Modifier.size(19.dp).graphicsLayer { rotationZ = settingsRotation.value }
             )
         }
     }

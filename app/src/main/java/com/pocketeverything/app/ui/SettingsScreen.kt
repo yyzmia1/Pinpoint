@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -68,6 +69,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.VerticalDivider
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -116,6 +119,7 @@ import com.pocketeverything.app.ui.theme.rememberAppHaptics
 
 private enum class DirPickTarget {
     EXCLUDE,
+    INCLUDE,
     TIER2_ALLOW
 }
 
@@ -128,6 +132,8 @@ fun SettingsScreen(
     updateState: UpdateCheckState,
     onBack: () -> Unit,
     onSelectMode: (AccessMode) -> Unit,
+    onSetClearIndexOnModeSwitch: (Boolean) -> Unit,
+    onSetShowRetainedModeRecords: (Boolean) -> Unit,
     onOpenThemeSettings: () -> Unit,
     onRequestStoragePermission: () -> Unit,
     onOpenShizukuGuide: () -> Unit,
@@ -160,6 +166,7 @@ fun SettingsScreen(
     var maxPdfMbDraft by remember(cfg.maxPdfBytes) {
         mutableIntStateOf((cfg.maxPdfBytes / (1024L * 1024L)).toInt())
     }
+    var editWhitelist by remember { mutableStateOf(true) }
     var expandModes by remember { mutableStateOf(false) }
     var dirPickTarget by remember { mutableStateOf<DirPickTarget?>(null) }
     var exactLimitTarget by remember { mutableStateOf<Triple<String, Int, (Int) -> Unit>?>(null) }
@@ -205,41 +212,130 @@ fun SettingsScreen(
                 .padding(horizontal = 16.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Conditional compact banner only when a newer version is actually available
-            if (updateState is UpdateCheckState.Available) {
-                Surface(
-                    onClick = onCheckUpdates,
-                    shape = RoundedCornerShape(14.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+            Surface(shape = RoundedCornerShape(20.dp), color = cardColor,
+                modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                            .padding(vertical = 0.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        BrandMarkIcon(size = 28.dp)
-                        Spacer(Modifier.width(10.dp))
+                        BrandMarkIcon(size = 38.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Pinpoint",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "v${BuildConfig.VERSION_NAME} · #${BuildConfig.VERSION_CODE}",
+                                style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            val statusText: Pair<String, Color>? = when (updateState) {
+                                is UpdateCheckState.UpToDate -> "已是最新版本" to Emerald400
+                                is UpdateCheckState.Available -> "发现新版本 ${updateState.info.tagName}" to MaterialTheme.colorScheme.primary
+                                is UpdateCheckState.Error -> "检查失败：${updateState.message}" to Rose400
+                                else -> null
+                            }
+                            if (statusText != null) {
+                                Text(
+                                    text = statusText.first,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = statusText.second,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        FilledTonalButton(
+                            onClick = onCheckUpdates,
+                            enabled = updateState !is UpdateCheckState.Checking,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            if (updateState is UpdateCheckState.Checking) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(Modifier.width(5.dp))
+                                Text("检测中", style = MaterialTheme.typography.labelMedium)
+                            } else {
+                                Text("检查更新", style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
+                    }
+                    SettingsDivider()
+                    val channelIndex = when {
+                        settings.receiveBetaUpdates -> 2
+                        settings.receiveStableUpdates -> 1
+                        else -> 0
+                    }
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         Text(
-                            text = "发现新版本 ${updateState.info.tagName}",
+                            text = "更新通道",
                             style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.heightIn(min = 48.dp).wrapContentHeight(Alignment.CenterVertically).padding(end = 12.dp)
                         )
-                        Text(
-                            text = "立即查看",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Icon(
-                            Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                            contentDescription = "查看更新",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp)
-                        )
+                        CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
+                        Surface(
+                            modifier = Modifier.align(Alignment.CenterVertically),
+                            shape = RoundedCornerShape(9.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(2.dp),
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                listOf("正式版" to 1, "含测试版" to 2, "关闭" to 0).forEach { (label, idx) ->
+                                    val selected = channelIndex == idx
+                                    Surface(
+                                        onClick = {
+                                            haptics.tick()
+                                            when (idx) {
+                                                0 -> {
+                                                    onSetReceiveStableUpdates(false)
+                                                    onSetReceiveBetaUpdates(false)
+                                                }
+                                                1 -> {
+                                                    onSetReceiveStableUpdates(true)
+                                                    onSetReceiveBetaUpdates(false)
+                                                }
+                                                2 -> {
+                                                    onSetReceiveStableUpdates(true)
+                                                    onSetReceiveBetaUpdates(true)
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier.heightIn(min = 32.dp),
+                                        shape = RoundedCornerShape(7.dp),
+                                        color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                            color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.heightIn(min = 32.dp).wrapContentHeight(Alignment.CenterVertically)
+                                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                                            maxLines = 2
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                     }
                 }
             }
@@ -374,6 +470,16 @@ fun SettingsScreen(
                         }
                     }
                 }
+                SettingsDivider()
+                ToggleRow(title = "切换模式时清理索引",
+                    subtitle = "关闭时保留其他模式的记录与正文缓存；开启后在扫描完成时清理",
+                    checked = settings.clearIndexOnModeSwitch,
+                    onCheckedChange = onSetClearIndexOnModeSwitch)
+                SettingsDivider()
+                ToggleRow(title = "显示其他模式保留的记录",
+                    subtitle = "在搜索与空间透视中显示高权限模式留下的记录",
+                    checked = settings.showRetainedModeRecords,
+                    onCheckedChange = onSetShowRetainedModeRecords)
             }
 
             // 3. Index & Sync Management (with live progress, go-home shortcut & explicit errors)
@@ -573,9 +679,10 @@ fun SettingsScreen(
 
             // 5. Directory Scope & Exclusions
             val hasCustomFilterSettings = cfg.skipNoiseCaches != true ||
-                FilterConfig.normalizePaths(cfg.customExcludedPaths) != FilterConfig.DEFAULT_EXCLUDED_PATHS
+                FilterConfig.normalizePaths(cfg.customExcludedPaths) != FilterConfig.DEFAULT_EXCLUDED_PATHS ||
+                cfg.customIncludedPaths.isNotEmpty()
             SettingsSection(
-                title = "目录范围与排除",
+                title = "目录规则",
                 cardColor = cardColor,
                 trailingAction = if (hasCustomFilterSettings) {
                     {
@@ -591,7 +698,8 @@ fun SettingsScreen(
                                         cfg.copy(
                                             skipNoiseCaches = true,
                                             deduplicateMounts = true,
-                                            customExcludedPaths = FilterConfig.DEFAULT_EXCLUDED_PATHS
+                                            customExcludedPaths = FilterConfig.DEFAULT_EXCLUDED_PATHS,
+                                            customIncludedPaths = emptyList()
                                         )
                                     )
                                 }
@@ -648,49 +756,50 @@ fun SettingsScreen(
                 )
                 SettingsDivider()
 
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "排除目录",
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.weight(1f)
-                    )
-                    FilledTonalButton(
-                        onClick = {
-                            haptics.click()
-                            dirPickTarget = DirPickTarget.EXCLUDE
-                        },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                        modifier = Modifier.height(32.dp)
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(15.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("添加目录", style = MaterialTheme.typography.labelMedium)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChipPill(label = "白名单 ${cfg.customIncludedPaths.size}", selected = editWhitelist,
+                        modifier = Modifier.weight(1f), onClick = { editWhitelist = true; haptics.tick() })
+                    FilterChipPill(label = "黑名单 ${cfg.customExcludedPaths.size}", selected = !editWhitelist,
+                        modifier = Modifier.weight(1f), onClick = { editWhitelist = false; haptics.tick() })
+                }
+                Text(text = if (editWhitelist) "仅索引白名单内的目录；为空时不限范围。黑名单始终优先。"
+                        else "跳过黑名单目录及其全部子目录，两份规则同时生效。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 10.dp))
+                val rulePaths = if (editWhitelist) cfg.customIncludedPaths else cfg.customExcludedPaths
+                rulePaths.forEach { path ->
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Folder, null, tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp))
+                        Column(Modifier.weight(1f).padding(horizontal = 10.dp, vertical = 8.dp)) {
+                            Text(path.substringAfterLast('/').ifEmpty { "根目录" }, style = MaterialTheme.typography.bodyMedium)
+                            Text(path, style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        TextButton(onClick = {
+                            val paths = rulePaths.filterNot { it == path }
+                            onUpdateFilterConfig(if (editWhitelist) cfg.copy(customIncludedPaths = paths)
+                                else cfg.copy(customExcludedPaths = paths))
+                        }) { Text("移除") }
                     }
                 }
-
-                val visibleExcludedPaths = if (settings.accessMode == AccessMode.ROOT) {
-                    cfg.customExcludedPaths
-                } else {
-                    cfg.customExcludedPaths.filterNot { it == "/data" || it.startsWith("/data/") }
+                if (rulePaths.isEmpty()) {
+                    Text(if (editWhitelist) "未限定目录" else "未排除任何目录",
+                        style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 10.dp))
                 }
-                if (visibleExcludedPaths.isNotEmpty()) {
-                    Spacer(Modifier.height(6.dp))
-                    RemovablePathChipFlow(
-                        paths = visibleExcludedPaths,
-                        onRemove = { target ->
-                            haptics.tick()
-                            val cleanTarget = if (target.length > 1) target.trimEnd('/') else target
-                            val updated = cfg.customExcludedPaths.filterNot {
-                                (if (it.length > 1) it.trimEnd('/') else it) == cleanTarget
-                            }
-                            onUpdateFilterConfig(cfg.copy(customExcludedPaths = updated))
-                        }
-                    )
+                if (cfg.customIncludedPaths.any { included -> cfg.customExcludedPaths.any { excluded ->
+                    excluded == "/" || included == excluded || included.startsWith("$excluded/")
+                } }) {
+                    Text("部分白名单目录被黑名单或 Root /data 范围排除，请调整冲突规则。",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+                FilledTonalButton(onClick = {
+                    haptics.click()
+                    dirPickTarget = if (editWhitelist) DirPickTarget.INCLUDE else DirPickTarget.EXCLUDE
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.Add, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (editWhitelist) "添加白名单目录" else "添加黑名单目录")
                 }
             }
 
@@ -912,7 +1021,11 @@ fun SettingsScreen(
                 val targetType = dirPickTarget!!
                 val initialRoot = if (settings.accessMode == AccessMode.ROOT) "/" else "/storage/emulated/0"
                 DirectoryPickerDialog(
-                    title = if (targetType == DirPickTarget.EXCLUDE) "选择排除目录" else "选择正文解析目录",
+                    title = when (targetType) {
+                        DirPickTarget.EXCLUDE -> "添加黑名单目录"
+                        DirPickTarget.INCLUDE -> "添加白名单目录"
+                        DirPickTarget.TIER2_ALLOW -> "选择正文解析目录"
+                    },
                     initialPath = initialRoot,
                     allowRootLevel = settings.accessMode == AccessMode.ROOT,
                     onBrowse = onBrowseDirectories,
@@ -924,6 +1037,9 @@ fun SettingsScreen(
                             DirPickTarget.EXCLUDE -> {
                                 val updated = FilterConfig.normalizePaths(cfg.customExcludedPaths + clean)
                                 onUpdateFilterConfig(cfg.copy(customExcludedPaths = updated))
+                            }
+                            DirPickTarget.INCLUDE -> {
+                                onUpdateFilterConfig(cfg.copy(customIncludedPaths = FilterConfig.normalizePaths(cfg.customIncludedPaths + clean)))
                             }
                             DirPickTarget.TIER2_ALLOW -> {
                                 val base = if (isCustomScope) cfg.tier2AllowedPrefixes else emptyList()
@@ -951,125 +1067,6 @@ fun SettingsScreen(
 
             // 6. Updates, About & Open Source (consolidated at bottom for a clean first screen)
             SettingsSection(title = "关于与更新", cardColor = cardColor) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    BrandMarkIcon(size = 38.dp)
-                    Spacer(Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Pinpoint",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = "v${BuildConfig.VERSION_NAME} · #${BuildConfig.VERSION_CODE}",
-                            style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        val statusText: Pair<String, Color>? = when (updateState) {
-                            is UpdateCheckState.UpToDate -> "已是最新版本" to Emerald400
-                            is UpdateCheckState.Available -> "发现新版本 ${updateState.info.tagName}" to MaterialTheme.colorScheme.primary
-                            is UpdateCheckState.Error -> "检查失败：${updateState.message}" to Rose400
-                            else -> null
-                        }
-                        if (statusText != null) {
-                            Text(
-                                text = statusText.first,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = statusText.second,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.padding(top = 2.dp)
-                            )
-                        }
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    FilledTonalButton(
-                        onClick = onCheckUpdates,
-                        enabled = updateState !is UpdateCheckState.Checking,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        modifier = Modifier.height(34.dp)
-                    ) {
-                        if (updateState is UpdateCheckState.Checking) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(14.dp),
-                                strokeWidth = 2.dp
-                            )
-                            Spacer(Modifier.width(5.dp))
-                            Text("检测中", style = MaterialTheme.typography.labelMedium)
-                        } else {
-                            Text("检查更新", style = MaterialTheme.typography.labelMedium)
-                        }
-                    }
-                }
-                SettingsDivider()
-                val channelIndex = when {
-                    settings.receiveBetaUpdates -> 2
-                    settings.receiveStableUpdates -> 1
-                    else -> 0
-                }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "更新通道",
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Surface(
-                        shape = RoundedCornerShape(9.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerHigh
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(2.dp),
-                            horizontalArrangement = Arrangement.spacedBy(2.dp)
-                        ) {
-                            listOf("关闭", "正式版", "含测试版").forEachIndexed { idx, label ->
-                                val selected = channelIndex == idx
-                                Surface(
-                                    onClick = {
-                                        haptics.tick()
-                                        when (idx) {
-                                            0 -> {
-                                                onSetReceiveStableUpdates(false)
-                                                onSetReceiveBetaUpdates(false)
-                                            }
-                                            1 -> {
-                                                onSetReceiveStableUpdates(true)
-                                                onSetReceiveBetaUpdates(false)
-                                            }
-                                            2 -> {
-                                                onSetReceiveStableUpdates(true)
-                                                onSetReceiveBetaUpdates(true)
-                                            }
-                                        }
-                                    },
-                                    shape = RoundedCornerShape(7.dp),
-                                    color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
-                                ) {
-                                    Text(
-                                        text = label,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                                        color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                        maxLines = 1
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-                SettingsDivider()
                 NavigationRow(
                     title = "版本更新日志",
                     onClick = onOpenChangelog
@@ -2068,6 +2065,7 @@ private fun modeScopeDescription(mode: AccessMode): String = when (mode) {
 @Composable
 fun ModeSwitchConfirmDialog(
     pending: PendingModeSwitch,
+    clearIndex: Boolean,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -2082,7 +2080,8 @@ fun ModeSwitchConfirmDialog(
         },
         text = {
             Text(
-                text = "将按 ${modeScopeDescription(pending.targetMode)} 重建索引并保留已有正文缓存。",
+                text = if (clearIndex) "将同步${modeScopeDescription(pending.targetMode)}，成功后清理本次范围以外的旧记录。仅清理索引，不删除文件。"
+                    else "保留已有记录与正文缓存，并在后台同步${modeScopeDescription(pending.targetMode)}。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

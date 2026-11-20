@@ -198,6 +198,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         refreshModeStatuses()
         indexManager.triggerStartupSync()
+        viewModelScope.launch {
+            settings.map { it.accessMode to it.showRetainedModeRecords }.distinctUntilChanged().collect {
+                analyzerBuildJob?.cancel()
+                analyzerChildrenJob?.cancel()
+                analyzerLargeFilesJob?.cancel()
+                analyzerBuiltGeneration = -1L
+                _analyzerState.update { state -> state.copy(snapshot = null, activeDirNode = null,
+                    activeDirChildren = emptyList(), activeLargeFiles = emptyList()) }
+            }
+        }
+
 
         viewModelScope.launch {
             delay(1500L)
@@ -214,10 +225,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _query.debounce(65),
                 _quickScope,
                 _sortOrder,
-                settingsRepo.settings.map { it.showRecentOnEmptyQuery }.distinctUntilChanged(),
+                settingsRepo.settings.map { Triple(it.showRecentOnEmptyQuery, it.accessMode, it.showRetainedModeRecords) }.distinctUntilChanged(),
                 indexMutationTick
             ) { q, scope, sort, showRecent, tick ->
-                SearchTriggerParams(q, scope, sort, showRecent, tick)
+                SearchTriggerParams(q, scope, sort, showRecent.first, tick, showRecent.second, showRecent.third)
             }.distinctUntilChanged().collectLatest { params ->
                 val resp = withContext(Dispatchers.IO) {
                     try {
@@ -244,7 +255,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val scope: QuickScope,
         val sort: SortOrder,
         val showRecentOnEmpty: Boolean,
-        val indexTick: Triple<Long, Long, Long>
+        val indexTick: Triple<Long, Long, Long>,
+        val mode: AccessMode,
+        val showRetained: Boolean
     )
 
     fun onAppForegrounded() {
@@ -355,9 +368,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun confirmPendingModeSwitch() {
         val pending = _pendingModeSwitch.value ?: return
         _pendingModeSwitch.value = null
-        settingsRepo.updateAccessMode(pending.targetMode)
-        indexManager.startFullScan(clearExisting = false)
-        emitMessage("已切换至 ${pending.targetMode.label}，正在后台重建索引", jumpToSearch = true)
+        viewModelScope.launch { indexManager.switchMode(pending.targetMode) }
+        emitMessage("已切换至 ${pending.targetMode.label}，正在后台同步索引", jumpToSearch = true)
     }
 
     fun requestShizukuPermission() {
@@ -654,6 +666,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             old.skipNoiseCaches != config.skipNoiseCaches ||
                 old.deduplicateMounts != config.deduplicateMounts ||
                 cleanOld != cleanNew ||
+                old.customIncludedPaths != config.customIncludedPaths ||
                 FilterConfig.normalizeTier2AllowedPrefixes(old.tier2AllowedPrefixes) !=
                 FilterConfig.normalizeTier2AllowedPrefixes(config.tier2AllowedPrefixes) ||
                 FilterConfig.normalizePaths(old.tier2BlockedPrefixes) !=
@@ -668,12 +681,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch(Dispatchers.IO) {
+            indexManager.cancelScanAndAwait()
             val summary = indexManager.pruneByCurrentFilter()
             val removedExcludes = cleanOld.filter { prev ->
                 prev !in cleanNew && cleanNew.none { cur -> cur == "/" || prev.startsWith("$cur/") }
             }
             val accessibleNewDirs = removedExcludes.filter { mode == AccessMode.ROOT || !it.startsWith("/data") }
-            val fullRescanNeeded = (old.skipNoiseCaches && !config.skipNoiseCaches) ||
+            val fullRescanNeeded = old.customIncludedPaths != config.customIncludedPaths || (old.skipNoiseCaches && !config.skipNoiseCaches) ||
                 (old.deduplicateMounts && !config.deduplicateMounts)
 
             when {
@@ -701,6 +715,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             emitMessage(msg)
         }
     }
+
+    fun setClearIndexOnModeSwitch(enabled: Boolean) = settingsRepo.setClearIndexOnModeSwitch(enabled)
+
+    fun setShowRetainedModeRecords(enabled: Boolean) = settingsRepo.setShowRetainedModeRecords(enabled)
 
     fun setOpenContentHitsInPreview(enabled: Boolean) {
         settingsRepo.setOpenContentHitsInPreview(enabled)

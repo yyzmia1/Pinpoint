@@ -132,4 +132,24 @@ class FilterEngineTest {
         assertTrue(engine.shouldSkipTier1Path("/storage/emulated/0/App/cache/sub/data.bin", "data.bin", false, AccessMode.ROOT))
         assertFalse(engine.shouldSkipTier1Path("/storage/emulated/0/Documents/cache", "cache", false, AccessMode.ROOT))
     }
+
+    @Test
+    fun `whitelist traverses ancestors excludes siblings and blacklist and system protections always win`() {
+        val config = FilterConfig(customIncludedPaths = listOf("/storage/emulated/0/Documents"),
+            customExcludedPaths = listOf("/storage/emulated/0/Documents/private"))
+        for (mode in AccessMode.entries) {
+            val filter = FilterEngine(config)
+            assertFalse(filter.shouldSkipTier1Path("/storage", "storage", true, mode))
+            assertFalse(filter.shouldSkipTier1Path("/storage/emulated/0/Documents/a.txt", "a.txt", false, mode))
+            assertTrue(filter.shouldSkipTier1Path("/storage/emulated/0/Documents2/a.txt", "a.txt", false, mode))
+            assertTrue(filter.shouldSkipTier1Path("/storage/emulated/0/Documents/private/a.txt", "a.txt", false, mode))
+            assertTrue(filter.shouldSkipTier1Path("/storage/emulated/0/other.txt", "other.txt", false, mode))
+            assertEquals(Tier2Status.SKIPPED_FILTER, filter.evaluateTier2Status("/storage/emulated/0/other.txt", "txt", 10, false))
+            assertEquals(Tier2Status.PENDING, filter.evaluateTier2Status("/storage/emulated/0/Documents/a.txt", "txt", 10, false))
+        }
+        val root = FilterEngine(FilterConfig(customIncludedPaths = listOf("/proc", "/data/media"), customExcludedPaths = emptyList()))
+        assertTrue(root.shouldSkipTier1Path("/proc", "proc", true, AccessMode.ROOT))
+        assertTrue(root.shouldSkipTier1Path("/data/media", "media", true, AccessMode.ROOT))
+        assertFalse(FilterEngine(FilterConfig(customIncludedPaths = emptyList())).shouldSkipTier1Path("/storage/a.txt", "a.txt", false, AccessMode.NORMAL))
+    }
 }

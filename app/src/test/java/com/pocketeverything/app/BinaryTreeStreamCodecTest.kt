@@ -83,4 +83,14 @@ class BinaryTreeStreamCodecTest {
         assertEquals(listOf("/storage/emulated/0/EmptyDir", "/storage/emulated/0/WithFile"), listed)
         assertEquals(1, records.size)
     }
+
+    @Test(expected = java.io.IOException::class)
+    fun `truncated scan stream fails instead of permitting index cleanup`() {
+        val output = java.io.ByteArrayOutputStream()
+        BinaryTreeStreamCodec.Writer(output).use { it.writeDirListed("/storage/emulated/0") }
+        val bytes = output.toByteArray().dropLast(1).toByteArray()
+        runBlocking {
+            BinaryTreeStreamCodec.readStream(java.io.ByteArrayInputStream(bytes), AccessMode.NORMAL) { }
+        }
+    }
 }
