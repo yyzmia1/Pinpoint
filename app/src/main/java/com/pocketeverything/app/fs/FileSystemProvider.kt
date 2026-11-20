@@ -521,7 +521,7 @@ class PrivilegedFileProvider(
         if (paths.isEmpty()) return@withContext emptyMap()
         val svc = ensureBound()
         val map = HashMap<String, Long>(paths.size)
-        for (chunk in paths.chunked(800)) {
+        for (chunk in paths.chunked(2500)) {
             val mtimes = try {
                 rpc(svc, chunk.toTypedArray())
             } catch (t: Throwable) {

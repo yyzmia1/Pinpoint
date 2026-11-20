@@ -476,6 +476,9 @@ class MainActivity : ComponentActivity() {
                             val targetDir = if (item.isDir) item.path else item.parentPath
                             viewModel.openStorageAnalyzer(initialDirPath = targetDir)
                             currentPage = AppPage.STORAGE_ANALYZER
+                        },
+                        onDelete = {
+                            viewModel.deleteSearchResultItem(item)
                         }
                     )
                 }

@@ -4,6 +4,8 @@ import android.system.Os
 import android.system.OsConstants
 import java.io.File
 import java.util.ArrayDeque
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 
 /**
  * High-speed non-following directory tree walker using POSIX lstat + (st_dev, st_ino)
@@ -91,15 +93,57 @@ object PrivilegedTreeWalker {
         return count
     }
 
+    private val statWorkers: Int = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+    private val statExecutor = Executors.newFixedThreadPool(statWorkers) { r ->
+        Thread(r, "pinpoint-lstat").apply { isDaemon = true }
+    }
+
     fun statPaths(paths: Array<String>, requireDir: Boolean = false): LongArray {
-        val result = LongArray(paths.size) { -1L }
-        for (i in paths.indices) {
+        val n = paths.size
+        val result = LongArray(n) { -1L }
+        if (n <= 1500) {
+            statRange(paths, result, 0, n, requireDir)
+            return result
+        }
+        val workers = statWorkers.coerceAtMost(n / 400)
+        if (workers <= 1) {
+            statRange(paths, result, 0, n, requireDir)
+            return result
+        }
+        val chunk = (n + workers - 1) / workers
+        val latch = CountDownLatch(workers)
+        for (w in 0 until workers) {
+            val start = w * chunk
+            val end = minOf(n, start + chunk)
+            if (start >= end) {
+                latch.countDown()
+                continue
+            }
+            statExecutor.execute {
+                try {
+                    statRange(paths, result, start, end, requireDir)
+                } finally {
+                    latch.countDown()
+                }
+            }
+        }
+        runCatching { latch.await() }
+        return result
+    }
+
+    private fun statRange(
+        paths: Array<String>,
+        result: LongArray,
+        start: Int,
+        end: Int,
+        requireDir: Boolean
+    ) {
+        for (i in start until end) {
             val st = runCatching { Os.lstat(paths[i]) }.getOrNull() ?: continue
             if (!requireDir || OsConstants.S_ISDIR(st.st_mode)) {
                 result[i] = st.st_mtime * 1000L
             }
         }
-        return result
     }
 
     fun statDirectories(dirPaths: Array<String>): LongArray = statPaths(dirPaths, requireDir = true)

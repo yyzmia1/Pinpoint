@@ -127,6 +127,7 @@ class SqliteSearchDatabase(
         conn.execSQL("CREATE INDEX IF NOT EXISTS idx_files_parent ON files_meta(parent_path);")
         conn.execSQL("CREATE INDEX IF NOT EXISTS idx_files_ext ON files_meta(ext);")
         conn.execSQL("CREATE INDEX IF NOT EXISTS idx_files_mtime ON files_meta(mtime DESC);")
+        conn.execSQL("CREATE INDEX IF NOT EXISTS idx_files_size_desc ON files_meta(size DESC) WHERE is_dir = 0 AND size > 0;")
         conn.execSQL("CREATE INDEX IF NOT EXISTS idx_files_tier2_pending ON files_meta(tier2_status, mtime DESC) WHERE tier2_status = 1;")
 
         conn.execSQL(
@@ -183,6 +184,55 @@ class SqliteSearchDatabase(
                 path TEXT PRIMARY KEY,
                 dir_mtime INTEGER NOT NULL,
                 access_mode INTEGER NOT NULL
+            );
+            """.trimIndent()
+        )
+
+        // Materialized persistent WizTree storage analyzer cache (O(1) JVM heap on cold start)
+        conn.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS analyzer_dir_stats (
+                path TEXT PRIMARY KEY,
+                parent_path TEXT NOT NULL,
+                name TEXT NOT NULL,
+                total_bytes INTEGER NOT NULL,
+                file_count INTEGER NOT NULL,
+                dir_count INTEGER NOT NULL,
+                direct_file_count INTEGER NOT NULL,
+                mtime INTEGER NOT NULL,
+                access_mode INTEGER NOT NULL
+            );
+            """.trimIndent()
+        )
+        conn.execSQL("CREATE INDEX IF NOT EXISTS idx_analyzer_dir_parent ON analyzer_dir_stats(parent_path, total_bytes DESC);")
+
+        conn.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS analyzer_ext_stats (
+                ext TEXT PRIMARY KEY,
+                total_bytes INTEGER NOT NULL,
+                file_count INTEGER NOT NULL
+            );
+            """.trimIndent()
+        )
+
+        conn.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS analyzer_app_stats (
+                package_name TEXT PRIMARY KEY,
+                fallback_label TEXT,
+                total_bytes INTEGER NOT NULL,
+                file_count INTEGER NOT NULL,
+                locations_blob TEXT NOT NULL
+            );
+            """.trimIndent()
+        )
+
+        conn.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS analyzer_meta (
+                meta_key TEXT PRIMARY KEY,
+                meta_value TEXT NOT NULL
             );
             """.trimIndent()
         )
@@ -638,16 +688,27 @@ class SqliteSearchDatabase(
      * while skipping immutable ROM partitions (`/system`, `/vendor`, etc.).
      */
     fun getTrackedMutableDirectories(includeData: Boolean): Map<String, Long> {
+        val result = HashMap<String, Long>(1024)
+        result.putAll(getTrackedStorageDirectories())
+        if (includeData) {
+            result.putAll(getTrackedDataDirectories())
+        }
+        return result
+    }
+
+    /**
+     * Phase 1 hot-tier directories: `/storage/...` user storage only (typically fast < 1s).
+     */
+    fun getTrackedStorageDirectories(): Map<String, Long> {
         return readLock.withLock {
             val out = HashMap<String, Long>(1024)
-            readConn.prepare("SELECT path, mtime FROM files_meta WHERE is_dir = 1").use { stmt ->
+            readConn.prepare(
+                "SELECT path, mtime FROM files_meta WHERE is_dir = 1 AND path >= '/storage/' AND path < '/storage0'"
+            ).use { stmt ->
                 while (stmt.step()) {
                     val p = stmt.getText(0)
                     val isContainerDir = p == "/storage/emulated" || p == "/storage/self" || p == "/storage/enc_emulated"
-                    val isMutableStorage = p.startsWith("/storage/") && !isContainerDir
-                    val isDataDir = includeData && (p == "/data" || p.startsWith("/data/")) &&
-                        p != "/data/dalvik-cache" && !p.startsWith("/data/dalvik-cache/")
-                    if (isMutableStorage || isDataDir) {
+                    if (!isContainerDir) {
                         out[p] = stmt.getLong(1)
                     }
                 }
@@ -656,10 +717,41 @@ class SqliteSearchDatabase(
         }
     }
 
-    fun getTrackedDocFiles(limit: Int = 15000): List<PendingTier2Task> {
+    /**
+     * Phase 2 deep-tier directories: `/data` and `/data/...` (excluding dalvik-cache).
+     */
+    fun getTrackedDataDirectories(): Map<String, Long> {
+        return readLock.withLock {
+            val out = HashMap<String, Long>(4096)
+            readConn.prepare(
+                "SELECT path, mtime FROM files_meta WHERE is_dir = 1 AND (path = '/data' OR (path >= '/data/' AND path < '/data0'))"
+            ).use { stmt ->
+                while (stmt.step()) {
+                    val p = stmt.getText(0)
+                    if (p != "/data/dalvik-cache" && !p.startsWith("/data/dalvik-cache/")) {
+                        out[p] = stmt.getLong(1)
+                    }
+                }
+            }
+            out
+        }
+    }
+
+    fun getTrackedDocFiles(limit: Int = 15000): List<PendingTier2Task> =
+        getRecentTrackedDocFiles(sinceMtimeMs = 0L, limit = limit)
+
+    fun getRecentTrackedDocFiles(sinceMtimeMs: Long, limit: Int = 1000): List<PendingTier2Task> {
         return readLock.withLock {
             val out = ArrayList<PendingTier2Task>()
-            readConn.prepare(
+            val sql = if (sinceMtimeMs > 0L) {
+                """
+                SELECT id, path, name, ext, size, mtime, access_mode
+                FROM files_meta
+                WHERE is_dir = 0 AND tier2_status IN (1, 2) AND mtime >= ?
+                ORDER BY mtime DESC
+                LIMIT ?
+                """.trimIndent()
+            } else {
                 """
                 SELECT id, path, name, ext, size, mtime, access_mode
                 FROM files_meta
@@ -667,8 +759,14 @@ class SqliteSearchDatabase(
                 ORDER BY mtime DESC
                 LIMIT ?
                 """.trimIndent()
-            ).use { stmt ->
-                stmt.bindLong(1, limit.toLong())
+            }
+            readConn.prepare(sql).use { stmt ->
+                if (sinceMtimeMs > 0L) {
+                    stmt.bindLong(1, sinceMtimeMs)
+                    stmt.bindLong(2, limit.toLong())
+                } else {
+                    stmt.bindLong(1, limit.toLong())
+                }
                 while (stmt.step()) {
                     out.add(
                         PendingTier2Task(
@@ -2208,6 +2306,368 @@ class SqliteSearchDatabase(
                         stmt.getLong(7).toInt()
                     )
                 }
+            }
+        }
+    }
+
+    data class AnalyzerDirCacheRow(
+        val path: String,
+        val parentPath: String,
+        val name: String,
+        val totalBytes: Long,
+        val fileCount: Long,
+        val dirCount: Long,
+        val directFileCount: Long,
+        val mtime: Long,
+        val accessModeCode: Int
+    )
+
+    data class AnalyzerAppCacheRow(
+        val packageName: String,
+        val fallbackLabel: String?,
+        val totalBytes: Long,
+        val fileCount: Long,
+        val locationsBlob: String
+    )
+
+    fun replaceAnalyzerCache(
+        meta: Map<String, String>,
+        dirs: Iterable<AnalyzerDirCacheRow>,
+        exts: List<AnalyzerExtRow>,
+        apps: List<AnalyzerAppCacheRow>
+    ) {
+        writeLock.withLock {
+            writeConn.execSQL("BEGIN IMMEDIATE;")
+            try {
+                writeConn.execSQL("DELETE FROM analyzer_dir_stats;")
+                writeConn.execSQL("DELETE FROM analyzer_ext_stats;")
+                writeConn.execSQL("DELETE FROM analyzer_app_stats;")
+                writeConn.execSQL("DELETE FROM analyzer_meta;")
+
+                writeConn.prepare(
+                    """
+                    INSERT OR REPLACE INTO analyzer_dir_stats(
+                        path, parent_path, name, total_bytes, file_count, dir_count, direct_file_count, mtime, access_mode
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """.trimIndent()
+                ).use { stmt ->
+                    for (d in dirs) {
+                        stmt.reset()
+                        stmt.bindText(1, d.path)
+                        stmt.bindText(2, d.parentPath)
+                        stmt.bindText(3, d.name)
+                        stmt.bindLong(4, d.totalBytes)
+                        stmt.bindLong(5, d.fileCount)
+                        stmt.bindLong(6, d.dirCount)
+                        stmt.bindLong(7, d.directFileCount)
+                        stmt.bindLong(8, d.mtime)
+                        stmt.bindLong(9, d.accessModeCode.toLong())
+                        stmt.step()
+                    }
+                }
+
+                writeConn.prepare(
+                    "INSERT OR REPLACE INTO analyzer_ext_stats(ext, total_bytes, file_count) VALUES (?, ?, ?)"
+                ).use { stmt ->
+                    for (e in exts) {
+                        stmt.reset()
+                        stmt.bindText(1, e.ext)
+                        stmt.bindLong(2, e.totalBytes)
+                        stmt.bindLong(3, e.fileCount)
+                        stmt.step()
+                    }
+                }
+
+                writeConn.prepare(
+                    """
+                    INSERT OR REPLACE INTO analyzer_app_stats(
+                        package_name, fallback_label, total_bytes, file_count, locations_blob
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """.trimIndent()
+                ).use { stmt ->
+                    for (a in apps) {
+                        stmt.reset()
+                        stmt.bindText(1, a.packageName)
+                        if (a.fallbackLabel != null) stmt.bindText(2, a.fallbackLabel) else stmt.bindNull(2)
+                        stmt.bindLong(3, a.totalBytes)
+                        stmt.bindLong(4, a.fileCount)
+                        stmt.bindText(5, a.locationsBlob)
+                        stmt.step()
+                    }
+                }
+
+                writeConn.prepare(
+                    "INSERT OR REPLACE INTO analyzer_meta(meta_key, meta_value) VALUES (?, ?)"
+                ).use { stmt ->
+                    for ((k, v) in meta) {
+                        stmt.reset()
+                        stmt.bindText(1, k)
+                        stmt.bindText(2, v)
+                        stmt.step()
+                    }
+                }
+                writeConn.execSQL("COMMIT;")
+            } catch (t: Throwable) {
+                runCatching { writeConn.execSQL("ROLLBACK;") }
+                throw t
+            }
+        }
+    }
+
+    fun markAnalyzerCacheDirty() {
+        writeLock.withLock {
+            writeConn.prepare(
+                "INSERT OR REPLACE INTO analyzer_meta(meta_key, meta_value) VALUES ('dirty', '1')"
+            ).use { it.step() }
+        }
+    }
+
+    fun loadAnalyzerMeta(): Map<String, String> = readLock.withLock {
+        val out = HashMap<String, String>(16)
+        readConn.prepare("SELECT meta_key, meta_value FROM analyzer_meta").use { stmt ->
+            while (stmt.step()) {
+                out[stmt.getText(0)] = stmt.getText(1)
+            }
+        }
+        out
+    }
+
+    fun loadAnalyzerDirRow(path: String): AnalyzerDirCacheRow? {
+        val normalized = if (path.length > 1) path.trimEnd('/') else path
+        return readLock.withLock {
+            readConn.prepare(
+                """
+                SELECT path, parent_path, name, total_bytes, file_count, dir_count, direct_file_count, mtime, access_mode
+                FROM analyzer_dir_stats
+                WHERE path = ?
+                """.trimIndent()
+            ).use { stmt ->
+                stmt.bindText(1, normalized)
+                if (stmt.step()) {
+                    AnalyzerDirCacheRow(
+                        path = stmt.getText(0),
+                        parentPath = stmt.getText(1),
+                        name = stmt.getText(2),
+                        totalBytes = stmt.getLong(3),
+                        fileCount = stmt.getLong(4),
+                        dirCount = stmt.getLong(5),
+                        directFileCount = stmt.getLong(6),
+                        mtime = stmt.getLong(7),
+                        accessModeCode = stmt.getLong(8).toInt()
+                    )
+                } else {
+                    null
+                }
+            }
+        }
+    }
+
+    fun queryAnalyzerChildDirRows(
+        parentPath: String,
+        orderByClause: String = "total_bytes DESC, name COLLATE NOCASE ASC",
+        limit: Int = 2000
+    ): List<AnalyzerDirCacheRow> {
+        val normalized = if (parentPath.length > 1) parentPath.trimEnd('/') else parentPath
+        val safeOrderBy = when (orderByClause) {
+            "total_bytes DESC, name COLLATE NOCASE ASC",
+            "total_bytes ASC, name COLLATE NOCASE ASC",
+            "(file_count + dir_count) DESC, total_bytes DESC, name COLLATE NOCASE ASC",
+            "(file_count + dir_count) ASC, total_bytes ASC, name COLLATE NOCASE ASC",
+            "mtime DESC, name COLLATE NOCASE ASC",
+            "mtime ASC, name COLLATE NOCASE ASC",
+            "name COLLATE NOCASE ASC",
+            "name COLLATE NOCASE DESC" -> orderByClause
+            else -> "total_bytes DESC, name COLLATE NOCASE ASC"
+        }
+        val out = ArrayList<AnalyzerDirCacheRow>(32)
+        readLock.withLock {
+            readConn.prepare(
+                """
+                SELECT path, parent_path, name, total_bytes, file_count, dir_count, direct_file_count, mtime, access_mode
+                FROM analyzer_dir_stats
+                WHERE parent_path = ? AND path != ?
+                ORDER BY $safeOrderBy
+                LIMIT ?
+                """.trimIndent()
+            ).use { stmt ->
+                stmt.bindText(1, normalized)
+                stmt.bindText(2, normalized)
+                stmt.bindLong(3, limit.toLong())
+                while (stmt.step()) {
+                    out.add(
+                        AnalyzerDirCacheRow(
+                            path = stmt.getText(0),
+                            parentPath = stmt.getText(1),
+                            name = stmt.getText(2),
+                            totalBytes = stmt.getLong(3),
+                            fileCount = stmt.getLong(4),
+                            dirCount = stmt.getLong(5),
+                            directFileCount = stmt.getLong(6),
+                            mtime = stmt.getLong(7),
+                            accessModeCode = stmt.getLong(8).toInt()
+                        )
+                    )
+                }
+            }
+        }
+        return out
+    }
+
+    fun loadAnalyzerExtRows(): List<AnalyzerExtRow> = readLock.withLock {
+        val out = ArrayList<AnalyzerExtRow>(36)
+        readConn.prepare(
+            "SELECT ext, total_bytes, file_count FROM analyzer_ext_stats ORDER BY total_bytes DESC"
+        ).use { stmt ->
+            while (stmt.step()) {
+                out.add(AnalyzerExtRow(stmt.getText(0), stmt.getLong(1), stmt.getLong(2)))
+            }
+        }
+        out
+    }
+
+    fun loadAnalyzerAppRows(): List<AnalyzerAppCacheRow> = readLock.withLock {
+        val out = ArrayList<AnalyzerAppCacheRow>(64)
+        readConn.prepare(
+            "SELECT package_name, fallback_label, total_bytes, file_count, locations_blob FROM analyzer_app_stats ORDER BY total_bytes DESC, file_count DESC"
+        ).use { stmt ->
+            while (stmt.step()) {
+                val fb = if (stmt.isNull(1)) null else stmt.getText(1)
+                out.add(AnalyzerAppCacheRow(stmt.getText(0), fb, stmt.getLong(2), stmt.getLong(3), stmt.getText(4)))
+            }
+        }
+        out
+    }
+
+    /**
+     * Incrementally deducts a deleted file or directory from the persisted analyzer cache
+     * along its ancestor chain in O(depth) (< 2ms), avoiding full-disk analyzer rebuilds.
+     */
+    fun applyAnalyzerDeletionDelta(
+        deletedPath: String,
+        isDir: Boolean,
+        knownFileBytes: Long = 0L,
+        knownFileExt: String = ""
+    ) {
+        val clean = if (deletedPath.length > 1) deletedPath.trimEnd('/') else deletedPath
+        writeLock.withLock {
+            val hasCache = writeConn.prepare("SELECT 1 FROM analyzer_meta WHERE meta_key = 'total_bytes'").use { it.step() }
+            if (!hasCache) return@withLock
+
+            var removedBytes = knownFileBytes.coerceAtLeast(0L)
+            var removedFiles = if (isDir) 0L else 1L
+            var removedDirs = if (isDir) 1L else 0L
+
+            if (isDir) {
+                writeConn.prepare(
+                    "SELECT total_bytes, file_count, dir_count FROM analyzer_dir_stats WHERE path = ?"
+                ).use { stmt ->
+                    stmt.bindText(1, clean)
+                    if (stmt.step()) {
+                        removedBytes = stmt.getLong(0).coerceAtLeast(0L)
+                        removedFiles = stmt.getLong(1).coerceAtLeast(0L)
+                        removedDirs = 1L + stmt.getLong(2).coerceAtLeast(0L)
+                    }
+                }
+            }
+
+            val directParent = run {
+                val idx = clean.lastIndexOf('/')
+                when {
+                    idx < 0 -> ""
+                    idx == 0 -> "/"
+                    else -> clean.substring(0, idx)
+                }
+            }
+
+            writeConn.execSQL("BEGIN IMMEDIATE;")
+            try {
+                if (isDir) {
+                    writeConn.prepare("DELETE FROM analyzer_dir_stats WHERE path = ?").use {
+                        it.bindText(1, clean)
+                        it.step()
+                    }
+                    val lo = "$clean/"
+                    val hi = "$clean" + '0'
+                    writeConn.prepare("DELETE FROM analyzer_dir_stats WHERE path >= ? AND path < ?").use {
+                        it.bindText(1, lo)
+                        it.bindText(2, hi)
+                        it.step()
+                    }
+                } else if (knownFileBytes > 0L) {
+                    val normExt = knownFileExt.trim().trimStart('.').lowercase(java.util.Locale.ROOT)
+                    writeConn.prepare(
+                        """
+                        UPDATE analyzer_ext_stats
+                        SET total_bytes = MAX(0, total_bytes - ?),
+                            file_count = MAX(0, file_count - 1)
+                        WHERE ext = ?
+                        """.trimIndent()
+                    ).use { stmt ->
+                        stmt.bindLong(1, removedBytes)
+                        stmt.bindText(2, normExt)
+                        stmt.step()
+                    }
+                }
+
+                // Walk ancestor chain and deduct delta in O(depth)
+                var cur = directParent
+                writeConn.prepare(
+                    """
+                    UPDATE analyzer_dir_stats
+                    SET total_bytes = MAX(0, total_bytes - ?),
+                        file_count = MAX(0, file_count - ?),
+                        dir_count = MAX(0, dir_count - ?),
+                        direct_file_count = CASE WHEN path = ? THEN MAX(0, direct_file_count - ?) ELSE direct_file_count END
+                    WHERE path = ?
+                    """.trimIndent()
+                ).use { upd ->
+                    val directFileDelta = if (isDir) 0L else 1L
+                    var safetyGuard = 0
+                    while (cur.isNotEmpty() && safetyGuard++ < 64) {
+                        upd.reset()
+                        upd.bindLong(1, removedBytes)
+                        upd.bindLong(2, removedFiles)
+                        upd.bindLong(3, removedDirs)
+                        upd.bindText(4, directParent)
+                        upd.bindLong(5, directFileDelta)
+                        upd.bindText(6, cur)
+                        upd.step()
+                        if (cur == "/") break
+                        val idx = cur.lastIndexOf('/')
+                        cur = when {
+                            idx < 0 -> ""
+                            idx == 0 -> "/"
+                            else -> cur.substring(0, idx)
+                        }
+                    }
+                }
+
+                // Update top-level totals in analyzer_meta
+                fun decrementMeta(key: String, delta: Long) {
+                    if (delta <= 0L) return
+                    var prev = 0L
+                    writeConn.prepare("SELECT meta_value FROM analyzer_meta WHERE meta_key = ?").use { s ->
+                        s.bindText(1, key)
+                        if (s.step()) prev = s.getText(0).toLongOrNull() ?: 0L
+                    }
+                    val next = (prev - delta).coerceAtLeast(0L)
+                    writeConn.prepare("INSERT OR REPLACE INTO analyzer_meta(meta_key, meta_value) VALUES (?, ?)").use { s ->
+                        s.bindText(1, key)
+                        s.bindText(2, next.toString())
+                        s.step()
+                    }
+                }
+                decrementMeta("total_bytes", removedBytes)
+                decrementMeta("total_files", removedFiles)
+                decrementMeta("total_dirs", removedDirs)
+                if (isDir) {
+                    // Mark app/ext summaries slightly stale after recursive dir deletion so next background refresh reconciles them
+                    writeConn.prepare("INSERT OR REPLACE INTO analyzer_meta(meta_key, meta_value) VALUES ('dirty', '1')").use { it.step() }
+                }
+                writeConn.execSQL("COMMIT;")
+            } catch (t: Throwable) {
+                runCatching { writeConn.execSQL("ROLLBACK;") }
+                throw t
             }
         }
     }

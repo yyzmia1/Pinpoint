@@ -141,9 +141,12 @@ enum class AnalyzerTab(val label: String) {
 
 data class StorageAnalyzerUiState(
     val isLoading: Boolean = false,
+    val isRefreshingInBackground: Boolean = false,
+    val loadingMessage: String? = null,
     val snapshot: WizTreeSnapshot? = null,
     val selectedTab: AnalyzerTab = AnalyzerTab.TREE,
     val currentDirPath: String? = null,
+    val activeDirNode: DirNodeStat? = null,
     val activeDirChildren: List<TreeChildEntry> = emptyList(),
     val treeSort: AnalyzerTreeSort = AnalyzerTreeSort.SIZE_DESC,
     val foldersFirst: Boolean = true,
@@ -155,15 +158,16 @@ data class StorageAnalyzerUiState(
     val errorMessage: String? = null,
     val appIcons: Map<String, ImageBitmap> = emptyMap()
 ) {
-    val activeDirNode: DirNodeStat?
+    val effectiveDirNode: DirNodeStat?
         get() {
+            if (activeDirNode != null) return activeDirNode
             val snap = snapshot ?: return null
             val target = currentDirPath ?: snap.defaultRootPath ?: return null
             return snap.dirNodes[target] ?: snap.defaultRootPath?.let { snap.dirNodes[it] }
         }
 
     val effectiveDirChildren: List<TreeChildEntry>
-        get() = if (activeDirChildren.isNotEmpty()) activeDirChildren else activeDirNode?.childrenSorted(treeSort, foldersFirst).orEmpty()
+        get() = if (activeDirChildren.isNotEmpty()) activeDirChildren else effectiveDirNode?.childrenSorted(treeSort, foldersFirst).orEmpty()
 
     val effectiveLargeFiles: List<LargeFileEntry>
         get() = if (activeLargeFiles.isNotEmpty() || selectedExtFilter != null) {
@@ -175,9 +179,9 @@ data class StorageAnalyzerUiState(
     val canNavigateUpInTree: Boolean
         get() {
             val snap = snapshot ?: return false
-            val cur = activeDirNode ?: return false
-            if (cur.path in snap.rootPaths) return false
-            return cur.parentPath.isNotEmpty() && cur.parentPath in snap.dirNodes
+            val cur = effectiveDirNode ?: return false
+            if (cur.path in snap.rootPaths || cur.path == "/") return false
+            return cur.parentPath.isNotEmpty()
         }
 }
 
@@ -223,7 +227,7 @@ fun StorageAnalyzerScreen(
     var expandedAppPkg by remember { mutableStateOf<String?>(null) }
 
     val snapshot = state.snapshot
-    val activeDir = state.activeDirNode
+    val activeDir = state.effectiveDirNode
     val activeChildren = state.effectiveDirChildren
     val activeLargeFiles = state.effectiveLargeFiles
     val dark = !MaterialTheme.colorScheme.isLightScheme
@@ -246,7 +250,8 @@ fun StorageAnalyzerScreen(
             AnalyzerTopBar(
                 snapshot = snapshot,
                 showTreemap = state.showTreemap,
-                isLoading = state.isLoading,
+                isLoading = state.isLoading || state.isRefreshingInBackground,
+                loadingMessage = if (state.isRefreshingInBackground) state.loadingMessage ?: "后台增量更新缓存中…" else null,
                 onExit = {
                     haptics.tick()
                     actions.onExit()
@@ -261,7 +266,7 @@ fun StorageAnalyzerScreen(
                 }
             )
 
-            if (state.isLoading || state.deletingPath != null) {
+            if (state.isLoading || state.isRefreshingInBackground || state.deletingPath != null) {
                 LinearProgressIndicator(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -281,7 +286,18 @@ fun StorageAnalyzerScreen(
 
             if (snapshot == null && state.isLoading) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(modifier = Modifier.size(30.dp), strokeWidth = 2.6.dp)
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.padding(horizontal = 32.dp)
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(30.dp), strokeWidth = 2.6.dp)
+                        Text(
+                            text = state.loadingMessage ?: "正在构建空间缓存（首次稍慢，后续秒开）…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             } else if (snapshot == null || (snapshot.totalFiles == 0L && snapshot.totalDirs == 0L)) {
                 AnalyzerEmptyState(
@@ -521,6 +537,7 @@ private fun AnalyzerTopBar(
     snapshot: WizTreeSnapshot?,
     showTreemap: Boolean,
     isLoading: Boolean,
+    loadingMessage: String? = null,
     onExit: () -> Unit,
     onToggleTreemap: () -> Unit,
     onRefresh: () -> Unit
@@ -546,9 +563,18 @@ private fun AnalyzerTopBar(
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1
             )
-            if (snapshot != null && (snapshot.totalFiles > 0L || snapshot.totalDirs > 0L)) {
+            if (loadingMessage != null) {
                 Text(
-                    text = "${FormatUtils.formatBytes(snapshot.totalBytes)} · ${formatCompactCount(snapshot.totalFiles)} 文件 · ${snapshot.buildDurationMs}ms",
+                    text = loadingMessage,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            } else if (snapshot != null && (snapshot.totalFiles > 0L || snapshot.totalDirs > 0L)) {
+                val cacheTag = if (snapshot.isFromCache) "缓存" else "${snapshot.buildDurationMs}ms"
+                Text(
+                    text = "${FormatUtils.formatBytes(snapshot.totalBytes)} · ${formatCompactCount(snapshot.totalFiles)} 文件 · $cacheTag",
                     style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -838,8 +864,18 @@ private fun TreeTabBody(
         crumbScroll.animateScrollTo(crumbScroll.maxValue)
     }
 
-    // Root selector chips only when multiple roots are indexed (e.g. Internal Storage + /data)
-    if (snapshot.rootPaths.size > 1) {
+    // Mode-aware quick-jump shortcut pills (Root: "/" leftmost -> /data -> 模块目录 -> 内部存储; Shizuku / Normal curated)
+    if (snapshot.shortcuts.size > 1) {
+        val activeShortcutPath = remember(activeDir.path, snapshot.shortcuts) {
+            snapshot.shortcuts
+                .filter { sc ->
+                    activeDir.path == sc.path ||
+                        (sc.path == "/" && activeDir.path.startsWith("/")) ||
+                        activeDir.path.startsWith("${sc.path}/")
+                }
+                .maxByOrNull { it.path.length }
+                ?.path
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -847,15 +883,10 @@ private fun TreeTabBody(
                 .padding(horizontal = 14.dp, vertical = 2.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            for (root in snapshot.rootPaths) {
-                val active = activeDir.path == root || activeDir.path.startsWith("$root/") || (root == "/" && activeDir.path.startsWith("/"))
-                val rootNode = snapshot.dirNodes[root]
-                val label = when (root) {
-                    "/storage/emulated/0", "/sdcard" -> "内部存储"
-                    else -> root
-                }
+            for (sc in snapshot.shortcuts) {
+                val active = activeShortcutPath == sc.path
                 Surface(
-                    onClick = { onSelectRoot(root) },
+                    onClick = { onSelectRoot(sc.path) },
                     shape = RoundedCornerShape(8.dp),
                     color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer,
                     border = BorderStroke(
@@ -865,8 +896,9 @@ private fun TreeTabBody(
                     )
                 ) {
                     Text(
-                        text = "$label · ${FormatUtils.formatBytes(rootNode?.totalBytes ?: 0L)}",
+                        text = "${sc.label} · ${FormatUtils.formatBytes(sc.totalBytes)}",
                         style = MaterialTheme.typography.labelMedium,
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
                         color = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
                         maxLines = 1
@@ -2103,7 +2135,12 @@ private fun previewWizTreeSnapshot(): WizTreeSnapshot {
         totalFiles = 48_901,
         totalDirs = 1_006,
         buildDurationMs = 46L,
-        rootPaths = listOf("/storage/emulated/0", "/data"),
+        rootPaths = listOf("/"),
+        shortcuts = listOf(
+            com.pocketeverything.app.analyzer.AnalyzerShortcut("/", "/", 47_000_000_000L),
+            com.pocketeverything.app.analyzer.AnalyzerShortcut("/data", "/data", 4_200_000_000L),
+            com.pocketeverything.app.analyzer.AnalyzerShortcut("/storage/emulated/0", "内部存储", 42_800_000_000L)
+        ),
         dirNodes = mapOf("/storage/emulated/0" to rootDir, "/data" to rootDir.copy(path = "/data", name = "data", totalBytes = 4_200_000_000L)),
         appRankings = listOf(
             AppStorageSummary(

@@ -16,6 +16,7 @@ import com.pocketeverything.app.search.PruneSummary
 import com.pocketeverything.app.search.SqliteSearchDatabase
 import com.pocketeverything.app.search.Tier2Status
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -83,6 +84,8 @@ class TwoTierIndexManager(
     private val triggerLock = Any()
     @Volatile
     private var tier1Job: Job? = null
+    @Volatile
+    private var tier1HotStageDone: CompletableDeferred<Unit>? = null
     private var tier2Job: Job? = null
     private var hasSyncedAtLeastOnce: Boolean = false
     private var lastSyncClockMs: Long = 0L
@@ -139,10 +142,10 @@ class TwoTierIndexManager(
         onChanged: (() -> Unit)? = null
     ): Job? {
         val genBefore = _progress.value.syncGeneration
-        val targetJob: Job = synchronized(triggerLock) {
+        val (targetJob, hotStageSignal) = synchronized(triggerLock) {
             val active = tier1Job
             if (active?.isActive == true) {
-                active
+                active to tier1HotStageDone
             } else {
                 val now = clockMs()
                 val withinCooldown = hasSyncedAtLeastOnce &&
@@ -153,7 +156,11 @@ class TwoTierIndexManager(
                 }
                 hasSyncedAtLeastOnce = true
                 lastSyncClockMs = now
-                launchQuickSyncLocked(silentIfUnavailable = true).also { tier1Job = it }
+                val hotSignal = CompletableDeferred<Unit>()
+                tier1HotStageDone = hotSignal
+                val created = launchQuickSyncLocked(silentIfUnavailable = true, hotStageDone = hotSignal)
+                tier1Job = created
+                created to hotSignal
             }
         }
 
@@ -161,13 +168,25 @@ class TwoTierIndexManager(
             val completedInTime = runCatching {
                 runBlocking {
                     withTimeoutOrNull(maxWaitMs) {
-                        targetJob.join()
+                        if (hotStageSignal != null) {
+                            hotStageSignal.await()
+                        } else {
+                            targetJob.join()
+                        }
                         true
                     } ?: false
                 }
             }.getOrDefault(false)
 
             if (completedInTime) {
+                if (onChanged != null && targetJob.isActive) {
+                    val genAfterHot = _progress.value.syncGeneration
+                    targetJob.invokeOnCompletion { cause ->
+                        if (cause == null && _progress.value.syncGeneration != genAfterHot) {
+                            runCatching { onChanged() }
+                        }
+                    }
+                }
                 return targetJob
             }
         }
@@ -209,6 +228,9 @@ class TwoTierIndexManager(
         val settings = settingsRepo.settings.value
         val summary = db.pruneMatchingFilterDetailed(FilterEngine(settings.filterConfig), settings.accessMode)
         val mutated = summary.removedEntries > 0 || summary.clearedDocBodies > 0 || summary.requeuedDocs > 0
+        if (summary.removedEntries > 0) {
+            runCatching { db.markAnalyzerCacheDirty() }
+        }
         val stats = runCatching { db.getStats() }.getOrNull()
         if (stats != null || mutated) {
             _progress.update { cur ->
@@ -231,7 +253,9 @@ class TwoTierIndexManager(
             if (active?.isActive == true) {
                 return active
             }
-            val job = launchQuickSyncLocked(silentIfUnavailable)
+            val hotSignal = CompletableDeferred<Unit>()
+            tier1HotStageDone = hotSignal
+            val job = launchQuickSyncLocked(silentIfUnavailable, hotStageDone = hotSignal)
             tier1Job = job
             return job
         }
@@ -241,6 +265,8 @@ class TwoTierIndexManager(
         synchronized(triggerLock) {
             if (job != null && tier1Job === job) {
                 tier1Job = null
+                tier1HotStageDone?.complete(Unit)
+                tier1HotStageDone = null
             }
             if (recordCooldown) {
                 hasSyncedAtLeastOnce = true
@@ -249,7 +275,127 @@ class TwoTierIndexManager(
         }
     }
 
-    private fun launchQuickSyncLocked(silentIfUnavailable: Boolean): Job = scope.launch {
+    private data class DirSyncSubsetResult(
+        val checkedDirs: Int,
+        val changedCount: Int,
+        val removedCount: Int,
+        val dirtyDirCount: Int
+    )
+
+    private suspend fun syncDirectorySubset(
+        trackedDirs: LinkedHashMap<String, Long>,
+        snapshotRoots: List<String>,
+        rootSnapshots: Map<String, Long>,
+        mode: AccessMode,
+        includeData: Boolean,
+        filter: FilterEngine,
+        provider: FileSystemProvider,
+        progressPrefix: String
+    ): DirSyncSubsetResult {
+        if (trackedDirs.isEmpty()) {
+            return DirSyncSubsetResult(0, 0, 0, 0)
+        }
+        var changedCount = 0
+        var removedCount = 0
+
+        val liveDirMtimes = provider.statDirectories(trackedDirs.keys.toList())
+        val rootSet = snapshotRoots.toHashSet()
+        val missingSubdirs = ArrayList<String>()
+        val dirtyDirs = ArrayList<String>()
+
+        for ((dir, savedMtime) in trackedDirs) {
+            val live = liveDirMtimes[dir]
+            if (live == null) {
+                if (shouldPruneMissingDirectory(dir, mode, includeData, rootSet, liveDirMtimes)) {
+                    missingSubdirs.add(dir)
+                }
+            } else if (live != savedMtime) {
+                dirtyDirs.add(dir)
+            }
+        }
+
+        // Remove only top-most missing subdirs so nested deletions don't double-scan
+        val sortedMissing = missingSubdirs.sortedBy { it.length }
+        val deletedRoots = ArrayList<String>()
+        for (m in sortedMissing) {
+            if (deletedRoots.none { m.startsWith("$it/") }) {
+                deletedRoots.add(m)
+                removedCount += db.deleteSubtree(m)
+            }
+        }
+
+        if (dirtyDirs.isNotEmpty()) {
+            val dirtySet = dirtyDirs.toHashSet()
+            val listedDirs = HashSet<String>(dirtyDirs.size)
+            val seenByParent = HashMap<String, HashSet<String>>(dirtyDirs.size)
+            val newSubdirs = ArrayList<String>()
+            provider.listDirectChildren(
+                dirs = dirtyDirs,
+                filterEngine = filter,
+                onDirListed = { listedDirs.add(it) }
+            ) { batch ->
+                for (r in batch) {
+                    seenByParent.getOrPut(r.parentPath) { HashSet() }.add(r.path)
+                    if (r.isDir && r.path !in trackedDirs) {
+                        newSubdirs.add(r.path)
+                    }
+                }
+                changedCount += db.upsertFileBatch(batch.map { it.toUpsertEntry(filter) })
+                _progress.update { cur ->
+                    cur.copy(
+                        tier1ScannedCount = changedCount,
+                        statusMessage = "${progressPrefix}已处理 $changedCount 项"
+                    )
+                }
+            }
+            // Only prune children of directories that were actually listed (never on list() == null / EACCES).
+            for (dirty in listedDirs) {
+                removedCount += db.pruneDirectChildren(dirty, seenByParent[dirty].orEmpty())
+            }
+            if (newSubdirs.isNotEmpty()) {
+                provider.scanDirectories(newSubdirs.distinct(), filter) { batch ->
+                    changedCount += db.upsertFileBatch(batch.map { it.toUpsertEntry(filter) })
+                    _progress.update { cur ->
+                        cur.copy(
+                            tier1ScannedCount = changedCount,
+                            statusMessage = "${progressPrefix}新增目录 $changedCount 项"
+                        )
+                    }
+                }
+            }
+            val updatedDirMtimes = listedDirs.mapNotNull { d ->
+                liveDirMtimes[d]?.let { d to it }
+            }.toMap()
+            db.updateDirectoryMtimes(updatedDirMtimes)
+
+            val updatedRootSnapshots = snapshotRoots.mapNotNull { r ->
+                if (r in dirtySet && r !in listedDirs) return@mapNotNull null
+                liveDirMtimes[r]?.let { r to it }
+            }.toMap()
+            if (updatedRootSnapshots.isNotEmpty()) {
+                db.saveDirSnapshots(updatedRootSnapshots, mode)
+            }
+        } else if (snapshotRoots.any { it !in rootSnapshots }) {
+            val missingSnapshots = snapshotRoots.mapNotNull { r ->
+                if (r in rootSnapshots) null else liveDirMtimes[r]?.let { r to it }
+            }.toMap()
+            if (missingSnapshots.isNotEmpty()) {
+                db.saveDirSnapshots(missingSnapshots, mode)
+            }
+        }
+
+        return DirSyncSubsetResult(
+            checkedDirs = trackedDirs.size,
+            changedCount = changedCount,
+            removedCount = removedCount,
+            dirtyDirCount = dirtyDirs.size
+        )
+    }
+
+    private fun launchQuickSyncLocked(
+        silentIfUnavailable: Boolean,
+        hotStageDone: CompletableDeferred<Unit>? = null
+    ): Job = scope.launch {
         var cancelled = false
         try {
             tier1Mutex.withLock {
@@ -263,6 +409,7 @@ class TwoTierIndexManager(
                     val availability = provider.checkAvailability()
                     if (availability !is ModeAvailability.Ready) {
                         val stats = runCatching { db.getStats() }.getOrNull()
+                        hotStageDone?.complete(Unit)
                         finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = true)
                         if (silentIfUnavailable) {
                             _progress.update { cur ->
@@ -290,6 +437,7 @@ class TwoTierIndexManager(
                     val currentDbStats = db.getStats()
                     if (currentDbStats.totalEntries == 0L || settings.lastFullScanAtMillis == 0L) {
                         runFullScanInternal(clearExisting = false)
+                        hotStageDone?.complete(Unit)
                         return@withLock
                     }
 
@@ -299,120 +447,50 @@ class TwoTierIndexManager(
                             tier1ScannedCount = 0,
                             stats = currentDbStats,
                             tier2PendingCount = currentDbStats.pendingDocs,
-                            statusMessage = "正在增量校验全部可写目录…",
+                            statusMessage = "正在极速校验用户存储目录…",
                             errorMessage = null
                         )
                     }
 
                     val filter = FilterEngine(settings.filterConfig)
                     val includeData = filter.isDataPotentiallyIndexed(mode)
-                    val storageRoots = storageRootsResolver()
-                    val extraRootDirs = if (includeData) listOf("/data") else emptyList()
-                    val snapshotRoots = (storageRoots + extraRootDirs).distinct()
-                    val rootSnapshots = db.getDirSnapshots(snapshotRoots)
+                    val storageRoots = storageRootsResolver().distinct()
+                    val storageRootSnapshots = db.getDirSnapshots(storageRoots)
 
-                    // Populate files_meta directories first so authoritative dir_snapshots win for rootSet.
-                    val trackedDirs = LinkedHashMap<String, Long>(1024)
-                    for ((dirPath, savedMtime) in db.getTrackedMutableDirectories(includeData = includeData)) {
+                    // ================= STAGE 1: Hot User Storage (/storage/...) + Recent 30-day Docs (< 1s target) =================
+                    val stage1StartMs = System.currentTimeMillis()
+                    val hotTrackedDirs = LinkedHashMap<String, Long>(1024)
+                    for ((dirPath, savedMtime) in db.getTrackedStorageDirectories()) {
                         val name = dirPath.substringAfterLast('/')
                         if (!filter.shouldSkipTier1Path(dirPath, name, isDir = true, mode = mode)) {
-                            trackedDirs[dirPath] = savedMtime
+                            hotTrackedDirs[dirPath] = savedMtime
                         }
                     }
-                    for (r in snapshotRoots) {
+                    for (r in storageRoots) {
                         val name = r.substringAfterLast('/')
                         if (!filter.shouldSkipTier1Path(r, name, isDir = true, mode = mode)) {
-                            trackedDirs[r] = rootSnapshots[r] ?: trackedDirs[r] ?: -1L
+                            hotTrackedDirs[r] = storageRootSnapshots[r] ?: hotTrackedDirs[r] ?: -1L
                         }
                     }
 
-                    val liveDirMtimes = provider.statDirectories(trackedDirs.keys.toList())
-                    val rootSet = snapshotRoots.toHashSet()
-                    val missingSubdirs = ArrayList<String>()
-                    val dirtyDirs = ArrayList<String>()
+                    val stage1Res = syncDirectorySubset(
+                        trackedDirs = hotTrackedDirs,
+                        snapshotRoots = storageRoots,
+                        rootSnapshots = storageRootSnapshots,
+                        mode = mode,
+                        includeData = includeData,
+                        filter = filter,
+                        provider = provider,
+                        progressPrefix = "用户目录同步中："
+                    )
+                    changedCount += stage1Res.changedCount
+                    removedCount += stage1Res.removedCount
 
-                    for ((dir, savedMtime) in trackedDirs) {
-                        val live = liveDirMtimes[dir]
-                        if (live == null) {
-                            if (shouldPruneMissingDirectory(dir, mode, includeData, rootSet, liveDirMtimes)) {
-                                missingSubdirs.add(dir)
-                            }
-                        } else if (live != savedMtime) {
-                            dirtyDirs.add(dir)
-                        }
-                    }
-
-                    // Remove only top-most missing subdirs so nested deletions don't double-scan
-                    val sortedMissing = missingSubdirs.sortedBy { it.length }
-                    val deletedRoots = ArrayList<String>()
-                    for (m in sortedMissing) {
-                        if (deletedRoots.none { m.startsWith("$it/") }) {
-                            deletedRoots.add(m)
-                            removedCount += db.deleteSubtree(m)
-                        }
-                    }
-
-                    if (dirtyDirs.isNotEmpty()) {
-                        val dirtySet = dirtyDirs.toHashSet()
-                        val listedDirs = HashSet<String>(dirtyDirs.size)
-                        val seenByParent = HashMap<String, HashSet<String>>(dirtyDirs.size)
-                        val newSubdirs = ArrayList<String>()
-                        provider.listDirectChildren(
-                            dirs = dirtyDirs,
-                            filterEngine = filter,
-                            onDirListed = { listedDirs.add(it) }
-                        ) { batch ->
-                            for (r in batch) {
-                                seenByParent.getOrPut(r.parentPath) { HashSet() }.add(r.path)
-                                if (r.isDir && r.path !in trackedDirs) {
-                                    newSubdirs.add(r.path)
-                                }
-                            }
-                            changedCount += db.upsertFileBatch(batch.map { it.toUpsertEntry(filter) })
-                            _progress.update { cur ->
-                                cur.copy(
-                                    tier1ScannedCount = changedCount,
-                                    statusMessage = "正在增量更新变动目录：已处理 $changedCount 项"
-                                )
-                            }
-                        }
-                        // Only prune children of directories that were actually listed (never on list() == null / EACCES).
-                        for (dirty in listedDirs) {
-                            removedCount += db.pruneDirectChildren(dirty, seenByParent[dirty].orEmpty())
-                        }
-                        if (newSubdirs.isNotEmpty()) {
-                            provider.scanDirectories(newSubdirs.distinct(), filter) { batch ->
-                                changedCount += db.upsertFileBatch(batch.map { it.toUpsertEntry(filter) })
-                                _progress.update { cur ->
-                                    cur.copy(
-                                        tier1ScannedCount = changedCount,
-                                        statusMessage = "正在索引新增目录：已更新 $changedCount 项"
-                                    )
-                                }
-                            }
-                        }
-                        val updatedDirMtimes = listedDirs.mapNotNull { d ->
-                            liveDirMtimes[d]?.let { d to it }
-                        }.toMap()
-                        db.updateDirectoryMtimes(updatedDirMtimes)
-
-                        val updatedRootSnapshots = snapshotRoots.mapNotNull { r ->
-                            if (r in dirtySet && r !in listedDirs) return@mapNotNull null
-                            liveDirMtimes[r]?.let { r to it }
-                        }.toMap()
-                        db.saveDirSnapshots(updatedRootSnapshots, mode)
-                    } else if (rootSnapshots.size < snapshotRoots.size) {
-                        val missingSnapshots = snapshotRoots.mapNotNull { r ->
-                            if (r in rootSnapshots) null else liveDirMtimes[r]?.let { r to it }
-                        }.toMap()
-                        db.saveDirSnapshots(missingSnapshots, mode)
-                    }
-
-                    // Check existing tracked Tier-2 documents for in-place content edits
-                    val trackedDocs = db.getTrackedDocFiles()
-                    if (trackedDocs.isNotEmpty()) {
-                        val docMtimes = provider.statPaths(trackedDocs.map { it.path })
-                        val staleDocs = trackedDocs.filter { doc ->
+                    // Check Top-1000 most recently modified tracked Tier-2 documents for in-place content edits (< 5ms)
+                    val recentDocs = db.getRecentTrackedDocFiles(sinceMtimeMs = 0L, limit = RECENT_DOC_CHECK_LIMIT)
+                    if (recentDocs.isNotEmpty()) {
+                        val docMtimes = provider.statPaths(recentDocs.map { it.path })
+                        val staleDocs = recentDocs.filter { doc ->
                             val live = docMtimes[doc.path]
                             live != null && live != doc.mtime
                         }
@@ -445,30 +523,112 @@ class TwoTierIndexManager(
                         }
                     }
 
-                    val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
-                    val updatedStats = db.getStats()
-                    val mutated = changedCount > 0 || removedCount > 0
-                    val msg = if (dirtyDirs.isEmpty() && removedCount == 0 && changedCount == 0) {
-                        "增量校验完成：检查 ${trackedDirs.size} 个目录，均无变动 (${elapsed}ms)"
-                    } else {
-                        "增量同步完成：更新 $changedCount / 清理 $removedCount 项 (${elapsed}ms)"
+                    val stage1Elapsed = (System.currentTimeMillis() - stage1StartMs).coerceAtLeast(1L)
+                    val stage1Mutated = changedCount > 0 || removedCount > 0
+                    if (stage1Mutated) {
+                        runCatching { db.markAnalyzerCacheDirty() }
                     }
-                    // Clear tier1Job and update cooldown before publishing IDLE so immediate callers never hit tail-race.
-                    finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = true)
-                    _progress.update { cur ->
-                        cur.copy(
-                            tier1Phase = Tier1Phase.IDLE,
-                            tier1ScannedCount = changedCount,
-                            lastScanDurationMs = elapsed,
-                            stats = updatedStats,
-                            tier2PendingCount = updatedStats.pendingDocs,
-                            syncGeneration = if (mutated) cur.syncGeneration + 1L else cur.syncGeneration,
-                            statusMessage = msg
+
+                    // Publish Stage 1 completion immediately so search & picker see fresh user files right away!
+                    if (includeData) {
+                        val s1Stats = db.getStats()
+                        val s1Note = if (stage1Mutated) {
+                            "用户区已同步（+${changedCount}/-${removedCount}，${formatDuration(stage1Elapsed)}），继续校验 /data…"
+                        } else {
+                            "用户区已同步（${formatDuration(stage1Elapsed)}），后台继续校验 /data…"
+                        }
+                        _progress.update { cur ->
+                            cur.copy(
+                                tier1Phase = Tier1Phase.QUICK_SYNC,
+                                tier1ScannedCount = changedCount,
+                                stats = s1Stats,
+                                tier2PendingCount = s1Stats.pendingDocs,
+                                syncGeneration = if (stage1Mutated) cur.syncGeneration + 1L else cur.syncGeneration,
+                                statusMessage = s1Note
+                            )
+                        }
+                        // Unblock foreground / SAF waiters right after Stage 1 (< 1s)!
+                        hotStageDone?.complete(Unit)
+
+                        // ================= STAGE 2: Seamless Background /data Incremental Verification =================
+                        val stage2StartMs = System.currentTimeMillis()
+                        val dataRoots = listOf("/data")
+                        val dataRootSnapshots = db.getDirSnapshots(dataRoots)
+                        val dataTrackedDirs = LinkedHashMap<String, Long>(4096)
+                        for ((dirPath, savedMtime) in db.getTrackedDataDirectories()) {
+                            val name = dirPath.substringAfterLast('/')
+                            if (!filter.shouldSkipTier1Path(dirPath, name, isDir = true, mode = mode)) {
+                                dataTrackedDirs[dirPath] = savedMtime
+                            }
+                        }
+                        if (!filter.shouldSkipTier1Path("/data", "data", isDir = true, mode = mode)) {
+                            dataTrackedDirs["/data"] = dataRootSnapshots["/data"] ?: dataTrackedDirs["/data"] ?: -1L
+                        }
+
+                        val stage2Res = syncDirectorySubset(
+                            trackedDirs = dataTrackedDirs,
+                            snapshotRoots = dataRoots,
+                            rootSnapshots = dataRootSnapshots,
+                            mode = mode,
+                            includeData = true,
+                            filter = filter,
+                            provider = provider,
+                            progressPrefix = "后台校验 /data："
                         )
+                        val stage2Mutated = stage2Res.changedCount > 0 || stage2Res.removedCount > 0
+                        changedCount += stage2Res.changedCount
+                        removedCount += stage2Res.removedCount
+                        if (stage2Mutated) {
+                            runCatching { db.markAnalyzerCacheDirty() }
+                        }
+
+                        val stage2Elapsed = (System.currentTimeMillis() - stage2StartMs).coerceAtLeast(1L)
+                        val totalElapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
+                        val totalChecked = stage1Res.checkedDirs + stage2Res.checkedDirs
+                        val updatedStats = db.getStats()
+                        val msg = if (changedCount == 0 && removedCount == 0) {
+                            "增量校验完成：${totalChecked} 目录均无变动（用户区 ${formatDuration(stage1Elapsed)} · /data ${formatDuration(stage2Elapsed)}）"
+                        } else {
+                            "增量同步完成：更新 $changedCount / 清理 $removedCount 项（用户区 ${formatDuration(stage1Elapsed)} · /data ${formatDuration(stage2Elapsed)}）"
+                        }
+                        finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = true)
+                        _progress.update { cur ->
+                            cur.copy(
+                                tier1Phase = Tier1Phase.IDLE,
+                                tier1ScannedCount = changedCount,
+                                lastScanDurationMs = totalElapsed,
+                                stats = updatedStats,
+                                tier2PendingCount = updatedStats.pendingDocs,
+                                syncGeneration = if (stage2Mutated) cur.syncGeneration + 1L else cur.syncGeneration,
+                                statusMessage = msg
+                            )
+                        }
+                    } else {
+                        val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
+                        val updatedStats = db.getStats()
+                        val msg = if (changedCount == 0 && removedCount == 0) {
+                            "增量校验完成：检查 ${stage1Res.checkedDirs} 个目录，均无变动 (${formatDuration(elapsed)})"
+                        } else {
+                            "增量同步完成：更新 $changedCount / 清理 $removedCount 项 (${formatDuration(elapsed)})"
+                        }
+                        finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = true)
+                        _progress.update { cur ->
+                            cur.copy(
+                                tier1Phase = Tier1Phase.IDLE,
+                                tier1ScannedCount = changedCount,
+                                lastScanDurationMs = elapsed,
+                                stats = updatedStats,
+                                tier2PendingCount = updatedStats.pendingDocs,
+                                syncGeneration = if (stage1Mutated) cur.syncGeneration + 1L else cur.syncGeneration,
+                                statusMessage = msg
+                            )
+                        }
+                        hotStageDone?.complete(Unit)
                     }
                     ensureTier2Running()
                 } catch (ce: CancellationException) {
                     cancelled = true
+                    hotStageDone?.complete(Unit)
                     val mutated = changedCount > 0 || removedCount > 0
                     finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = false)
                     _progress.update { cur ->
@@ -480,6 +640,7 @@ class TwoTierIndexManager(
                     }
                     throw ce
                 } catch (t: Throwable) {
+                    hotStageDone?.complete(Unit)
                     val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
                     val reason = formatEngineeringError(t, "增量同步")
                     val mutated = changedCount > 0 || removedCount > 0
@@ -500,8 +661,10 @@ class TwoTierIndexManager(
             }
         } catch (ce: CancellationException) {
             cancelled = true
+            hotStageDone?.complete(Unit)
             throw ce
         } finally {
+            hotStageDone?.complete(Unit)
             finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = !cancelled)
         }
     }
@@ -613,6 +776,9 @@ class TwoTierIndexManager(
             val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
             val stats = db.getStats()
             val mutated = upsertedCount > 0 || prunedCount > 0
+            if (mutated) {
+                runCatching { db.markAnalyzerCacheDirty() }
+            }
             finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = true)
             _progress.update { cur ->
                 cur.copy(
@@ -929,5 +1095,7 @@ class TwoTierIndexManager(
 
     companion object {
         const val DEFAULT_FOREGROUND_SYNC_INTERVAL_MS = 2_500L
+        const val RECENT_DOC_CHECK_WINDOW_MS = 30L * 24L * 3600L * 1000L
+        const val RECENT_DOC_CHECK_LIMIT = 1_000
     }
 }

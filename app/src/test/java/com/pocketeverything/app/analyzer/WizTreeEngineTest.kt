@@ -55,27 +55,45 @@ class WizTreeEngineTest {
             val snap = WizTreeEngine.buildFromDatabase(
                 db = db,
                 appInfoResolver = resolver,
-                preferredRoots = listOf("/storage/emulated/0")
+                preferredRoots = listOf("/storage/emulated/0"),
+                accessMode = AccessMode.SHIZUKU,
+                syncGeneration = 7L
             )
 
             assertEquals(listOf("/storage/emulated/0"), snap.rootPaths)
+            assertTrue("Production snapshot must not retain full dir tree in JVM heap", snap.dirNodes.isEmpty())
             assertEquals(5_040L, snap.totalBytes)
             assertEquals(9L, snap.totalFiles)
 
-            // Root dir recursive rollup
-            val root = snap.dirNodes["/storage/emulated/0"]
+            // Instant reload from persisted SQLite materialized cache
+            val cached = WizTreeEngine.loadFromCache(
+                db = db,
+                appInfoResolver = resolver,
+                accessMode = AccessMode.SHIZUKU,
+                preferredRoots = listOf("/storage/emulated/0"),
+                currentGeneration = 7L
+            )
+            assertNotNull(cached)
+            assertTrue(cached!!.isFromCache)
+            assertFalse(cached.isStale)
+            assertEquals(5_040L, cached.totalBytes)
+            assertEquals(9L, cached.totalFiles)
+            assertEquals(listOf("内部存储", "Android/data", "Android/obb", "Download"), cached.shortcuts.map { it.label })
+
+            // Root dir recursive rollup loaded on-demand from SQLite cache
+            val root = WizTreeEngine.loadDirNode(db, "/storage/emulated/0", resolver)
             assertNotNull(root)
             assertEquals(5_040L, root!!.totalBytes)
             assertEquals(9L, root.fileCount)
 
             // Children sorted by size DESC: Android (3500) > Quark (1200) > Pictures (300) > Download (40)
-            val bySize = root.childrenSorted(AnalyzerTreeSort.SIZE_DESC)
+            val bySize = WizTreeEngine.loadChildrenForDirectory(db, root, AnalyzerTreeSort.SIZE_DESC, foldersFirst = false, appInfoResolver = resolver)
             assertEquals(listOf("Android", "Quark", "Pictures", "Download"), bySize.map { it.name })
             assertEquals(3_500L, bySize[0].totalBytes)
             assertEquals(3_500f / 5_040f, bySize[0].shareOfParent, 0.001f)
 
             // Children sorted by count DESC: Android (3 files + 4 subdirs = 7) vs Download (4 files)
-            val byCount = root.childrenSorted(AnalyzerTreeSort.COUNT_DESC)
+            val byCount = WizTreeEngine.loadChildrenForDirectory(db, root, AnalyzerTreeSort.COUNT_DESC, foldersFirst = false, appInfoResolver = resolver)
             assertEquals("Android", byCount[0].name)
             assertEquals("Download", byCount[1].name)
 
@@ -106,11 +124,70 @@ class WizTreeEngineTest {
             assertEquals(listOf("movie.mp4"), WizTreeEngine.loadLargeFilesForExtension(db, "mp4", resolver).map { it.name })
             assertEquals(4, WizTreeEngine.loadLargeFilesForExtension(db, "txt", resolver).size)
 
-            val downloadNode = snap.dirNodes["/storage/emulated/0/Download"]!!
+            val downloadNode = WizTreeEngine.loadDirNode(db, "/storage/emulated/0/Download", resolver)!!
             assertEquals(4L, downloadNode.directFileCount)
             val downloadChildren = WizTreeEngine.loadChildrenForDirectory(db, downloadNode, AnalyzerTreeSort.SIZE_DESC)
             assertEquals(4, downloadChildren.size)
             assertTrue(downloadChildren.all { !it.isDir })
+
+            // O(depth) incremental deletion delta deducts deleted directory cleanly without full rebuild
+            db.applyAnalyzerDeletionDelta("/storage/emulated/0/Quark", isDir = true)
+            db.deleteSubtree("/storage/emulated/0/Quark")
+            val rootAfterDel = WizTreeEngine.loadDirNode(db, "/storage/emulated/0", resolver)!!
+            assertEquals(5_040L - 1_200L, rootAfterDel.totalBytes)
+            assertEquals(8L, rootAfterDel.fileCount)
+            assertNull(WizTreeEngine.loadDirNode(db, "/storage/emulated/0/Quark", resolver))
+        }
+    }
+
+    @Test
+    fun `root mode unifies data and storage under slash and orders shortcuts with slash leftmost and module dir`() {
+        val dbFile = Files.createTempFile("wiztree_root_unify_", ".db").toFile().apply { deleteOnExit() }
+        val resolver = AppInfoResolver { pkg, fallback -> ResolvedAppMeta(pkg, fallback ?: pkg, true) }
+
+        SqliteSearchDatabase(dbFile.absolutePath).use { db ->
+            db.upsertFileBatch(
+                listOf(
+                    dir("/system"),
+                    file("/system/framework.jar", "jar", 24_000L),
+                    dir("/data"),
+                    dir("/data/user"),
+                    dir("/data/user/0"),
+                    dir("/data/user/0/com.app"),
+                    file("/data/user/0/com.app/huge.db", "db", 395_000L),
+                    dir("/data/adb"),
+                    dir("/data/adb/modules"),
+                    dir("/data/adb/modules/zygisk"),
+                    file("/data/adb/modules/zygisk/mod.so", "so", 5_000L),
+                    dir("/storage/emulated/0"),
+                    dir("/storage/emulated/0/Download"),
+                    file("/storage/emulated/0/Download/doc.pdf", "pdf", 50_000L)
+                )
+            )
+
+            val snap = WizTreeEngine.buildFromDatabase(
+                db = db,
+                appInfoResolver = resolver,
+                preferredRoots = listOf("/storage/emulated/0"),
+                accessMode = AccessMode.ROOT
+            )
+
+            // Root "/" is the single unified root and includes /system + /data + /storage!
+            assertEquals(listOf("/"), snap.rootPaths)
+            assertEquals(474_000L, snap.totalBytes)
+
+            val slashNode = WizTreeEngine.loadDirNode(db, "/", resolver)!!
+            assertEquals(474_000L, slashNode.totalBytes)
+
+            // /data MUST appear as a direct child of "/" with full 400_000 bytes (395k + 5k)
+            val slashChildren = WizTreeEngine.loadChildrenForDirectory(db, slashNode, AnalyzerTreeSort.SIZE_DESC)
+            assertEquals(listOf("data", "storage", "system"), slashChildren.map { it.name })
+            assertEquals(400_000L, slashChildren[0].totalBytes)
+
+            // Root mode shortcuts: "/" leftmost -> "/data" -> "模块目录" -> "内部存储"
+            assertEquals(listOf("/", "/data", "模块目录", "内部存储"), snap.shortcuts.map { it.label })
+            assertEquals("/data/adb/modules", snap.shortcuts[2].path)
+            assertEquals(5_000L, snap.shortcuts[2].totalBytes)
         }
     }
 
@@ -131,8 +208,8 @@ class WizTreeEngineTest {
                 )
             )
 
-            val snap = WizTreeEngine.buildFromDatabase(db, resolver, listOf("/storage/emulated/0"))
-            val work = snap.dirNodes["/storage/emulated/0/Work"]!!
+            WizTreeEngine.buildFromDatabase(db, resolver, listOf("/storage/emulated/0"))
+            val work = WizTreeEngine.loadDirNode(db, "/storage/emulated/0/Work", resolver)!!
 
             // SIZE_DESC with foldersFirst=false puts zebra.mp4 (9000) first
             val bySizeMixed = WizTreeEngine.loadChildrenForDirectory(db, work, AnalyzerTreeSort.SIZE_DESC, foldersFirst = false)

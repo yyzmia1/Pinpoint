@@ -970,43 +970,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val currentGen = indexProgress.value.syncGeneration
         val existingSnap = _analyzerState.value.snapshot
-        if (existingSnap == null || analyzerBuiltGeneration != currentGen) {
-            refreshStorageAnalyzer(preferredDirPath = normalizedTarget)
-        } else if (normalizedTarget != null && normalizedTarget in existingSnap.dirNodes) {
-            loadActiveAnalyzerDirChildren(
-                existingSnap.dirNodes[normalizedTarget]!!,
-                _analyzerState.value.treeSort,
-                _analyzerState.value.foldersFirst
-            )
-        }
-    }
 
-    fun refreshStorageAnalyzer(preferredDirPath: String? = null) {
+        // Fast path 1: in-memory snapshot already loaded & up-to-date
+        if (existingSnap != null && !existingSnap.isStale && analyzerBuiltGeneration == currentGen) {
+            if (normalizedTarget != null) {
+                navigateAnalyzerDir(normalizedTarget)
+            }
+            return
+        }
+
+        // Fast path 2: load persisted SQLite materialized cache (< 10ms, O(1) JVM heap), then silently refresh if stale
         analyzerBuildJob?.cancel()
         analyzerChildrenJob?.cancel()
         analyzerLargeFilesJob?.cancel()
         analyzerBuildJob = viewModelScope.launch {
-            _analyzerState.update { it.copy(isLoading = true, errorMessage = null) }
-            val genAtStart = indexProgress.value.syncGeneration
             val currentSort = _analyzerState.value.treeSort
             val currentFoldersFirst = _analyzerState.value.foldersFirst
             val currentExt = _analyzerState.value.selectedExtFilter
-            val result = withContext(Dispatchers.IO) {
+            val accessMode = settings.value.accessMode
+
+            val cachedBundle = withContext(Dispatchers.IO) {
                 runCatching {
                     val roots = StorageRootsHelper.getNormalStorageRoots(app)
-                    val snap = WizTreeEngine.buildFromDatabase(
+                    val snap = WizTreeEngine.loadFromCache(
                         db = db,
                         appInfoResolver = appInfoResolver,
-                        preferredRoots = roots
-                    )
-                    val desiredDir = preferredDirPath ?: _analyzerState.value.currentDirPath
-                    val resolvedDir = when {
-                        desiredDir != null && desiredDir in snap.dirNodes -> desiredDir
-                        else -> snap.defaultRootPath
+                        accessMode = accessMode,
+                        preferredRoots = roots,
+                        currentGeneration = currentGen
+                    ) ?: return@runCatching null
+                    val desiredDir = normalizedTarget ?: _analyzerState.value.currentDirPath ?: snap.defaultRootPath
+                    val dirNode = desiredDir?.let { WizTreeEngine.loadDirNode(db, it, appInfoResolver) }
+                        ?: snap.defaultRootPath?.let { WizTreeEngine.loadDirNode(db, it, appInfoResolver) }
+                    val dirChildren = if (dirNode != null) {
+                        WizTreeEngine.loadChildrenForDirectory(db, dirNode, currentSort, currentFoldersFirst, appInfoResolver)
+                    } else {
+                        emptyList()
                     }
-                    val dirChildren = resolvedDir?.let { snap.dirNodes[it] }?.let { node ->
-                        WizTreeEngine.loadChildrenForDirectory(db, node, currentSort, currentFoldersFirst)
-                    }.orEmpty()
                     val largeFiles = if (currentExt == null) {
                         snap.topLargeFiles
                     } else {
@@ -1019,20 +1019,118 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         .map { it.packageName }
                         .toList()
                     val icons = appInfoResolver.loadIconsForPackages(topPkgs)
-                    Triple(Triple(snap, resolvedDir, dirChildren), largeFiles, icons)
+                    CachedAnalyzerPayload(snap, dirNode, dirChildren, largeFiles, icons)
+                }.getOrNull()
+            }
+
+            if (cachedBundle != null && (cachedBundle.snap.totalFiles > 0L || cachedBundle.snap.totalDirs > 0L)) {
+                _analyzerState.update { cur ->
+                    cur.copy(
+                        isLoading = false,
+                        isRefreshingInBackground = cachedBundle.snap.isStale,
+                        loadingMessage = if (cachedBundle.snap.isStale) "正在后台刷新最新空间变动…" else null,
+                        snapshot = cachedBundle.snap,
+                        currentDirPath = cachedBundle.dirNode?.path ?: cachedBundle.snap.defaultRootPath,
+                        activeDirNode = cachedBundle.dirNode,
+                        activeDirChildren = cachedBundle.dirChildren,
+                        activeLargeFiles = cachedBundle.largeFiles,
+                        appIcons = cachedBundle.icons,
+                        errorMessage = null
+                    )
+                }
+                if (!cachedBundle.snap.isStale) {
+                    analyzerBuiltGeneration = currentGen
+                } else {
+                    refreshStorageAnalyzer(
+                        preferredDirPath = cachedBundle.dirNode?.path ?: normalizedTarget,
+                        isBackgroundRefresh = true
+                    )
+                }
+            } else {
+                refreshStorageAnalyzer(preferredDirPath = normalizedTarget, isBackgroundRefresh = false)
+            }
+        }
+    }
+
+    private data class CachedAnalyzerPayload(
+        val snap: com.pocketeverything.app.analyzer.WizTreeSnapshot,
+        val dirNode: com.pocketeverything.app.analyzer.DirNodeStat?,
+        val dirChildren: List<com.pocketeverything.app.analyzer.TreeChildEntry>,
+        val largeFiles: List<com.pocketeverything.app.analyzer.LargeFileEntry>,
+        val icons: Map<String, androidx.compose.ui.graphics.ImageBitmap>
+    )
+
+    fun refreshStorageAnalyzer(
+        preferredDirPath: String? = null,
+        isBackgroundRefresh: Boolean = false
+    ) {
+        analyzerBuildJob?.cancel()
+        analyzerChildrenJob?.cancel()
+        analyzerLargeFilesJob?.cancel()
+        analyzerBuildJob = viewModelScope.launch {
+            _analyzerState.update {
+                it.copy(
+                    isLoading = !isBackgroundRefresh,
+                    isRefreshingInBackground = isBackgroundRefresh,
+                    loadingMessage = if (isBackgroundRefresh) "后台更新空间缓存…" else "正在构建空间缓存…",
+                    errorMessage = null
+                )
+            }
+            val genAtStart = indexProgress.value.syncGeneration
+            val currentSort = _analyzerState.value.treeSort
+            val currentFoldersFirst = _analyzerState.value.foldersFirst
+            val currentExt = _analyzerState.value.selectedExtFilter
+            val accessMode = settings.value.accessMode
+
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val roots = StorageRootsHelper.getNormalStorageRoots(app)
+                    val snap = WizTreeEngine.buildFromDatabase(
+                        db = db,
+                        appInfoResolver = appInfoResolver,
+                        preferredRoots = roots,
+                        accessMode = accessMode,
+                        syncGeneration = genAtStart,
+                        onProgress = { msg ->
+                            _analyzerState.update { cur -> cur.copy(loadingMessage = msg) }
+                        }
+                    )
+                    val desiredDir = preferredDirPath ?: _analyzerState.value.currentDirPath
+                    val dirNode = desiredDir?.let { WizTreeEngine.loadDirNode(db, it, appInfoResolver) }
+                        ?: snap.defaultRootPath?.let { WizTreeEngine.loadDirNode(db, it, appInfoResolver) }
+                    val dirChildren = if (dirNode != null) {
+                        WizTreeEngine.loadChildrenForDirectory(db, dirNode, currentSort, currentFoldersFirst, appInfoResolver)
+                    } else {
+                        emptyList()
+                    }
+                    val largeFiles = if (currentExt == null) {
+                        snap.topLargeFiles
+                    } else {
+                        WizTreeEngine.loadLargeFilesForExtension(db, currentExt, appInfoResolver)
+                    }
+                    val topPkgs = snap.appRankings
+                        .asSequence()
+                        .filter { it.isInstalled }
+                        .take(48)
+                        .map { it.packageName }
+                        .toList()
+                    val icons = appInfoResolver.loadIconsForPackages(topPkgs)
+                    CachedAnalyzerPayload(snap, dirNode, dirChildren, largeFiles, icons)
                 }
             }
-            result.onSuccess { (core, largeFiles, icons) ->
-                val (snap, resolvedDir, dirChildren) = core
+            result.onSuccess { payload ->
                 analyzerBuiltGeneration = genAtStart
                 _analyzerState.update { cur ->
                     cur.copy(
                         isLoading = false,
-                        snapshot = snap,
-                        currentDirPath = resolvedDir,
-                        activeDirChildren = dirChildren,
-                        activeLargeFiles = largeFiles,
-                        appIcons = icons,
+                        isRefreshingInBackground = false,
+                        loadingMessage = null,
+                        snapshot = payload.snap,
+                        currentDirPath = payload.dirNode?.path ?: payload.snap.defaultRootPath,
+                        activeDirNode = payload.dirNode,
+                        activeDirChildren = payload.dirChildren,
+                        activeLargeFiles = payload.largeFiles,
+                        appIcons = payload.icons,
                         errorMessage = null
                     )
                 }
@@ -1041,31 +1139,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _analyzerState.update {
                     it.copy(
                         isLoading = false,
-                        errorMessage = err.message ?: "空间分析失败"
+                        isRefreshingInBackground = false,
+                        loadingMessage = null,
+                        errorMessage = if (it.snapshot == null) (err.message ?: "空间分析失败") else null
                     )
                 }
             }
         }
     }
 
-    private fun loadActiveAnalyzerDirChildren(
-        dirNode: com.pocketeverything.app.analyzer.DirNodeStat,
+    private fun loadActiveAnalyzerDir(
+        targetPath: String,
         sort: AnalyzerTreeSort,
         foldersFirst: Boolean
     ) {
         analyzerChildrenJob?.cancel()
-        // Immediately show subdirectories while direct files load (< 1ms) so navigation feels instantaneous.
-        _analyzerState.update { it.copy(activeDirChildren = dirNode.childrenSorted(sort, foldersFirst)) }
+        val normalized = WizTreeEngine.normalizeDirPath(targetPath)
+        _analyzerState.update { it.copy(currentDirPath = normalized) }
         analyzerChildrenJob = viewModelScope.launch {
-            val merged = withContext(Dispatchers.IO) {
-                runCatching { WizTreeEngine.loadChildrenForDirectory(db, dirNode, sort, foldersFirst) }
-                    .getOrElse { dirNode.childrenSorted(sort, foldersFirst) }
+            val loaded = withContext(Dispatchers.IO) {
+                runCatching {
+                    val node = WizTreeEngine.loadDirNode(db, normalized, appInfoResolver) ?: return@runCatching null
+                    val children = WizTreeEngine.loadChildrenForDirectory(db, node, sort, foldersFirst, appInfoResolver)
+                    node to children
+                }.getOrNull()
             }
-            if (_analyzerState.value.currentDirPath == dirNode.path &&
+            if (loaded != null &&
+                _analyzerState.value.currentDirPath == normalized &&
                 _analyzerState.value.treeSort == sort &&
                 _analyzerState.value.foldersFirst == foldersFirst
             ) {
-                _analyzerState.update { it.copy(activeDirChildren = merged) }
+                _analyzerState.update {
+                    it.copy(
+                        activeDirNode = loaded.first,
+                        activeDirChildren = loaded.second
+                    )
+                }
             }
         }
     }
@@ -1075,36 +1184,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun navigateAnalyzerDir(path: String) {
-        val snap = _analyzerState.value.snapshot ?: return
+        val cur = _analyzerState.value
+        if (cur.snapshot == null) return
         val normalized = WizTreeEngine.normalizeDirPath(path)
-        val node = snap.dirNodes[normalized] ?: return
-        _analyzerState.update { it.copy(currentDirPath = normalized) }
-        loadActiveAnalyzerDirChildren(node, _analyzerState.value.treeSort, _analyzerState.value.foldersFirst)
+        if (normalized.isEmpty()) return
+        loadActiveAnalyzerDir(normalized, cur.treeSort, cur.foldersFirst)
     }
 
     fun navigateAnalyzerUp(): Boolean {
         val cur = _analyzerState.value
         val snap = cur.snapshot ?: return false
-        val active = cur.activeDirNode ?: return false
-        if (active.path in snap.rootPaths) return false
+        val active = cur.effectiveDirNode ?: return false
+        if (active.path in snap.rootPaths || active.path == "/") return false
         val parent = active.parentPath
-        val parentNode = snap.dirNodes[parent] ?: return false
-        _analyzerState.update { it.copy(currentDirPath = parent) }
-        loadActiveAnalyzerDirChildren(parentNode, cur.treeSort, cur.foldersFirst)
+        if (parent.isEmpty()) return false
+        loadActiveAnalyzerDir(parent, cur.treeSort, cur.foldersFirst)
         return true
     }
 
     fun selectAnalyzerTreeSort(sort: AnalyzerTreeSort) {
         val cur = _analyzerState.value
-        val activeNode = cur.activeDirNode
+        val activeNode = cur.effectiveDirNode
         val resorted = com.pocketeverything.app.analyzer.sortTreeChildren(
             cur.effectiveDirChildren,
             sort,
             cur.foldersFirst
         )
         _analyzerState.update { it.copy(treeSort = sort, activeDirChildren = resorted) }
-        if (activeNode != null && activeNode.directFileCount > WizTreeEngine.DEFAULT_DIRECT_FILES_LIMIT) {
-            loadActiveAnalyzerDirChildren(activeNode, sort, cur.foldersFirst)
+        if (activeNode != null &&
+            (activeNode.directFileCount > WizTreeEngine.DEFAULT_DIRECT_FILES_LIMIT ||
+                activeNode.dirCount > WizTreeEngine.DEFAULT_CHILD_DIRS_LIMIT)
+        ) {
+            loadActiveAnalyzerDir(activeNode.path, sort, cur.foldersFirst)
         }
     }
 
@@ -1174,14 +1285,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun deleteSearchResultItem(item: SearchResultItem) {
+        deletePathCore(
+            path = item.path,
+            preferredMode = item.accessMode,
+            isDir = item.isDir,
+            knownBytes = if (item.isDir) 0L else item.size,
+            knownExt = item.ext,
+            reloadAnalyzerAfter = false
+        )
+    }
+
     fun deletePathFromAnalyzer(path: String, preferredMode: AccessMode, isDir: Boolean) {
+        deletePathCore(
+            path = path,
+            preferredMode = preferredMode,
+            isDir = isDir,
+            knownBytes = 0L,
+            knownExt = "",
+            reloadAnalyzerAfter = true
+        )
+    }
+
+    private fun deletePathCore(
+        path: String,
+        preferredMode: AccessMode,
+        isDir: Boolean,
+        knownBytes: Long,
+        knownExt: String,
+        reloadAnalyzerAfter: Boolean
+    ) {
         val check = DeletionSafetyGuard.evaluate(path)
         if (check.risk == DeletionRisk.BLOCKED) {
             emitMessage(check.reason ?: "受保护路径，禁止删除")
             return
         }
         viewModelScope.launch {
-            _analyzerState.update { it.copy(deletingPath = check.normalizedPath) }
+            if (reloadAnalyzerAfter) {
+                _analyzerState.update { it.copy(deletingPath = check.normalizedPath) }
+            }
             val outcome = withContext(Dispatchers.IO) {
                 runCatching {
                     val activeMode = settings.value.accessMode
@@ -1203,24 +1345,90 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (!deleted) {
                         throw IllegalStateException(lastErr ?: "权限不足或路径被占用，删除失败")
                     }
+                    val metaBefore = if (!isDir && knownBytes <= 0L) db.getFileMetaByPath(check.normalizedPath) else null
+                    val fileBytes = if (knownBytes > 0L) knownBytes else (metaBefore?.size ?: 0L)
+                    val fileExt = knownExt.ifEmpty { metaBefore?.ext.orEmpty() }
+
+                    // O(depth) incremental delta on persisted analyzer cache (< 2ms) before removing files_meta rows
+                    runCatching {
+                        db.applyAnalyzerDeletionDelta(
+                            deletedPath = check.normalizedPath,
+                            isDir = isDir,
+                            knownFileBytes = fileBytes,
+                            knownFileExt = fileExt
+                        )
+                    }
                     val removedRows = db.deleteSubtree(check.normalizedPath)
                     indexManager.notifyExternalMutation()
                     removedRows
                 }
             }
-            _analyzerState.update { it.copy(deletingPath = null) }
+            if (reloadAnalyzerAfter) {
+                _analyzerState.update { it.copy(deletingPath = null) }
+            }
             outcome.onSuccess { removedRows ->
                 val targetName = check.normalizedPath.substringAfterLast('/').ifEmpty { check.normalizedPath }
                 val typeText = if (isDir) "目录" else "文件"
                 emitMessage("已永久删除$typeText「$targetName」（同步清理 $removedRows 条索引）")
-                val fallbackDir = if (isDir && _analyzerState.value.currentDirPath == check.normalizedPath) {
-                    WizTreeEngine.parentOf(check.normalizedPath)
-                } else {
-                    _analyzerState.value.currentDirPath
+                if (reloadAnalyzerAfter) {
+                    val fallbackDir = if (isDir && _analyzerState.value.currentDirPath == check.normalizedPath) {
+                        WizTreeEngine.parentOf(check.normalizedPath)
+                    } else {
+                        _analyzerState.value.currentDirPath
+                    }
+                    reloadAnalyzerFromCacheFast(preferredDirPath = fallbackDir)
                 }
-                refreshStorageAnalyzer(preferredDirPath = fallbackDir)
             }.onFailure { err ->
                 emitMessage("删除失败：${err.message ?: "请检查权限"}")
+            }
+        }
+    }
+
+    /**
+     * Ultra-fast (< 5ms) reload from incrementally-updated SQLite analyzer cache after deletion.
+     */
+    private fun reloadAnalyzerFromCacheFast(preferredDirPath: String?) {
+        viewModelScope.launch {
+            val cur = _analyzerState.value
+            val currentGen = indexProgress.value.syncGeneration
+            val accessMode = settings.value.accessMode
+            val payload = withContext(Dispatchers.IO) {
+                runCatching {
+                    val roots = StorageRootsHelper.getNormalStorageRoots(app)
+                    val snap = WizTreeEngine.loadFromCache(
+                        db = db,
+                        appInfoResolver = appInfoResolver,
+                        accessMode = accessMode,
+                        preferredRoots = roots,
+                        currentGeneration = currentGen
+                    ) ?: return@runCatching null
+                    val desired = preferredDirPath ?: cur.currentDirPath ?: snap.defaultRootPath
+                    val node = desired?.let { WizTreeEngine.loadDirNode(db, it, appInfoResolver) }
+                        ?: snap.defaultRootPath?.let { WizTreeEngine.loadDirNode(db, it, appInfoResolver) }
+                    val children = if (node != null) {
+                        WizTreeEngine.loadChildrenForDirectory(db, node, cur.treeSort, cur.foldersFirst, appInfoResolver)
+                    } else {
+                        emptyList()
+                    }
+                    val largeFiles = if (cur.selectedExtFilter == null) {
+                        snap.topLargeFiles
+                    } else {
+                        WizTreeEngine.loadLargeFilesForExtension(db, cur.selectedExtFilter, appInfoResolver)
+                    }
+                    CachedAnalyzerPayload(snap, node, children, largeFiles, cur.appIcons)
+                }.getOrNull()
+            }
+            if (payload != null) {
+                analyzerBuiltGeneration = currentGen
+                _analyzerState.update {
+                    it.copy(
+                        snapshot = payload.snap,
+                        currentDirPath = payload.dirNode?.path ?: payload.snap.defaultRootPath,
+                        activeDirNode = payload.dirNode,
+                        activeDirChildren = payload.dirChildren,
+                        activeLargeFiles = payload.largeFiles
+                    )
+                }
             }
         }
     }
