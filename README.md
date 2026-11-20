@@ -8,6 +8,7 @@
 
 <p>
   <a href="https://github.com/yyzmia1/Pinpoint/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/yyzmia1/Pinpoint?style=flat-square&color=0369A1" /></a>
+  <a href="LICENSE"><img alt="License: GPL v3" src="https://img.shields.io/badge/License-GPLv3-blue.svg?style=flat-square" /></a>
   <img alt="Android API" src="https://img.shields.io/badge/Android-API%2026--35-34D399?style=flat-square&logo=android" />
   <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-2.1.0-7F52FF?style=flat-square&logo=kotlin" />
   <img alt="Package" src="https://img.shields.io/badge/Package-com.yyzm.pinpoint-1E293B?style=flat-square" />
@@ -214,3 +215,12 @@
 
 > [!IMPORTANT]
 > **包名迁移提示（`v1.2.2+`）**：自 `v1.2.2` 起正式包名变更为 `com.yyzm.pinpoint`（仓库由 `PocketEverything` 更名为 `Pinpoint`）。更早版本（`<= v1.2.1`）使用 `com.pocketeverything.app`，Android 会将两者视为独立应用；安装 `v1.2.2+` 前请先手动卸载旧包 `com.pocketeverything.app`，以免桌面出现重复图标。
+
+---
+
+## 开源协议
+
+本项目基于 **[GNU General Public License v3.0 (GPLv3)](LICENSE)** 协议开源。
+
+- Copyright © 2026 yyzmia1
+- 允许自由使用、修改与分发，但任何修改、衍生或重新发布的版本**必须同样以 GPLv3 开源并保留原作者版权声明**，禁止闭源套壳分发。

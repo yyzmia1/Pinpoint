@@ -8,6 +8,7 @@ Desktop *Everything*-style query syntax · Sub-10 ms CJK substring retrieval ove
 
 <p>
   <a href="https://github.com/yyzmia1/Pinpoint/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/yyzmia1/Pinpoint?style=flat-square&color=0369A1" /></a>
+  <a href="LICENSE"><img alt="License: GPL v3" src="https://img.shields.io/badge/License-GPLv3-blue.svg?style=flat-square" /></a>
   <img alt="Android API" src="https://img.shields.io/badge/Android-API%2026--35-34D399?style=flat-square&logo=android" />
   <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-2.1.0-7F52FF?style=flat-square&logo=kotlin" />
   <img alt="Package" src="https://img.shields.io/badge/Package-com.yyzm.pinpoint-1E293B?style=flat-square" />
@@ -214,3 +215,12 @@ Implemented by recursive-descent `QuerySyntaxParser`:
 
 > [!IMPORTANT]
 > **Package ID Migration (`v1.2.2+`)**: Releases starting from `v1.2.2` use application ID `com.yyzm.pinpoint` (repository renamed from `PocketEverything` to `Pinpoint`). Prior versions (`<= v1.2.1`) used `com.pocketeverything.app` and will not be overwritten automatically by Android—uninstall any older `com.pocketeverything.app` build before installing `v1.2.2+` to avoid duplicate launcher icons.
+
+---
+
+## License
+
+This project is licensed under the **[GNU General Public License v3.0 (GPLv3)](LICENSE)**.
+
+- Copyright © 2026 yyzmia1
+- You may freely use, modify, and redistribute this software, provided that any modified or derivative works are also released under the GPLv3 with copyright attribution preserved.
