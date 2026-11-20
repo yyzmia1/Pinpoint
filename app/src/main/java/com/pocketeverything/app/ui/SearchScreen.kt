@@ -1080,11 +1080,19 @@ private fun ModeSheet(
                             Spacer(Modifier.width(8.dp))
                         }
                         val (chipBg, chipFg, chipText) = when (status) {
-                            is ModeAvailability.Ready -> Triple(
-                                Emerald400.copy(alpha = 0.16f),
-                                Emerald400,
-                                "可用"
-                            )
+                            is ModeAvailability.Ready -> if (selected) {
+                                Triple(
+                                    Emerald400.copy(alpha = 0.18f),
+                                    Emerald400,
+                                    "使用中"
+                                )
+                            } else {
+                                Triple(
+                                    MaterialTheme.colorScheme.surfaceContainerHighest,
+                                    MaterialTheme.colorScheme.onSurfaceVariant,
+                                    "已就绪"
+                                )
+                            }
                             is ModeAvailability.NeedsPermission -> Triple(
                                 Amber400.copy(alpha = 0.16f),
                                 Amber400,

@@ -205,164 +205,46 @@ fun SettingsScreen(
                 .padding(horizontal = 16.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // 1. Top Version & Update Hero Card (Big-Tech Updater Placement)
-            Surface(
-                shape = RoundedCornerShape(18.dp),
-                color = cardColor,
-                border = lowOpacityCardBorder(hasCustomBg = hasCustomBg, cardAlpha = cardAlpha),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.fillMaxWidth()) {
+            // Conditional compact banner only when a newer version is actually available
+            if (updateState is UpdateCheckState.Available) {
+                Surface(
+                    onClick = onCheckUpdates,
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        BrandMarkIcon(size = 44.dp)
-                        Spacer(Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Pinpoint",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = "v${BuildConfig.VERSION_NAME} · #${BuildConfig.VERSION_CODE}",
-                                style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            val statusText: Pair<String, Color>? = when (updateState) {
-                                is UpdateCheckState.UpToDate -> "已是最新版本" to Emerald400
-                                is UpdateCheckState.Available -> "发现新版本 ${updateState.info.tagName}" to MaterialTheme.colorScheme.primary
-                                is UpdateCheckState.Error -> "检查失败：${updateState.message}" to Rose400
-                                else -> null
-                            }
-                            if (statusText != null) {
-                                Text(
-                                    text = statusText.first,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = statusText.second,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.padding(top = 2.dp)
-                                )
-                            }
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        FilledTonalButton(
-                            onClick = onCheckUpdates,
-                            enabled = updateState !is UpdateCheckState.Checking,
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
-                        ) {
-                            if (updateState is UpdateCheckState.Checking) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(15.dp),
-                                    strokeWidth = 2.dp
-                                )
-                                Spacer(Modifier.width(6.dp))
-                                Text("检测中", style = MaterialTheme.typography.labelLarge)
-                            } else {
-                                Text("检查更新", style = MaterialTheme.typography.labelLarge)
-                            }
-                        }
-                    }
-                    HorizontalDivider(
-                        modifier = Modifier.padding(horizontal = 16.dp),
-                        thickness = 0.5.dp,
-                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)
-                    )
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(onClick = onOpenChangelog)
-                            .padding(horizontal = 16.dp, vertical = 9.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                        BrandMarkIcon(size = 28.dp)
+                        Spacer(Modifier.width(10.dp))
                         Text(
-                            text = "版本更新日志",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.primary,
+                            text = "发现新版本 ${updateState.info.tagName}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
                             modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = "立即查看",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary
                         )
                         Icon(
                             Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                            contentDescription = "查看更新日志",
+                            contentDescription = "查看更新",
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(18.dp)
                         )
                     }
-                    HorizontalDivider(
-                        modifier = Modifier.padding(horizontal = 16.dp),
-                        thickness = 0.5.dp,
-                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)
-                    )
-                    val channelIndex = when {
-                        settings.receiveBetaUpdates -> 2
-                        settings.receiveStableUpdates -> 1
-                        else -> 0
-                    }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 9.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "更新通道",
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = MaterialTheme.colorScheme.surfaceContainerHigh
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(2.dp),
-                                horizontalArrangement = Arrangement.spacedBy(2.dp)
-                            ) {
-                                listOf("关闭", "正式版", "含测试版").forEachIndexed { idx, label ->
-                                    val selected = channelIndex == idx
-                                    Surface(
-                                        onClick = {
-                                            haptics.tick()
-                                            when (idx) {
-                                                0 -> {
-                                                    onSetReceiveStableUpdates(false)
-                                                    onSetReceiveBetaUpdates(false)
-                                                }
-                                                1 -> {
-                                                    onSetReceiveStableUpdates(true)
-                                                    onSetReceiveBetaUpdates(false)
-                                                }
-                                                2 -> {
-                                                    onSetReceiveStableUpdates(true)
-                                                    onSetReceiveBetaUpdates(true)
-                                                }
-                                            }
-                                        },
-                                        shape = RoundedCornerShape(8.dp),
-                                        color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
-                                    ) {
-                                        Text(
-                                            text = label,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                                            color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
-                                            maxLines = 1
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             }
 
-            // 2. Access Mode & Permissions (collapsed by default; shows current active mode only)
+            // 1. Access Mode & Permissions (collapsed by default; shows current active mode only)
             SettingsSection(title = "访问模式与权限", cardColor = cardColor) {
                 val activeMode = settings.accessMode
                 val activeStatus = modeStatuses[activeMode]
@@ -390,7 +272,7 @@ fun SettingsScreen(
                         )
                     }
                     Spacer(Modifier.width(8.dp))
-                    ModeStatusChip(activeStatus)
+                    ModeStatusChip(activeStatus, isActive = true)
                     Spacer(Modifier.width(6.dp))
                     Icon(
                         imageVector = if (expandModes) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
@@ -465,10 +347,10 @@ fun SettingsScreen(
                                                     )
                                                 }
                                             }
-                                            ModeStatusChip(status)
+                                            ModeStatusChip(status, isActive = selected)
                                         }
                                     }
-                                    else -> ModeStatusChip(status)
+                                    else -> ModeStatusChip(status, isActive = selected)
                                 }
                             }
                         }
@@ -1067,11 +949,142 @@ fun SettingsScreen(
                 )
             }
 
-            // 6. About & Open Source
-            SettingsSection(title = "关于与开源", cardColor = cardColor) {
+            // 6. Updates, About & Open Source (consolidated at bottom for a clean first screen)
+            SettingsSection(title = "关于与更新", cardColor = cardColor) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    BrandMarkIcon(size = 38.dp)
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Pinpoint",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "v${BuildConfig.VERSION_NAME} · #${BuildConfig.VERSION_CODE}",
+                            style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        val statusText: Pair<String, Color>? = when (updateState) {
+                            is UpdateCheckState.UpToDate -> "已是最新版本" to Emerald400
+                            is UpdateCheckState.Available -> "发现新版本 ${updateState.info.tagName}" to MaterialTheme.colorScheme.primary
+                            is UpdateCheckState.Error -> "检查失败：${updateState.message}" to Rose400
+                            else -> null
+                        }
+                        if (statusText != null) {
+                            Text(
+                                text = statusText.first,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = statusText.second,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    FilledTonalButton(
+                        onClick = onCheckUpdates,
+                        enabled = updateState !is UpdateCheckState.Checking,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.height(34.dp)
+                    ) {
+                        if (updateState is UpdateCheckState.Checking) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Text("检测中", style = MaterialTheme.typography.labelMedium)
+                        } else {
+                            Text("检查更新", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                }
+                SettingsDivider()
+                val channelIndex = when {
+                    settings.receiveBetaUpdates -> 2
+                    settings.receiveStableUpdates -> 1
+                    else -> 0
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "更新通道",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(9.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            listOf("关闭", "正式版", "含测试版").forEachIndexed { idx, label ->
+                                val selected = channelIndex == idx
+                                Surface(
+                                    onClick = {
+                                        haptics.tick()
+                                        when (idx) {
+                                            0 -> {
+                                                onSetReceiveStableUpdates(false)
+                                                onSetReceiveBetaUpdates(false)
+                                            }
+                                            1 -> {
+                                                onSetReceiveStableUpdates(true)
+                                                onSetReceiveBetaUpdates(false)
+                                            }
+                                            2 -> {
+                                                onSetReceiveStableUpdates(true)
+                                                onSetReceiveBetaUpdates(true)
+                                            }
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(7.dp),
+                                    color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
+                                ) {
+                                    Text(
+                                        text = label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                        color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                SettingsDivider()
+                NavigationRow(
+                    title = "版本更新日志",
+                    onClick = onOpenChangelog
+                )
+                SettingsDivider()
+                NavigationRow(
+                    title = "版本发布页 (Releases)",
+                    onClick = { onOpenUrl("${BuildConfig.GITHUB_URL}/releases") }
+                )
+                SettingsDivider()
                 InfoRow("开发者", BuildConfig.DEVELOPER_NAME)
                 SettingsDivider()
                 InfoRow("构建日期", "${BuildConfig.BUILD_DATE} (${BuildConfig.GIT_HASH})")
+                SettingsDivider()
+                InfoRow("开源协议", "GNU GPLv3")
                 SettingsDivider()
                 Row(
                     modifier = Modifier
@@ -1107,16 +1120,6 @@ fun SettingsScreen(
                         modifier = Modifier.size(18.dp)
                     )
                 }
-                SettingsDivider()
-                NavigationRow(
-                    title = "更新日志 (Changelog)",
-                    onClick = onOpenChangelog
-                )
-                SettingsDivider()
-                NavigationRow(
-                    title = "版本发布页 (Releases)",
-                    onClick = { onOpenUrl("${BuildConfig.GITHUB_URL}/releases") }
-                )
             }
 
             Spacer(Modifier.height(28.dp))
@@ -2098,17 +2101,25 @@ fun ModeSwitchConfirmDialog(
 }
 
 @Composable
-private fun ModeStatusChip(status: ModeAvailability?) {
+private fun ModeStatusChip(status: ModeAvailability?, isActive: Boolean = false) {
     val (bg, fg, label) = when (status) {
-        is ModeAvailability.Ready -> Triple(
-            Emerald400.copy(alpha = 0.14f),
-            Emerald400,
-            "可用"
-        )
+        is ModeAvailability.Ready -> if (isActive) {
+            Triple(
+                Emerald400.copy(alpha = 0.16f),
+                Emerald400,
+                "使用中"
+            )
+        } else {
+            Triple(
+                MaterialTheme.colorScheme.surfaceContainerHighest,
+                MaterialTheme.colorScheme.onSurfaceVariant,
+                "已就绪"
+            )
+        }
         is ModeAvailability.NeedsPermission -> Triple(
             Amber400.copy(alpha = 0.14f),
             Amber400,
-            "需授权"
+            "待授权"
         )
         is ModeAvailability.Unavailable -> Triple(
             MaterialTheme.colorScheme.surfaceContainerHighest,
