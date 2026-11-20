@@ -259,7 +259,8 @@ object DeletionSafetyGuard {
     private fun unlinkSingle(path: String): Boolean {
         try {
             Os.remove(path)
-            return true
+            // Host JVM stubs may no-op silently; only trust the call if the node is really gone.
+            if (!Files.exists(Paths.get(path), LinkOption.NOFOLLOW_LINKS)) return true
         } catch (_: LinkageError) {
             // Host JVM fallback
         } catch (t: Throwable) {
