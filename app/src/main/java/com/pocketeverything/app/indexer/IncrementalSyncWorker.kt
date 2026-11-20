@@ -21,13 +21,18 @@ class IncrementalSyncWorker(
     override suspend fun doWork(): Result {
         val app = applicationContext as? PocketEverythingApp ?: return Result.success()
         val silent = inputData.getBoolean(KEY_SILENT_IF_UNREADY, false)
-        app.container.indexManager.startQuickHotDirsRefresh(silentIfUnavailable = silent).join()
+        val includeRootOther = inputData.getBoolean(KEY_INCLUDE_ROOT_OTHER, false)
+        app.container.indexManager.startQuickHotDirsRefresh(
+            silentIfUnavailable = silent,
+            includeRootOther = includeRootOther
+        ).join()
         return Result.success()
     }
 
     companion object {
         private const val WORK_NAME = "pocket_everything_incremental_sync"
         private const val KEY_SILENT_IF_UNREADY = "silent_if_unready"
+        private const val KEY_INCLUDE_ROOT_OTHER = "include_root_other"
 
         fun schedule(context: Context) {
             val constraints = Constraints.Builder()
@@ -45,7 +50,12 @@ class IncrementalSyncWorker(
 
         fun enqueueBootSync(context: Context) {
             val req = OneTimeWorkRequestBuilder<IncrementalSyncWorker>()
-                .setInputData(workDataOf(KEY_SILENT_IF_UNREADY to true))
+                .setInputData(
+                    workDataOf(
+                        KEY_SILENT_IF_UNREADY to true,
+                        KEY_INCLUDE_ROOT_OTHER to true
+                    )
+                )
                 .build()
             WorkManager.getInstance(context).enqueueUniqueWork(
                 "${WORK_NAME}_boot",

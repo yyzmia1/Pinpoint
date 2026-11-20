@@ -24,16 +24,19 @@
 
 ## 核心特性
 
-- **完全离线 · 桌面级检索**：文件名、路径与文档正文全部本地建库检索，零网络依赖；支持桌面端 *Everything* 风格布尔运算、通配符、正则、字段限定与大小/日期筛选。
-- **任意中文片段毫秒命中**：自研中文 N-gram 分词结合语法树二次校验，单字、跨词片段与精确短语 100% 精准召回、零误报。
+- **完全离线 · *Everything* 级检索**：文件名、路径与文档正文全部本地建库检索，零网络依赖；支持布尔运算、通配符、正则、字段限定与大小/日期筛选，中文单字与跨词任意片段毫秒命中、零误报。
 - **普通 / Shizuku / Root 三级权限**：
   - **普通模式**：基于系统「所有文件访问权限」快速扫描内部与外置公开存储。
-  - **Shizuku 模式**：免 Root 穿透 `/Android/data` 与 `/Android/obb`，内置三步引导向导。
-  - **Root 模式**：从 `/` 全盘扫描，按需放行 `/data` 分区并自动跳过重复挂载与虚拟文件系统。
-- **流式建库与自动增量同步**：边扫边开放搜索，每次切回前台或从系统文件选择器开启时自动增量更新；后台流式提取 `.txt` / `.md` / `.docx` / `.pdf` 正文，不限大文件体积且防 OOM。
-- **空间透视与残留清理**：零重复扫盘呈现交互式矩形树图、MT 风格目录树（体积 / 文件数 / 时间 / 名称多维排序 + 占比条）、应用归属与已卸载残留榜、大文件榜；支持跨权限安全删除与一键排除出搜索库。
-- **内置预览与系统选文集成**：内置文本/代码、PDF、缩放图片、压缩包与音视频预览；支持在微信、浏览器等外部应用的系统文件选择器中直接检索并选文。
-- **莫奈动态取色与稳定更新通道**：支持 Android 12+ 莫奈动态取色与纯黑暗色模式；通过静态清单多源回退检查更新与浏览更新日志，告别 GitHub API 403 限流。
+  - **Shizuku 模式**：免 Root 穿透 `/Android/data` 与 `/Android/obb`，内置三步实时检测向导。
+  - **Root 模式**：从 `/` 全盘扫描，按需放行 `/data` 分区，自动跳过软链接、虚拟文件系统与重复挂载。
+- **三阶段无缝增量同步与多线程并发校验**：
+  - **阶段 1（`< 1s` 热区同步）**：切回前台或系统选文器拉起时优先极速校验 `/storage/...` 用户区与最近活跃文档，立刻开放最新结果；
+  - **阶段 2（后台续增 `/data`）**：Root 开启 `/data` 时紧接着在后台静默校验，不阻塞首页搜索与预览；
+  - **阶段 3（开机 / 手动校验 `/` 其余分区）**：检测到设备重启（如刷入 Root 模块或 OTA 升级后）或手动点击「增量同步」时，自动追加校验 `/system`、`/vendor`、`/mnt` 等其余已索引分区，全程配合 4 线程并发 `lstat` 提速。
+- **空间透视与残留清理（SQLite 物化缓存秒开）**：空间统计持久化落盘至 SQLite 物化缓存表，后续 `< 10ms` 秒开且恒定 `< 2MB` 内存（400GB+ 全盘零 OOM）；提供交互式矩形树图、MT 风格单栏目录树（体积 / 文件数 / 时间 / 名称四维升降序 + 文件夹置顶 + `..` 返回上级）、按权限模式定制顶栏快捷胶囊（Root 下 `/` 置最左并自动识别模块目录）、应用归属与已卸载残留榜、大文件榜。
+- **首页与空间透视双入口跨权限安全删除**：支持在首页长按详情与空间透视内跨普通 / Shizuku / Root 安全物理真删（客户端与服务端双重 `DeletionSafetyGuard` 系统目录硬拦截、不跟随软链接），删后 O(深度) 实时扣减空间缓存并刷新搜索结果。
+- **全类型内置预览与系统文件选择器集成**：内置文本/代码、PDF、双指缩放图片、压缩包与音视频预览；支持在微信、浏览器等外部应用调用系统文件选择器时直接检索并回传文件。
+- **清爽 Material You 外观与零 403 静态更新**：支持 Android 12+ 莫奈动态取色与 AMOLED 纯黑模式；版本检查与更新日志优先走独立 `release-manifest` 分支静态多源回退，彻底告别 GitHub API 403 限流。
 
 ---
 
@@ -62,7 +65,8 @@
 ### 进阶使用
 
 - **复合查询语法**：支持桌面端 *Everything* 风格布尔运算、通配符、正则、字段限定与大小/日期筛选，详见下方 **[查询语法速查](#查询语法速查)**。
-- **空间透视与清理**：点击首页顶栏饼图图标一键进入 **空间透视**（或在任意文件详情弹窗点击「在空间树中定位」），支持交互式矩形树图下钻、识别已卸载应用残留并执行物理真删或一键排除出搜索库。
+- **首页快捷操作与安全删除**：长按任意搜索结果可打开详情面板，支持内置预览、系统打开、复制路径、分享、**在空间树中定位**以及带系统目录保护的**跨权限永久删除**。
+- **空间透视与残留清理**：点击首页顶栏饼图图标一键进入 **空间透视**，支持按权限模式快捷切换分区（Root 下顶部依次为 `/`、`/data`、`模块目录`、`内部存储`）、交互式矩形树图下钻、MT 风格四维排序浏览、识别已卸载应用残留并执行物理真删或一键排除出搜索库。
 - **外部应用选文**：在微信、浏览器等应用调用系统文件选择器时，展开「打开文档」左侧抽屉选择 **Pinpoint**，即可在自动增量更新后直接跨目录检索并回传文件。
 
 ---
@@ -79,12 +83,13 @@
 
 | 模块 | 实现要点 |
 | :--- | :--- |
+| **SQLite 物化空间缓存与差量更新** | `WizTreeEngine` 将目录树、扩展名与应用归属统计物化持久化至 `analyzer_*` 表，辅以 `idx_files_size_desc` 索引，冷启动 `< 10ms` 秒开且 JVM 堆恒定 `< 2MB`；删除文件/目录时沿祖先链 O(深度) 差量扣减，Root 模式下 `/` 与 `/data` 统一归入真实挂载树。 |
+| **三阶段增量同步与并发 `lstat`** | `TwoTierIndexManager` 分层执行「阶段 1 `/storage` 热区（`< 1s`）→ 阶段 2 后台 `/data` → 阶段 3 开机/手动 `/` 其余分区（基于 `Settings.Global.BOOT_COUNT` 自动识别重启）」；`PrivilegedTreeWalker.statPaths` 大批量自动启用 4 线程并行 `Os.lstat` 与 2,500 分块 IPC。 |
 | **跨进程流式传输** | 通过 `IPrivilegedFsService` AIDL 配合 `ParcelFileDescriptor` 管道及 `suspend` `BinaryTreeStreamCodec.readStream` 流式消费批次记录，彻底规避 Binder 缓冲区上限与大目录树堆内存峰值。 |
 | **挂载点与环路去重** | `PrivilegedTreeWalker` 使用 `File.list()` 减少对象分配，通过 `Os.lstat` 不跟随软链接，并维护 `(st_dev, st_ino)` 集合排除重复 bind/loop 挂载。 |
-| **WAL 读写分离连接池** | `SqliteSearchDatabase` 启用 `WAL` 模式并严格隔离 `writeConn` 与 `query_only` `readConn`，后台建库与正文写入不会阻塞前台键入检索。 |
-| **目录精准增量清理** | `pruneDirectorySubtree` 采用基于 `path` 唯一索引的 B 树范围查询（`path >= ? AND path < ?`）替代 `LIKE`，规避 `QQfile_recv` 等含 `_`/`%` 目录名通配误删问题。 |
-| **正文压缩存储** | 正文经 Zlib（`Deflater` / `Inflater`）压缩后落库 `docs_raw`，命中时按需解压抽取高亮上下文片段。 |
-| **跨权限安全唤起与系统选文** | `FileOpener` 对主存储可读路径直接使用 `FileProvider` / 只读描述符，对受限目录通过 `preview_bridge` 独立子目录桥接保留真实文件名；`PinpointDocumentsProvider`（SAF）与 `FilePickerActivity`（`ACTION_GET_CONTENT`）复用索引库安全向外部应用开放。 |
+| **WAL 读写分离连接池** | `SqliteSearchDatabase` 启用 `WAL` 模式并严格隔离 `writeConn` 与 `query_only` `readConn`，后台建库、空间缓存写入与正文抽取不会阻塞前台键入检索。 |
+| **目录精准增量清理与正文压缩** | `pruneDirectorySubtree` 采用 B 树范围查询（`path >= ? AND path < ?`）规避 `_`/`%` 误删；正文经 Zlib 压缩存 `docs_raw`，命中时按需解压高亮。 |
+| **跨权限安全删除与系统选文** | `DeletionSafetyGuard` 在 UI 与特权服务端双重硬拦截系统关键路径并禁止跟随软链接；`PinpointDocumentsProvider`（SAF）与 `FilePickerActivity` 复用索引库安全向外部应用开放选文。 |
 
 ---
 
@@ -142,27 +147,33 @@
 │   ├── ci.yml                               # 日常推送/PR 自动运行单测、Lint 与 Debug 测试包构建
 │   ├── release.yml                          # 推送 v* 标签时自动校验签名并发布正式 Release
 │   └── sync-release-manifest.yml            # 发布 Release 后自动同步精简版 releases.json 至 release-manifest 分支
+├── docs/media/
+│   ├── pinpoint-demo.webp                   # 应用核心功能动态演示
+│   └── architecture-{zh,en}-{light,dark}.svg # 昼夜自适应矢量系统架构图
 ├── gradle/libs.versions.toml                # 统一依赖版本清单
 ├── settings.gradle.kts                      # rootProject.name = "Pinpoint"
+├── LICENSE                                  # GNU GPLv3 开源协议全文
 ├── README.md                                # 简体中文工程文档
 ├── README.en.md                             # 英文工程文档
 └── app/
     ├── src/main/
     │   ├── aidl/com/pocketeverything/app/ipc/IPrivilegedFsService.aidl
     │   ├── java/com/pocketeverything/app/
-    │   │   ├── analyzer/    # WizTreeEngine（SQLite 原生聚合 + Treemap）, AppStorageAttribution（应用归属与残留）
-    │   │   ├── data/        # SettingsRepository（设置持久化）, UpdateChecker（静态多源版本检测）
+    │   │   ├── analyzer/    # WizTreeEngine（SQLite 物化缓存 + Treemap + 4维排序）, AppStorageAttribution
+    │   │   ├── data/        # SettingsRepository（设置与重启计数持久化）, UpdateChecker（静态多源更新）
     │   │   ├── di/          # AppContainer（依赖容器）
     │   │   ├── filter/      # FilterConfig, FilterEngine（目录过滤与白名单策略）
-    │   │   ├── fs/          # PrivilegedTreeWalker, Root/Shizuku 服务, DeletionSafetyGuard, FileOpener
-    │   │   ├── indexer/     # TwoTierIndexManager, IncrementalSyncWorker, RealtimeMonitorService, BootReceiver
+    │   │   ├── fs/          # PrivilegedTreeWalker（多线程并发 lstat）, Root/Shizuku 服务, DeletionSafetyGuard, FileOpener
+    │   │   ├── indexer/     # TwoTierIndexManager（三阶段增量同步）, IncrementalSyncWorker, RealtimeMonitorService, BootReceiver
     │   │   ├── parser/      # ExtractorDispatcher, TxtMdExtractor, DocxExtractor, PdfExtractor
     │   │   ├── picker/      # PinpointDocumentsProvider（SAF 根）, MimeFilterHelper（类型筛选）
     │   │   ├── search/      # QuerySyntaxParser, SearchQueryAst, CjkTokenizer, SqliteSearchDatabase, SnippetHighlighter
-    │   │   ├── ui/          # SearchScreen, StorageAnalyzerScreen, SettingsScreen, ShizukuGuideScreen, ReaderPreviewSheet
+    │   │   ├── ui/          # SearchScreen, StorageAnalyzerScreen, FileDetailDialog, SettingsScreen, ShizukuGuideScreen, ReaderPreviewSheet
     │   │   └── FilePickerActivity.kt # ACTION_GET_CONTENT 系统选文件界面（Pinpoint 选择）
     │   └── res/             # 自适应单色桌面图标、字符串资源、FileProvider 路径配置
     └── src/test/java/com/pocketeverything/app/
+        ├── analyzer/WizTreeEngineTest.kt
+        ├── fs/DeletionSafetyGuardTest.kt
         ├── BinaryTreeStreamCodecTest.kt
         ├── CjkTokenizerTest.kt
         ├── DocumentExtractorTest.kt

@@ -382,6 +382,14 @@ class SettingsRepository(context: Context) {
         prefs.edit().putLong(KEY_ACTIVE_DOWNLOAD_ID, id).apply()
     }
 
+    fun getLastRootOtherSyncBootCount(): Int = prefs.getInt(KEY_LAST_ROOT_OTHER_BOOT_COUNT, -1)
+
+    fun setLastRootOtherSyncBootCount(bootCount: Int) {
+        if (bootCount >= 0) {
+            prefs.edit().putInt(KEY_LAST_ROOT_OTHER_BOOT_COUNT, bootCount).apply()
+        }
+    }
+
     companion object {
         private const val KEY_MODE = "access_mode"
         private const val KEY_SKIP_NOISE = "skip_noise_caches"
@@ -422,5 +430,6 @@ class SettingsRepository(context: Context) {
         private const val KEY_RECEIVE_STABLE_UPDATES = "receive_stable_updates"
         private const val KEY_RECEIVE_BETA_UPDATES = "receive_beta_updates"
         private const val KEY_ACTIVE_DOWNLOAD_ID = "active_download_id"
+        private const val KEY_LAST_ROOT_OTHER_BOOT_COUNT = "last_root_other_boot_count"
     }
 }

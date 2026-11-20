@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -819,6 +820,108 @@ class TwoTierIndexManagerTest {
             slowGate!!.complete(Unit)
             withTimeout(5_000L) { noOpJob!!.join() }
             assertEquals(0, noOpCallbacks.get())
+        }
+    }
+
+    @Test
+    fun `root stage3 verifies remaining slash partitions on reboot or manual sync while normal foreground skips them`() = runBlocking {
+        val dbFile = Files.createTempFile("pocket_mgr_stage3_", ".db").toFile().apply { deleteOnExit() }
+        val ctx = TestContext()
+        val settingsRepo = SettingsRepository(ctx)
+        settingsRepo.updateAccessMode(AccessMode.ROOT)
+        settingsRepo.setLastRootOtherSyncBootCount(10)
+        val provider = FakeProvider(AccessMode.ROOT)
+
+        var currentBoot = 10
+        var nowMs = 1_000L
+        val stattedDirs = mutableListOf<String>()
+        var systemPrivMtime = 1000L
+        var includeModuleOverlay = false
+
+        SqliteSearchDatabase(dbFile.absolutePath).use { db ->
+            db.upsertFileBatch(
+                listOf(
+                    FileUpsertEntry("/storage/emulated/0", "/storage/emulated", "0", "", 0L, 1000L, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/system", "/", "system", "", 0L, 1000L, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/system/priv-app", "/system", "priv-app", "", 0L, 1000L, true, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE),
+                    FileUpsertEntry("/system/priv-app/Base.apk", "/system/priv-app", "Base.apk", "apk", 500L, 1000L, false, AccessMode.ROOT, false, Tier2Status.NOT_APPLICABLE)
+                )
+            )
+            db.saveDirSnapshots(
+                mapOf("/storage/emulated/0" to 1000L, "/" to 1000L),
+                AccessMode.ROOT
+            )
+            settingsRepo.markFullScanCompleted(1000L)
+
+            provider.statDirsHandler = { dirs ->
+                stattedDirs.addAll(dirs)
+                buildMap {
+                    for (d in dirs) {
+                        when (d) {
+                            "/storage/emulated/0" -> put(d, 1000L)
+                            "/" -> put(d, 1000L)
+                            "/system" -> put(d, 1000L)
+                            "/system/priv-app" -> put(d, systemPrivMtime)
+                        }
+                    }
+                }
+            }
+            provider.listDirectHandler = { dirs, onDirListed, onBatch ->
+                if ("/system/priv-app" in dirs) {
+                    onDirListed("/system/priv-app")
+                    val rows = buildList {
+                        add(ScannedFileRecord("/system/priv-app/Base.apk", "/system/priv-app", "Base.apk", "apk", 500L, 1000L, false, AccessMode.ROOT))
+                        if (includeModuleOverlay) {
+                            add(ScannedFileRecord("/system/priv-app/OverlayMod.apk", "/system/priv-app", "OverlayMod.apk", "apk", 2048L, systemPrivMtime, false, AccessMode.ROOT))
+                        }
+                    }
+                    onBatch(rows)
+                    rows.size
+                } else 0
+            }
+
+            val mgr = TwoTierIndexManager(
+                context = ctx,
+                db = db,
+                settingsRepo = settingsRepo,
+                providerResolver = { provider },
+                storageRootsResolver = { listOf("/storage/emulated/0") },
+                clockMs = { nowMs },
+                bootCountProvider = { currentBoot }
+            )
+
+            // 1. Same boot session (bootCount == 10): foreground sync must NOT stat /system/priv-app
+            val fgJob = mgr.triggerForegroundSync(minIntervalMs = 0L)
+            assertNotNull(fgJob)
+            withTimeout(5_000L) { fgJob!!.join() }
+            assertFalse("Normal same-boot foreground sync should skip /system", "/system/priv-app" in stattedDirs)
+
+            // 2. Device reboots (bootCount 10 -> 11) and Root module injects OverlayMod.apk into /system/priv-app
+            stattedDirs.clear()
+            nowMs += 10_000L
+            currentBoot = 11
+            systemPrivMtime = 2000L
+            includeModuleOverlay = true
+
+            val postRebootJob = mgr.triggerForegroundSync(minIntervalMs = 0L)
+            assertNotNull(postRebootJob)
+            withTimeout(5_000L) { postRebootJob!!.join() }
+            assertTrue("Post-reboot sync must run Stage 3 on /system/priv-app", "/system/priv-app" in stattedDirs)
+            assertEquals(1, db.search("name:OverlayMod.apk").items.size)
+            assertEquals(11, settingsRepo.getLastRootOtherSyncBootCount())
+
+            // 3. Subsequent foreground sync on same boot 11 skips /system again
+            stattedDirs.clear()
+            nowMs += 10_000L
+            val fgAfterReboot = mgr.triggerForegroundSync(minIntervalMs = 0L)
+            assertNotNull(fgAfterReboot)
+            withTimeout(5_000L) { fgAfterReboot!!.join() }
+            assertFalse("After reboot baseline is recorded, foreground sync skips /system again", "/system/priv-app" in stattedDirs)
+
+            // 4. Explicit manual sync (includeRootOther = true) always runs Stage 3 even within same boot
+            stattedDirs.clear()
+            mgr.startQuickHotDirsRefresh(includeRootOther = true).join()
+            assertTrue("Manual quick sync must verify /system/priv-app in Stage 3", "/system/priv-app" in stattedDirs)
         }
     }
 }

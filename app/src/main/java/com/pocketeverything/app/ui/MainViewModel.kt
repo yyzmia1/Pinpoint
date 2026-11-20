@@ -585,7 +585,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             emitMessage("索引任务正在执行中（已扫描 ${indexProgress.value.tier1ScannedCount} 项）", jumpToSearch = true)
             return
         }
-        indexManager.startQuickHotDirsRefresh()
+        indexManager.startQuickHotDirsRefresh(includeRootOther = true)
         emitMessage("正在全范围增量校验目录变更…")
     }
 

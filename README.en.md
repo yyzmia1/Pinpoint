@@ -24,16 +24,19 @@ Desktop *Everything*-style query syntax · Sub-10 ms CJK substring retrieval ove
 
 ## Highlights
 
-- **Offline, Everything-Grade Local Search**: Indexes filenames, paths, and document text locally with zero network dependency; supports boolean logic, wildcards, regex, field qualifiers, and size/date filters.
-- **Millisecond Arbitrary CJK Substring Precision**: Pairs a custom CJK N-gram tokenizer with strict AST verification for 100% recall and zero false positives across single characters, cross-word fragments, and exact phrases.
+- **Offline, *Everything*-Grade Search**: Indexes filenames, paths, and document bodies fully offline; supports boolean operators, wildcards, regex, field qualifiers, size/date filters, and millisecond arbitrary CJK substring recall with zero false positives.
 - **Tiered Access (`Normal` / `Shizuku` / `Root`)**:
   - **Normal**: Standard storage traversal via `MANAGE_EXTERNAL_STORAGE`.
-  - **Shizuku**: Non-root penetration into `/Android/data` and `/Android/obb` with an interactive 3-step setup wizard.
-  - **Root**: Full `/` traversal with scoped `/data` controls, symlink safety, and bind-mount deduplication.
-- **Streaming Indexing & Automatic Incremental Sync**: Search opens immediately while scanning and refreshes automatically on foreground resume or system picker launch; background extraction handles `.txt`, `.md`, `.docx`, and `.pdf` safely without OOM.
-- **Storage Analyzer & Residue Cleaner**: Zero-rescan SQLite rollups powering an interactive treemap, MT-style file tree (size / count / time / name sorting + proportion bars), app attribution with uninstalled residue detection, and cross-permission safe deletion.
-- **Built-in Preview & System File Picker**: Preview text/code, PDFs, zoomable images, archives, and media in-app, or search and attach indexed files directly from Android's system file picker.
-- **Material You UI & Rate-Limit-Free Updates**: Adaptive Monet dynamic colors with AMOLED pure-black dark mode, plus static-manifest multi-mirror update checks and changelog viewing that avoid GitHub API `403` limits.
+  - **Shizuku**: Non-root penetration into `/Android/data` and `/Android/obb` with an interactive 3-step live wizard.
+  - **Root**: Full `/` traversal with scoped `/data` controls, symlink safety, virtual-FS exclusions, and bind-mount deduplication.
+- **Three-Stage Seamless Incremental Sync & Parallel `lstat`**:
+  - **Stage 1 (`< 1s` Hot Storage Sync)**: Verifies `/storage/...` user storage and top 1,000 recently modified docs immediately on foreground resume or system picker open;
+  - **Stage 2 (Background `/data` Sync)**: Seamlessly continues verifying `/data/...` in the background without blocking search or preview;
+  - **Stage 3 (Reboot / Manual `/` Verification)**: Automatically detects device reboots via `Settings.Global.BOOT_COUNT` (e.g., after installing Root modules or OTA updates) or manual incremental sync to verify remaining `/` partitions (`/system`, `/vendor`, `/mnt`, etc.), accelerated by 4-thread parallel `Os.lstat`.
+- **Storage Analyzer with Persistent SQLite Cache**: Persists directory, extension, and app attribution rollups into materialized SQLite `analyzer_*` tables for `< 10ms` cold opens and `< 2MB` constant JVM heap even on 400GB+ Root indexes; includes an interactive treemap, MT-style single-column tree (4-way asc/desc sort, folders-first, `..` parent row), mode-aware top shortcut pills (`/` leftmost + auto-detected module directory in Root mode), unified `/` mount tree, and uninstalled app residue detection.
+- **Cross-Permission Safe Deletion from Home & Analyzer**: Long-press any home search result or analyzer entry to permanently delete across Normal / Shizuku / Root without following symlinks (`DeletionSafetyGuard` enforced on both UI and Binder), with O(depth) real-time cache deduction.
+- **Built-in Preview & System File Picker**: In-app preview for text/code, PDFs, zoomable images, archives, and media, plus SAF & `ACTION_GET_CONTENT` picker integration for external apps.
+- **Material You UI, Rate-Limit-Free Updates & GPLv3**: Monet dynamic colors, AMOLED pure-black dark mode, clean bottom-consolidated Settings updater backed by static `release-manifest` mirrors, and GNU GPLv3 open-source license.
 
 ---
 
@@ -62,7 +65,8 @@ Desktop *Everything*-style query syntax · Sub-10 ms CJK substring retrieval ove
 ### Advanced Usage
 
 - **Query Syntax**: Supports desktop *Everything*-style boolean operators, wildcards, regex, field qualifiers, and size/date filters — see **[Query Syntax](#query-syntax)** below.
-- **Storage Analyzer & Cleanup**: Tap the pie-chart icon in the home top bar (or **Locate in Storage Tree** from any file detail dialog) to inspect folder treemaps, uncover uninstalled app residue, and safely delete files or exclude noisy folders from search.
+- **Home Quick Actions & Safe Deletion**: Long-press any home search result to preview, open externally, copy path, share, **locate in Storage Tree**, or perform guarded cross-permission **permanent deletion**.
+- **Storage Analyzer & Cleanup**: Tap the pie-chart icon in the home top bar to jump across mode-tailored shortcuts (`/` → `/data` → Module Dir → Internal Storage in Root mode), drill down treemaps, browse with MT-style 4-way sorting, uncover uninstalled app residue, and delete or exclude directories.
 - **System File Picker**: When attaching files from external apps, open the left navigation drawer of Android's system file picker and pick **Pinpoint** to search freshly synced files across directories.
 
 ---
@@ -79,12 +83,13 @@ Desktop *Everything*-style query syntax · Sub-10 ms CJK substring retrieval ove
 
 | Component | Implementation Details |
 | :--- | :--- |
+| **Materialized SQLite Storage Cache** | `WizTreeEngine` persists directory, extension, and app rollups into `analyzer_*` tables with `idx_files_size_desc`, enabling `< 10ms` cold opens and `< 2MB` constant JVM heap; deletions apply O(depth) ancestor deltas, and Root mode unifies `/data` and `/storage` under `/`. |
+| **3-Stage Sync & Parallel `lstat`** | `TwoTierIndexManager` pipelines Stage 1 (`/storage` hot sync `< 1s`), Stage 2 (background `/data`), and Stage 3 (post-reboot via `BOOT_COUNT` or manual `/` verification); `PrivilegedTreeWalker.statPaths` runs 4-thread parallel `Os.lstat` over 2,500-path IPC chunks. |
 | **IPC & Streaming Traversal** | `IPrivilegedFsService` AIDL + `ParcelFileDescriptor` pipe streaming via `suspend` `BinaryTreeStreamCodec.readStream`, avoiding Binder size caps and full-tree heap buffering. |
 | **Mount & Loop Safety** | `PrivilegedTreeWalker` reads raw filenames via `File.list()`, checks `Os.lstat` without following symlinks, and tracks `(st_dev, st_ino)` to eliminate duplicate bind/loop mounts. |
-| **Lock-Free Search UX** | `SqliteSearchDatabase` configures bundled SQLite in `WAL` mode with isolated `writeConn` / `query_only` `readConn`, ensuring background indexing never blocks typing. |
-| **Directory Pruning** | `pruneDirectorySubtree` executes an indexed B-tree prefix range query (`path >= ? AND path < ?`) rather than `LIKE`, preventing wildcard collisions on `_`/`%` folder names. |
-| **Body Compression** | Extracted text is compressed with Zlib (`Deflater` / `Inflater`) in `docs_raw` and decompressed on demand for contextual snippet highlighting. |
-| **Cross-Boundary Handoff & Picker** | `FileOpener` serves readable paths directly via `FileProvider` / read-only descriptors and bridges restricted paths through clean `preview_bridge` subdirectories to preserve filenames; `PinpointDocumentsProvider` (SAF) and `FilePickerActivity` (`ACTION_GET_CONTENT`) expose indexed search and browsing to external apps. |
+| **Lock-Free WAL Search UX** | `SqliteSearchDatabase` configures bundled SQLite in `WAL` mode with isolated `writeConn` / `query_only` `readConn`, ensuring background indexing and cache writes never block typing. |
+| **Directory Pruning & Compression** | `pruneDirectorySubtree` uses indexed B-tree prefix range queries (`path >= ? AND path < ?`) instead of `LIKE`; extracted text is Zlib-compressed in `docs_raw` and decompressed on demand. |
+| **Safe Deletion & System Picker** | `DeletionSafetyGuard` blocks critical system paths on both client and Binder service without following symlinks; `PinpointDocumentsProvider` (SAF) and `FilePickerActivity` expose indexed browsing to external apps. |
 
 ---
 
@@ -142,27 +147,33 @@ Implemented by recursive-descent `QuerySyntaxParser`:
 │   ├── ci.yml                               # Automatic unit tests, Lint & Debug APK on push/PR
 │   ├── release.yml                          # Signed Release & Debug APK publication on v* tags
 │   └── sync-release-manifest.yml            # Auto-syncs trimmed releases.json to release-manifest branch on release events
+├── docs/media/
+│   ├── pinpoint-demo.webp                   # Animated demo of core features
+│   └── architecture-{zh,en}-{light,dark}.svg # Light/dark adaptive vector architecture diagrams
 ├── gradle/libs.versions.toml                # Centralized version catalog
 ├── settings.gradle.kts                      # rootProject.name = "Pinpoint"
+├── LICENSE                                  # GNU GPLv3 license text
 ├── README.md                                # Simplified Chinese documentation
 ├── README.en.md                             # English documentation
 └── app/
     ├── src/main/
     │   ├── aidl/com/pocketeverything/app/ipc/IPrivilegedFsService.aidl
     │   ├── java/com/pocketeverything/app/
-    │   │   ├── analyzer/    # WizTreeEngine (SQLite GROUP BY + Treemap), AppStorageAttribution
-    │   │   ├── data/        # SettingsRepository, UpdateChecker (static manifest mirrors)
+    │   │   ├── analyzer/    # WizTreeEngine (SQLite materialized cache + Treemap + 4-way sort), AppStorageAttribution
+    │   │   ├── data/        # SettingsRepository (prefs & boot count), UpdateChecker (static manifest mirrors)
     │   │   ├── di/          # AppContainer
     │   │   ├── filter/      # FilterConfig, FilterEngine
-    │   │   ├── fs/          # PrivilegedTreeWalker, Root/Shizuku services, DeletionSafetyGuard, FileOpener
-    │   │   ├── indexer/     # TwoTierIndexManager, IncrementalSyncWorker, RealtimeMonitorService, BootReceiver
+    │   │   ├── fs/          # PrivilegedTreeWalker (parallel lstat), Root/Shizuku services, DeletionSafetyGuard, FileOpener
+    │   │   ├── indexer/     # TwoTierIndexManager (3-stage sync), IncrementalSyncWorker, RealtimeMonitorService, BootReceiver
     │   │   ├── parser/      # ExtractorDispatcher, TxtMdExtractor, DocxExtractor, PdfExtractor
     │   │   ├── picker/      # PinpointDocumentsProvider (SAF), MimeFilterHelper
     │   │   ├── search/      # QuerySyntaxParser, SearchQueryAst, CjkTokenizer, SqliteSearchDatabase, SnippetHighlighter
-    │   │   ├── ui/          # SearchScreen, StorageAnalyzerScreen, SettingsScreen, ShizukuGuideScreen, ReaderPreviewSheet
+    │   │   ├── ui/          # SearchScreen, StorageAnalyzerScreen, FileDetailDialog, SettingsScreen, ShizukuGuideScreen, ReaderPreviewSheet
     │   │   └── FilePickerActivity.kt # ACTION_GET_CONTENT picker UI (Pinpoint 选择)
     │   └── res/             # Adaptive monochrome launcher icons, strings, FileProvider paths
     └── src/test/java/com/pocketeverything/app/
+        ├── analyzer/WizTreeEngineTest.kt
+        ├── fs/DeletionSafetyGuardTest.kt
         ├── BinaryTreeStreamCodecTest.kt
         ├── CjkTokenizerTest.kt
         ├── DocumentExtractorTest.kt

@@ -1,6 +1,7 @@
 package com.pocketeverything.app.indexer
 
 import android.content.Context
+import android.provider.Settings
 import com.pocketeverything.app.data.SettingsRepository
 import com.pocketeverything.app.filter.FilterEngine
 import com.pocketeverything.app.fs.FileSystemProvider
@@ -66,7 +67,12 @@ class TwoTierIndexManager(
     private val providerResolver: (AccessMode) -> FileSystemProvider,
     private val extractorDispatcher: ExtractorDispatcher = ExtractorDispatcher(),
     private val storageRootsResolver: () -> List<String> = { StorageRootsHelper.getNormalStorageRoots(context) },
-    private val clockMs: () -> Long = { System.nanoTime() / 1_000_000L }
+    private val clockMs: () -> Long = { System.nanoTime() / 1_000_000L },
+    private val bootCountProvider: () -> Int = {
+        runCatching {
+            Settings.Global.getInt(context.contentResolver, Settings.Global.BOOT_COUNT, -1)
+        }.getOrDefault(-1)
+    }
 ) {
     private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
         if (throwable is CancellationException) return@CoroutineExceptionHandler
@@ -247,7 +253,10 @@ class TwoTierIndexManager(
         return summary
     }
 
-    fun startQuickHotDirsRefresh(silentIfUnavailable: Boolean = false): Job {
+    fun startQuickHotDirsRefresh(
+        silentIfUnavailable: Boolean = false,
+        includeRootOther: Boolean = false
+    ): Job {
         synchronized(triggerLock) {
             val active = tier1Job
             if (active?.isActive == true) {
@@ -255,7 +264,11 @@ class TwoTierIndexManager(
             }
             val hotSignal = CompletableDeferred<Unit>()
             tier1HotStageDone = hotSignal
-            val job = launchQuickSyncLocked(silentIfUnavailable, hotStageDone = hotSignal)
+            val job = launchQuickSyncLocked(
+                silentIfUnavailable = silentIfUnavailable,
+                hotStageDone = hotSignal,
+                includeRootOther = includeRootOther
+            )
             tier1Job = job
             return job
         }
@@ -394,7 +407,8 @@ class TwoTierIndexManager(
 
     private fun launchQuickSyncLocked(
         silentIfUnavailable: Boolean,
-        hotStageDone: CompletableDeferred<Unit>? = null
+        hotStageDone: CompletableDeferred<Unit>? = null,
+        includeRootOther: Boolean = false
     ): Job = scope.launch {
         var cancelled = false
         try {
@@ -529,81 +543,21 @@ class TwoTierIndexManager(
                         runCatching { db.markAnalyzerCacheDirty() }
                     }
 
-                    // Publish Stage 1 completion immediately so search & picker see fresh user files right away!
-                    if (includeData) {
-                        val s1Stats = db.getStats()
-                        val s1Note = if (stage1Mutated) {
-                            "用户区已同步（+${changedCount}/-${removedCount}，${formatDuration(stage1Elapsed)}），继续校验 /data…"
-                        } else {
-                            "用户区已同步（${formatDuration(stage1Elapsed)}），后台继续校验 /data…"
-                        }
-                        _progress.update { cur ->
-                            cur.copy(
-                                tier1Phase = Tier1Phase.QUICK_SYNC,
-                                tier1ScannedCount = changedCount,
-                                stats = s1Stats,
-                                tier2PendingCount = s1Stats.pendingDocs,
-                                syncGeneration = if (stage1Mutated) cur.syncGeneration + 1L else cur.syncGeneration,
-                                statusMessage = s1Note
-                            )
-                        }
-                        // Unblock foreground / SAF waiters right after Stage 1 (< 1s)!
-                        hotStageDone?.complete(Unit)
+                    // Detect device reboot (Settings.Global.BOOT_COUNT) to trigger Stage 3 `/` partition verification
+                    val currentBootCount = runCatching { bootCountProvider() }.getOrDefault(-1)
+                    val savedBootCount = settingsRepo.getLastRootOtherSyncBootCount()
+                    val rebootDetected = mode == AccessMode.ROOT &&
+                        currentBootCount >= 0 &&
+                        savedBootCount >= 0 &&
+                        currentBootCount != savedBootCount
+                    if (mode == AccessMode.ROOT && savedBootCount < 0 && currentBootCount >= 0 && !includeRootOther) {
+                        // Seed boot count baseline on first run after upgrading so the next reboot triggers Stage 3.
+                        settingsRepo.setLastRootOtherSyncBootCount(currentBootCount)
+                    }
+                    val runStage3 = mode == AccessMode.ROOT && (includeRootOther || rebootDetected)
 
-                        // ================= STAGE 2: Seamless Background /data Incremental Verification =================
-                        val stage2StartMs = System.currentTimeMillis()
-                        val dataRoots = listOf("/data")
-                        val dataRootSnapshots = db.getDirSnapshots(dataRoots)
-                        val dataTrackedDirs = LinkedHashMap<String, Long>(4096)
-                        for ((dirPath, savedMtime) in db.getTrackedDataDirectories()) {
-                            val name = dirPath.substringAfterLast('/')
-                            if (!filter.shouldSkipTier1Path(dirPath, name, isDir = true, mode = mode)) {
-                                dataTrackedDirs[dirPath] = savedMtime
-                            }
-                        }
-                        if (!filter.shouldSkipTier1Path("/data", "data", isDir = true, mode = mode)) {
-                            dataTrackedDirs["/data"] = dataRootSnapshots["/data"] ?: dataTrackedDirs["/data"] ?: -1L
-                        }
-
-                        val stage2Res = syncDirectorySubset(
-                            trackedDirs = dataTrackedDirs,
-                            snapshotRoots = dataRoots,
-                            rootSnapshots = dataRootSnapshots,
-                            mode = mode,
-                            includeData = true,
-                            filter = filter,
-                            provider = provider,
-                            progressPrefix = "后台校验 /data："
-                        )
-                        val stage2Mutated = stage2Res.changedCount > 0 || stage2Res.removedCount > 0
-                        changedCount += stage2Res.changedCount
-                        removedCount += stage2Res.removedCount
-                        if (stage2Mutated) {
-                            runCatching { db.markAnalyzerCacheDirty() }
-                        }
-
-                        val stage2Elapsed = (System.currentTimeMillis() - stage2StartMs).coerceAtLeast(1L)
-                        val totalElapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
-                        val totalChecked = stage1Res.checkedDirs + stage2Res.checkedDirs
-                        val updatedStats = db.getStats()
-                        val msg = if (changedCount == 0 && removedCount == 0) {
-                            "增量校验完成：${totalChecked} 目录均无变动（用户区 ${formatDuration(stage1Elapsed)} · /data ${formatDuration(stage2Elapsed)}）"
-                        } else {
-                            "增量同步完成：更新 $changedCount / 清理 $removedCount 项（用户区 ${formatDuration(stage1Elapsed)} · /data ${formatDuration(stage2Elapsed)}）"
-                        }
-                        finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = true)
-                        _progress.update { cur ->
-                            cur.copy(
-                                tier1Phase = Tier1Phase.IDLE,
-                                tier1ScannedCount = changedCount,
-                                lastScanDurationMs = totalElapsed,
-                                stats = updatedStats,
-                                tier2PendingCount = updatedStats.pendingDocs,
-                                syncGeneration = if (stage2Mutated) cur.syncGeneration + 1L else cur.syncGeneration,
-                                statusMessage = msg
-                            )
-                        }
-                    } else {
+                    val hasFollowUpStages = includeData || runStage3
+                    if (!hasFollowUpStages) {
                         val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
                         val updatedStats = db.getStats()
                         val msg = if (changedCount == 0 && removedCount == 0) {
@@ -624,6 +578,149 @@ class TwoTierIndexManager(
                             )
                         }
                         hotStageDone?.complete(Unit)
+                    } else {
+                        // Publish Stage 1 completion immediately so search & picker see fresh user files right away!
+                        val s1Stats = db.getStats()
+                        val nextStageHint = when {
+                            includeData -> "后台继续校验 /data…"
+                            rebootDetected -> "检测到设备刚重启，后台校验 / 其余分区…"
+                            else -> "后台继续校验 / 其余分区…"
+                        }
+                        val s1Note = if (stage1Mutated) {
+                            "用户区已同步（+${changedCount}/-${removedCount}，${formatDuration(stage1Elapsed)}），$nextStageHint"
+                        } else {
+                            "用户区已同步（${formatDuration(stage1Elapsed)}），$nextStageHint"
+                        }
+                        _progress.update { cur ->
+                            cur.copy(
+                                tier1Phase = Tier1Phase.QUICK_SYNC,
+                                tier1ScannedCount = changedCount,
+                                stats = s1Stats,
+                                tier2PendingCount = s1Stats.pendingDocs,
+                                syncGeneration = if (stage1Mutated) cur.syncGeneration + 1L else cur.syncGeneration,
+                                statusMessage = s1Note
+                            )
+                        }
+                        // Unblock foreground / SAF waiters right after Stage 1 (< 1s)!
+                        hotStageDone?.complete(Unit)
+
+                        var totalChecked = stage1Res.checkedDirs
+                        var tailMutated = false
+                        val timingParts = ArrayList<String>(3)
+                        timingParts.add("用户区 ${formatDuration(stage1Elapsed)}")
+
+                        // ================= STAGE 2: Seamless Background /data Incremental Verification =================
+                        if (includeData) {
+                            val stage2StartMs = System.currentTimeMillis()
+                            val dataRoots = listOf("/data")
+                            val dataRootSnapshots = db.getDirSnapshots(dataRoots)
+                            val dataTrackedDirs = LinkedHashMap<String, Long>(4096)
+                            for ((dirPath, savedMtime) in db.getTrackedDataDirectories()) {
+                                val name = dirPath.substringAfterLast('/')
+                                if (!filter.shouldSkipTier1Path(dirPath, name, isDir = true, mode = mode)) {
+                                    dataTrackedDirs[dirPath] = savedMtime
+                                }
+                            }
+                            if (!filter.shouldSkipTier1Path("/data", "data", isDir = true, mode = mode)) {
+                                dataTrackedDirs["/data"] = dataRootSnapshots["/data"] ?: dataTrackedDirs["/data"] ?: -1L
+                            }
+
+                            val stage2Res = syncDirectorySubset(
+                                trackedDirs = dataTrackedDirs,
+                                snapshotRoots = dataRoots,
+                                rootSnapshots = dataRootSnapshots,
+                                mode = mode,
+                                includeData = true,
+                                filter = filter,
+                                provider = provider,
+                                progressPrefix = "后台校验 /data："
+                            )
+                            val stage2Mutated = stage2Res.changedCount > 0 || stage2Res.removedCount > 0
+                            changedCount += stage2Res.changedCount
+                            removedCount += stage2Res.removedCount
+                            totalChecked += stage2Res.checkedDirs
+                            if (stage2Mutated) {
+                                tailMutated = true
+                                runCatching { db.markAnalyzerCacheDirty() }
+                            }
+                            val stage2Elapsed = (System.currentTimeMillis() - stage2StartMs).coerceAtLeast(1L)
+                            timingParts.add("/data ${formatDuration(stage2Elapsed)}")
+
+                            if (runStage3) {
+                                val s2Stats = db.getStats()
+                                val s3TriggerNote = if (rebootDetected) "检测到设备重启，继续校验 / 其余分区…" else "继续校验 / 其余分区…"
+                                _progress.update { cur ->
+                                    cur.copy(
+                                        tier1Phase = Tier1Phase.QUICK_SYNC,
+                                        tier1ScannedCount = changedCount,
+                                        stats = s2Stats,
+                                        tier2PendingCount = s2Stats.pendingDocs,
+                                        syncGeneration = if (stage2Mutated) cur.syncGeneration + 1L else cur.syncGeneration,
+                                        statusMessage = "用户区与 /data 已同步，$s3TriggerNote"
+                                    )
+                                }
+                            }
+                        }
+
+                        // ================= STAGE 3: Boot / Manual Root Remaining `/` Partitions Verification =================
+                        if (runStage3) {
+                            val stage3StartMs = System.currentTimeMillis()
+                            val slashRoots = listOf("/")
+                            val slashRootSnapshots = db.getDirSnapshots(slashRoots)
+                            val otherTrackedDirs = LinkedHashMap<String, Long>(2048)
+                            for ((dirPath, savedMtime) in db.getTrackedRootOtherDirectories()) {
+                                val name = if (dirPath == "/") "/" else dirPath.substringAfterLast('/')
+                                if (dirPath == "/" || !filter.shouldSkipTier1Path(dirPath, name, isDir = true, mode = mode)) {
+                                    otherTrackedDirs[dirPath] = savedMtime
+                                }
+                            }
+                            otherTrackedDirs["/"] = slashRootSnapshots["/"] ?: otherTrackedDirs["/"] ?: -1L
+
+                            val stage3Res = syncDirectorySubset(
+                                trackedDirs = otherTrackedDirs,
+                                snapshotRoots = slashRoots,
+                                rootSnapshots = slashRootSnapshots,
+                                mode = mode,
+                                includeData = includeData,
+                                filter = filter,
+                                provider = provider,
+                                progressPrefix = "校验 / 其余分区："
+                            )
+                            val stage3Mutated = stage3Res.changedCount > 0 || stage3Res.removedCount > 0
+                            changedCount += stage3Res.changedCount
+                            removedCount += stage3Res.removedCount
+                            totalChecked += stage3Res.checkedDirs
+                            if (stage3Mutated) {
+                                tailMutated = true
+                                runCatching { db.markAnalyzerCacheDirty() }
+                            }
+                            if (currentBootCount >= 0) {
+                                settingsRepo.setLastRootOtherSyncBootCount(currentBootCount)
+                            }
+                            val stage3Elapsed = (System.currentTimeMillis() - stage3StartMs).coerceAtLeast(1L)
+                            timingParts.add("/ 其余 ${formatDuration(stage3Elapsed)}")
+                        }
+
+                        val totalElapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
+                        val updatedStats = db.getStats()
+                        val timingSummary = timingParts.joinToString(" · ")
+                        val msg = if (changedCount == 0 && removedCount == 0) {
+                            "增量校验完成：${totalChecked} 目录均无变动（$timingSummary）"
+                        } else {
+                            "增量同步完成：更新 $changedCount / 清理 $removedCount 项（$timingSummary）"
+                        }
+                        finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = true)
+                        _progress.update { cur ->
+                            cur.copy(
+                                tier1Phase = Tier1Phase.IDLE,
+                                tier1ScannedCount = changedCount,
+                                lastScanDurationMs = totalElapsed,
+                                stats = updatedStats,
+                                tier2PendingCount = updatedStats.pendingDocs,
+                                syncGeneration = if (tailMutated) cur.syncGeneration + 1L else cur.syncGeneration,
+                                statusMessage = msg
+                            )
+                        }
                     }
                     ensureTier2Running()
                 } catch (ce: CancellationException) {
@@ -765,11 +862,19 @@ class TwoTierIndexManager(
             }
 
             val rootPaths = storageRootsResolver().let { base ->
-                if (filter.isDataPotentiallyIndexed(mode)) (base + "/data").distinct() else base
+                val withData = if (filter.isDataPotentiallyIndexed(mode)) base + "/data" else base
+                val withSlash = if (mode == AccessMode.ROOT) withData + "/" else withData
+                withSlash.distinct()
             }
             runCatching {
                 val snaps = provider.statDirectories(rootPaths)
                 db.saveDirSnapshots(snaps, mode)
+            }
+            if (mode == AccessMode.ROOT) {
+                val bootCount = runCatching { bootCountProvider() }.getOrDefault(-1)
+                if (bootCount >= 0) {
+                    settingsRepo.setLastRootOtherSyncBootCount(bootCount)
+                }
             }
             settingsRepo.markFullScanCompleted()
 
@@ -1062,6 +1167,9 @@ class TwoTierIndexManager(
             ) {
                 return false
             }
+            return true
+        }
+        if (mode == AccessMode.ROOT && dir.startsWith("/") && dir != "/" && "/" in rootSet && liveDirMtimes["/"] != null) {
             return true
         }
         return false

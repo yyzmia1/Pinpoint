@@ -737,6 +737,32 @@ class SqliteSearchDatabase(
         }
     }
 
+    /**
+     * Phase 3 Root-mode remaining `/` partition directories (e.g. `/system`, `/vendor`, `/product`, `/mnt`, `/cache`),
+     * excluding `/storage/...` and `/data/...` which are already handled in Phase 1 & Phase 2.
+     */
+    fun getTrackedRootOtherDirectories(): Map<String, Long> {
+        return readLock.withLock {
+            val out = HashMap<String, Long>(2048)
+            readConn.prepare(
+                """
+                SELECT path, mtime
+                FROM files_meta
+                WHERE is_dir = 1
+                  AND path != '/storage'
+                  AND NOT (path >= '/storage/' AND path < '/storage0')
+                  AND path != '/data'
+                  AND NOT (path >= '/data/' AND path < '/data0')
+                """.trimIndent()
+            ).use { stmt ->
+                while (stmt.step()) {
+                    out[stmt.getText(0)] = stmt.getLong(1)
+                }
+            }
+            out
+        }
+    }
+
     fun getTrackedDocFiles(limit: Int = 15000): List<PendingTier2Task> =
         getRecentTrackedDocFiles(sinceMtimeMs = 0L, limit = limit)
 
