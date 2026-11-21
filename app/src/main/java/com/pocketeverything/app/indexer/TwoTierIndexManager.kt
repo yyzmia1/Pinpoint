@@ -185,7 +185,7 @@ class TwoTierIndexManager(
             }.getOrDefault(false)
 
             if (completedInTime) {
-                if (onChanged != null && targetJob.isActive) {
+                if (onChanged != null && targetJob.isActive && _progress.value.tier1Phase != Tier1Phase.IDLE) {
                     val genAfterHot = _progress.value.syncGeneration
                     targetJob.invokeOnCompletion { cause ->
                         if (cause == null && _progress.value.syncGeneration != genAfterHot) {
@@ -575,7 +575,6 @@ class TwoTierIndexManager(
                         } else {
                             "增量同步完成：更新 $changedCount / 清理 $removedCount 项 (${formatDuration(elapsed)})"
                         }
-                        finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = true)
                         _progress.update { cur ->
                             cur.copy(
                                 tier1Phase = Tier1Phase.IDLE,
@@ -587,6 +586,7 @@ class TwoTierIndexManager(
                                 statusMessage = msg
                             )
                         }
+                        finishTier1JobIfMatching(currentCoroutineContext()[Job], recordCooldown = true)
                         hotStageDone?.complete(Unit)
                     } else {
                         // Publish Stage 1 completion immediately so search & picker see fresh user files right away!
