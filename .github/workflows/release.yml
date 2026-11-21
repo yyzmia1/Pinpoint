@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+      - '!v*-dev.*'
   workflow_dispatch:
     inputs:
       tag:
@@ -116,11 +117,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG_NAME="${{ steps.pkg.outputs.tag_name }}"
+          PRERELEASE_FLAG=""
+          if [[ "$TAG_NAME" == *-alpha* || "$TAG_NAME" == *-beta* || "$TAG_NAME" == *-rc* || "$TAG_NAME" == *-dev* ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
             gh release upload "$TAG_NAME" dist/*.apk --clobber
           else
             gh release create "$TAG_NAME" dist/*.apk \
               --title "Pinpoint ${TAG_NAME}" \
+              ${PRERELEASE_FLAG} \
               --generate-notes
           fi
 

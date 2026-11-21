@@ -1,4 +1,4 @@
-name: Android CI
+name: Android CI (Auto Pre-release)
 
 on:
   push:
@@ -7,23 +7,27 @@ on:
     paths-ignore:
       - '**.md'
       - '.gitignore'
+      - 'LICENSE'
+      - 'docs/**'
   pull_request:
     branches:
       - main
     paths-ignore:
       - '**.md'
       - '.gitignore'
+      - 'LICENSE'
+      - 'docs/**'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  check-and-debug-apk:
+  verify-and-prerelease:
     runs-on: ubuntu-latest
 
     steps:
@@ -31,6 +35,30 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Compute pre-release version from latest stable tag
+        id: ver
+        run: |
+          LATEST_STABLE="$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+          if [ -z "$LATEST_STABLE" ]; then
+            BASE_VER="0.1.0"
+            AHEAD="$(git rev-list --count HEAD)"
+          else
+            RAW="${LATEST_STABLE#v}"
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$RAW"
+            NEXT_PATCH=$((PATCH + 1))
+            BASE_VER="${MAJOR}.${MINOR}.${NEXT_PATCH}"
+            AHEAD="$(git rev-list --count "${LATEST_STABLE}..HEAD")"
+          fi
+          if [ "${AHEAD}" -le 0 ]; then
+            AHEAD=1
+          fi
+          VERSION_NAME="${BASE_VER}-dev.${AHEAD}"
+          TAG_NAME="v${VERSION_NAME}"
+          echo "latest_stable=${LATEST_STABLE}" >> "$GITHUB_OUTPUT"
+          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Computed pre-release: ${TAG_NAME} (base ${LATEST_STABLE:-none}, ahead ${AHEAD})"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v6
@@ -41,26 +69,91 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Run unit tests, Lint, and assemble Debug APK
+      - name: Decode release keystore (push to main / manual)
+        id: keystore
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "${RELEASE_KEYSTORE_BASE64:-}" ]; then
+            echo "has_keystore=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::RELEASE_KEYSTORE_BASE64 is not set; skipping signed pre-release publish."
+            exit 0
+          fi
+          mkdir -p app/keystore
+          printf '%s' "$RELEASE_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > app/keystore/pocket-release.jks
+          echo "has_keystore=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run unit tests, Lint, and assemble APKs
+        env:
+          PINPOINT_VERSION_NAME: ${{ steps.ver.outputs.version_name }}
+          POCKET_KEYSTORE_PASS: ${{ secrets.POCKET_KEYSTORE_PASS }}
+          POCKET_KEY_ALIAS: ${{ secrets.POCKET_KEY_ALIAS }}
+          POCKET_KEY_PASS: ${{ secrets.POCKET_KEY_PASS }}
         run: |
           chmod +x gradlew
-          ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --console=plain
+          if [ "${{ steps.keystore.outputs.has_keystore }}" = "true" ]; then
+            ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease --console=plain
+          else
+            ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --console=plain
+          fi
 
-      - name: Stage Debug APK artifact
-        id: pkg
+      - name: Verify APK signatures
+        if: ${{ steps.keystore.outputs.has_keystore == 'true' }}
         run: |
-          VERSION_NAME="$(git describe --tags --match 'v*' --always | sed 's/^v//')"
-          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          REL_APK="app/build/outputs/apk/release/app-release.apk"
+          DBG_APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$REL_APK"
+          "$BUILD_TOOLS/aapt2" dump badging "$REL_APK" | grep -E "^package:|^application-label:"
+          "$BUILD_TOOLS/apksigner" verify "$REL_APK"
+          "$BUILD_TOOLS/apksigner" verify "$DBG_APK"
+
+      - name: Stage APK artifacts
+        run: |
+          VER="${{ steps.ver.outputs.version_name }}"
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk "dist/Pinpoint-${VERSION_NAME}-debug.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/Pinpoint-${VER}-debug.apk"
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            cp app/build/outputs/apk/release/app-release.apk "dist/Pinpoint-${VER}-release.apk"
+          fi
           ls -lh dist
 
-      - name: Upload Debug APK artifact
+      - name: Upload workflow APK artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: pinpoint-ci-debug-${{ steps.pkg.outputs.version_name }}
+          name: pinpoint-ci-${{ steps.ver.outputs.version_name }}
           path: dist/*.apk
           retention-days: 14
+
+      - name: Publish GitHub Pre-release (测试版)
+        if: ${{ github.event_name != 'pull_request' && steps.keystore.outputs.has_keystore == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${{ steps.ver.outputs.tag_name }}"
+          LATEST_STABLE="${{ steps.ver.outputs.latest_stable }}"
+          COMMIT_MSG="$(git log -1 --pretty=%s)"
+          NOTES_ARGS=(--notes "自动构建测试版 (${TAG_NAME})：${COMMIT_MSG}")
+          if [ -n "$LATEST_STABLE" ]; then
+            NOTES_ARGS=(--generate-notes --notes-start-tag "$LATEST_STABLE")
+          fi
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" dist/*.apk --clobber
+          else
+            gh release create "$TAG_NAME" dist/*.apk \
+              --target "${{ github.sha }}" \
+              --title "Pinpoint ${TAG_NAME} (测试版)" \
+              --prerelease \
+              "${NOTES_ARGS[@]}"
+          fi
+
+          # Keep at most the latest 3 *-dev.* pre-releases to keep Releases tidy
+          OLD_DEV_TAGS="$(gh release list --limit 30 --json tagName,isPrerelease --jq '[.[] | select(.isPrerelease == true and (.tagName | test("-dev\\.[0-9]+$")))][3:] | .[].tagName')"
+          for old_tag in $OLD_DEV_TAGS; do
+            echo "Pruning old dev pre-release: $old_tag"
+            gh release delete "$old_tag" --yes --cleanup-tag || true
+          done
 
       - name: Upload Lint report on failure or completion
         if: always()
@@ -70,3 +163,7 @@ jobs:
           path: app/build/reports/lint-results-debug.html
           retention-days: 7
           if-no-files-found: ignore
+
+      - name: Clean up decoded keystore
+        if: always()
+        run: rm -f app/keystore/pocket-release.jks
