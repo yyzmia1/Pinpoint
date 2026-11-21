@@ -777,7 +777,7 @@ class TwoTierIndexManagerTest {
             val fastCallbacks = AtomicInteger(0)
             val fastJob = mgr.triggerForegroundSync(
                 minIntervalMs = 2_500L,
-                maxWaitMs = 1_200L,
+                maxWaitMs = 5_000L,
                 onChanged = { fastCallbacks.incrementAndGet() }
             )
             assertNotNull(fastJob)
